@@ -10,6 +10,45 @@
 import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
 import { autoWakeReachable, presenceLastSeen, wakeableState } from "@agentparty/shared";
 
+/**
+ * 引导开始时的**服务端量**快照。判据一律拿服务端量比服务端量（seq / last_seen / verified_at），
+ * 绝不拿浏览器 Date.now() 去比服务端时钟盖的时间戳——两边时钟差几秒，② 就会永远不打勾（浏览器快）
+ * 或让陈旧行冒充新活动（浏览器慢）。浏览器时钟只用于显示相对时间（relativeAge 已 clamp 负值）。
+ */
+export interface JoinBaseline {
+  /** true = 该身份本来就有历史（recover），只认严格更新的活动；false = 刚铸出来的新身份，它的任何一条消息都算。 */
+  strict: boolean;
+  /** 打开时频道已知的最大 seq。strict 且为 null ⇒ 历史还没加载出来，先不认消息证据。 */
+  seq: number | null;
+  /** 打开时该身份 presence 的 last_seen（服务端时钟）。 */
+  seen: number | null;
+  /** 打开时该身份的 wake.verified_at（服务端时钟）。 */
+  verifiedAt: number | null;
+}
+
+/** 打开引导（或从「继续接入」回到引导）时拍一张服务端量的快照。 */
+export function joinBaseline(
+  messages: readonly MsgFrame[],
+  presence: readonly PresenceEntry[],
+  name: string,
+  strict: boolean,
+): JoinBaseline {
+  const entry = presenceOf(presence, name);
+  const known = maxSeq(messages);
+  return {
+    strict,
+    seq: known === 0 ? null : known,
+    seen: entry === null ? null : presenceLastSeen(entry),
+    verifiedAt: typeof entry?.wake?.verified_at === "number" ? entry.wake.verified_at : null,
+  };
+}
+
+/** 这条消息是否算「引导开始之后的新活动」——比 seq（服务端单调），不比时间。 */
+function afterBaseline(seq: number, baseline: JoinBaseline): boolean {
+  if (!baseline.strict) return true;
+  return baseline.seq !== null && seq > baseline.seq;
+}
+
 export interface CheckinEvidence {
   /** 报到消息的 seq；只有 presence 证据、没看到消息时为 null。 */
   seq: number | null;
@@ -29,22 +68,24 @@ export function checkinEvidence(
   messages: readonly MsgFrame[],
   presence: readonly PresenceEntry[],
   name: string,
-  sinceTs: number,
+  baseline: JoinBaseline,
 ): CheckinEvidence | null {
   let best: CheckinEvidence | null = null;
   for (const m of messages) {
-    if (m.sender.name !== name || m.ts < sinceTs) continue;
+    if (m.sender.name !== name || !afterBaseline(m.seq, baseline)) continue;
     if (best === null || (best.seq !== null && m.seq < best.seq)) best = { seq: m.seq, ts: m.ts };
   }
   if (best !== null) return best;
   const entry = presenceOf(presence, name);
   if (entry === null) return null;
   const seen = presenceLastSeen(entry);
-  // live=true 是服务端当场判定的活连接，免检；其余在线态（away/busy 之类的陈旧行）必须晚于引导开始，
-  // 否则 recover 形态下一条很旧的 away 行会让 ② 立刻打勾、让人以为重连成功了（coderabbit on #1006）。
-  if (entry.live === true) return { seq: null, ts: seen ?? sinceTs };
-  if (seen !== null && seen >= sinceTs) return { seq: null, ts: seen };
-  return null;
+  // live=true 是服务端当场判定的活连接（不含任何时间比较），直接算数。
+  if (entry.live === true) return { seq: null, ts: seen ?? entry.ts };
+  // 其余在线/离线态只看 last_seen 是否比**打开时那一刻的 last_seen** 更新——服务端量对服务端量，
+  // 不受浏览器时钟影响；recover 下那条陈旧 away 行的 last_seen 不会变，所以不会冒充重连成功。
+  if (seen === null) return null;
+  if (!baseline.strict) return { seq: null, ts: seen };
+  return baseline.seen === null || seen > baseline.seen ? { seq: null, ts: seen } : null;
 }
 
 export interface WakeableEvidence {
@@ -142,6 +183,26 @@ export function verifyTimeoutTier(
   if (entry.listening === "deaf" || entry.listening === "suspect") return "not_listening";
   const live = entry.live === true || entry.state !== "offline";
   return live ? "no_reply" : "not_listening";
+}
+
+/**
+ * ④ 的另一条通路：agent 自己跑 `party wake verify`（#996 的 `[wake-verify]` 帧对），
+ * 或服务端亲自盖过新的 wake.verified_at。同样只比服务端量：verified_at 与打开时的快照比，
+ * 帧对按 seq 过基线。
+ */
+export function selfVerifiedEvidence(
+  messages: readonly MsgFrame[],
+  presence: readonly PresenceEntry[],
+  name: string,
+  baseline: JoinBaseline,
+  verifyPrefix: string,
+): boolean {
+  const entry = presenceOf(presence, name);
+  const verifiedAt = entry?.wake?.verified_at;
+  if (typeof verifiedAt === "number" && (baseline.verifiedAt === null || verifiedAt > baseline.verifiedAt)) return true;
+  const frames = messages.filter((m) => m.sender.name === name && afterBaseline(m.seq, baseline));
+  const probes = new Set(frames.filter((m) => m.body.startsWith(verifyPrefix)).map((m) => m.seq));
+  return frames.some((m) => m.reply_to !== null && probes.has(m.reply_to));
 }
 
 export type StepId = 1 | 2 | 3 | 4;

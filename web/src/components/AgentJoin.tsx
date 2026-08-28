@@ -30,6 +30,9 @@ import {
 } from "../lib/joinPack";
 import {
   checkinEvidence,
+  joinBaseline,
+  selfVerifiedEvidence,
+  type JoinBaseline,
   findProbeSeq,
   maxSeq,
   replyEvidence,
@@ -118,8 +121,10 @@ interface StepperSession {
   token: string | null;
   /** 第 ② 步的命令：interactive/unattended 含 token（token 丢了就 null）；recover 恒为 party recover <chan>。 */
   command: string | null;
-  /** 引导开始时刻：只认这之后的报到/活动（铸出来没接入过的身份也可能留 offline 旧行）。 */
+  /** 引导开始时刻（浏览器时钟）：**只用于显示相对时间**，绝不参与判据。 */
   sinceTs: number;
+  /** 引导开始时的服务端量快照（seq / last_seen / verified_at）——判据只比它，不碰浏览器时钟。 */
+  baseline: JoinBaseline;
 }
 
 type Phase =
@@ -263,6 +268,8 @@ export function AgentJoin({
   const [lastSession, setLastSession] = useState<StepperSession | null>(null);
   // 每个身份的引导开始时刻：关掉再打开（含 recover 重开）沿用同一基线，报到证据不会因重开而丢。
   const startedAtRef = useRef(new Map<string, number>());
+  /** 每个身份的服务端量基线：关掉再打开、或从「继续接入」回来都沿用同一张，别把中途的活动算没发生。 */
+  const baselineRef = useRef(new Map<string, JoinBaseline>());
   const composeDialogRef = useRef<HTMLDivElement | null>(null);
   const stepperDialogRef = useRef<HTMLDivElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
@@ -303,6 +310,7 @@ export function AgentJoin({
   const openStepper = useCallback(
     (session: StepperSession) => {
       startedAtRef.current.set(session.name, session.sinceTs);
+      baselineRef.current.set(session.name, session.baseline);
       setCopiedKey(null);
       setCopyErr(false);
       setRotateState("idle");
@@ -323,8 +331,11 @@ export function AgentJoin({
     if (recoverName === null) return;
     if (phase.kind === "stepper" && phase.session.name === recoverName && phase.session.recover) return;
     const sinceTs = startedAtRef.current.get(recoverName) ?? nowFn();
+    // recover：这个身份本来就有历史，只认「比打开这一刻更新」的活动（strict）。
+    const baseline = baselineRef.current.get(recoverName) ?? joinBaseline(messages, presence, recoverName, true);
     openStepper({
       name: recoverName,
+      baseline,
       mode: "interactive",
       harness: guessJoinPackHarness(recoverName),
       runner: DEFAULT_JOIN_RUNNER,
@@ -423,7 +434,18 @@ export function AgentJoin({
         savedAt: sinceTs,
       });
       setLastSession(null);
-      openStepper({ name: agent.name, mode, harness, runner, recover: false, token: agent.token, command, sinceTs });
+      // 刚铸出来的新身份没有历史，它的任何一条消息都算报到（strict=false）。
+      openStepper({
+        name: agent.name,
+        mode,
+        harness,
+        runner,
+        recover: false,
+        token: agent.token,
+        command,
+        sinceTs,
+        baseline: joinBaseline(messages, presence, agent.name, false),
+      });
     } catch (err) {
       // 同名占用 → 停在起名步，让用户换个有意义的名字（不静默塞随机后缀）
       if (err instanceof ConflictError) {
@@ -523,13 +545,17 @@ export function AgentJoin({
 
   const resume = useCallback(() => {
     if (lastSession === null) return;
-    openStepper({ ...lastSession, sinceTs: startedAtRef.current.get(lastSession.name) ?? lastSession.sinceTs });
+    openStepper({
+      ...lastSession,
+      sinceTs: startedAtRef.current.get(lastSession.name) ?? lastSession.sinceTs,
+      baseline: baselineRef.current.get(lastSession.name) ?? lastSession.baseline,
+    });
   }, [lastSession, openStepper]);
 
   // ---- 四步判据（全部来自 presence / 历史）----
   const session = phase.kind === "stepper" ? phase.session : null;
   const checkin = useMemo(
-    () => (session === null ? null : checkinEvidence(messages, presence, session.name, session.sinceTs)),
+    () => (session === null ? null : checkinEvidence(messages, presence, session.name, session.baseline)),
     [messages, presence, session],
   );
   const wakeable = useMemo(
@@ -544,15 +570,10 @@ export function AgentJoin({
   // agent 自己跑 `party wake verify`（#996 的验证帧形态）：它以自己身份发 `[wake-verify] @自己`，
   // 再回一条 reply_to 指向它——这一对出现在历史里同样算 ④ 过；presence.wake.verified_at 由 DO 盖
   // （只认服务端观测到的成功唤醒），晚于引导开始也算。
-  const selfVerified = useMemo(() => {
-    if (session === null) return false;
-    const entry = presence.find((p) => p.name === session.name);
-    const verifiedAt = entry?.wake?.verified_at;
-    if (typeof verifiedAt === "number" && verifiedAt >= session.sinceTs) return true;
-    const frames = messages.filter((m) => m.sender.name === session.name && m.ts >= session.sinceTs);
-    const probes = new Set(frames.filter((m) => m.body.startsWith(WAKE_VERIFY_PREFIX)).map((m) => m.seq));
-    return frames.some((m) => m.reply_to !== null && probes.has(m.reply_to));
-  }, [messages, presence, session]);
+  const selfVerified = useMemo(
+    () => (session === null ? false : selfVerifiedEvidence(messages, presence, session.name, session.baseline, WAKE_VERIFY_PREFIX)),
+    [messages, presence, session],
+  );
   const verified = reply !== null || selfVerified;
   const probeTimedOut = probe !== null && reply === null && now - probe.sentAt >= verifyTimeoutMs;
   const timeoutTier = useMemo(

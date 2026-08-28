@@ -4,6 +4,8 @@ import { describe, expect, test } from "bun:test";
 import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
 import {
   checkinEvidence,
+  joinBaseline,
+  selfVerifiedEvidence,
   findProbeSeq,
   maxSeq,
   replyEvidence,
@@ -43,33 +45,93 @@ function presence(over: Partial<PresenceEntry> = {}): PresenceEntry {
 }
 
 describe("② 报到证据（#1005）", () => {
-  test("引导开始之后该身份发过消息 ⇒ 报到，带 seq 与时间", () => {
-    const ev = checkinEvidence([msg({ seq: 88, ts: NOW })], [], NAME, NOW - 1000);
-    expect(ev).toEqual({ seq: 88, ts: NOW });
+  // 判据只比服务端量（seq / last_seen）——绝不拿浏览器 Date.now() 去比服务端时钟盖的 ts。
+  const fresh = { strict: false, seq: null, seen: null, verifiedAt: null };
+  const strict = { strict: true, seq: 100, seen: NOW - 600_000, verifiedAt: null };
+
+  test("新铸身份：它发的任何一条消息都算报到，带 seq 与时间", () => {
+    expect(checkinEvidence([msg({ seq: 88, ts: NOW })], [], NAME, fresh)).toEqual({ seq: 88, ts: NOW });
   });
 
-  test("只有引导开始之前的旧消息 ⇒ 不算报到（铸了 token 但没接入过）", () => {
-    expect(checkinEvidence([msg({ seq: 12, ts: NOW - 60_000 })], [], NAME, NOW - 1000)).toBeNull();
+  test("recover：只有基线 seq 之前的旧消息 ⇒ 不算（那是它上次在的时候发的）", () => {
+    expect(checkinEvidence([msg({ seq: 12, ts: NOW - 60_000 })], [], NAME, strict)).toBeNull();
+  });
+
+  test("recover：基线之后的新消息 ⇒ 算报到", () => {
+    expect(checkinEvidence([msg({ seq: 101, ts: NOW })], [], NAME, strict)).toEqual({ seq: 101, ts: NOW });
   });
 
   test("别人的消息不算它报到", () => {
     const other = msg({ seq: 90, ts: NOW, sender: { name: "leo", kind: "human" } as MsgFrame["sender"] });
-    expect(checkinEvidence([other], [], NAME, NOW - 1000)).toBeNull();
+    expect(checkinEvidence([other], [], NAME, fresh)).toBeNull();
   });
 
-  test("没看到消息但 presence 里在线 ⇒ 认报到，seq 为 null", () => {
-    const ev = checkinEvidence([], [presence()], NAME, NOW - 1000);
-    expect(ev).toEqual({ seq: null, ts: NOW });
+  test("没看到消息但 presence live=true ⇒ 认报到（服务端当场判定的活连接，不含时间比较）", () => {
+    expect(checkinEvidence([], [presence()], NAME, fresh)).toEqual({ seq: null, ts: NOW });
   });
 
-  test("陈旧的非 offline 行（away，last_seen 很旧）⇒ 不算——recover 时它会假装重连成功", () => {
+  test("recover：陈旧 away 行的 last_seen 没变 ⇒ 不算，别冒充重连成功", () => {
+    const stale = presence({ state: "away", live: false, last_seen: strict.seen!, ts: strict.seen! });
+    expect(checkinEvidence([], [stale as PresenceEntry], NAME, strict)).toBeNull();
+  });
+
+  test("recover：last_seen 比基线更新 ⇒ 算报到", () => {
+    const moved = presence({ state: "away", live: false, last_seen: NOW, ts: NOW });
+    expect(checkinEvidence([], [moved as PresenceEntry], NAME, strict)).toEqual({ seq: null, ts: NOW });
+  });
+
+  // 跨时钟回归（codex stop-time review on #1006）：浏览器时钟和服务端时钟不同步时，判据不许受影响。
+  test("浏览器时钟比服务端快 10 分钟：报到照样认得出（判据里没有浏览器时钟）", () => {
+    // 服务端盖的 ts 全部「看起来是过去」，旧实现会因为 ts < 浏览器 now 而永远不打勾。
+    const base = joinBaseline([], [], NAME, false);
+    expect(checkinEvidence([msg({ seq: 5, ts: NOW - 600_000 })], [], NAME, base)).toEqual({ seq: 5, ts: NOW - 600_000 });
+  });
+
+  test("浏览器时钟比服务端慢 10 分钟：recover 的陈旧行照样不算", () => {
     const stale = presence({ state: "away", live: false, last_seen: NOW - 600_000, ts: NOW - 600_000 });
-    expect(checkinEvidence([], [stale as PresenceEntry], NAME, NOW - 1000)).toBeNull();
+    const base = joinBaseline([], [stale as PresenceEntry], NAME, true);
+    expect(checkinEvidence([], [stale as PresenceEntry], NAME, base)).toBeNull();
   });
 
-  test("presence 里只有引导开始之前的离线旧行 ⇒ 不算", () => {
-    const stale = presence({ state: "offline", live: false, last_seen: NOW - 60_000, ts: NOW - 60_000 });
-    expect(checkinEvidence([], [stale], NAME, NOW - 1000)).toBeNull();
+  test("joinBaseline 拍的是服务端量：最大 seq / 该身份 last_seen / verified_at", () => {
+    const entry = presence({ last_seen: NOW - 5000, wake: { kind: "serve", verified_at: NOW - 7000 } as PresenceEntry["wake"] });
+    expect(joinBaseline([msg({ seq: 7, ts: NOW }), msg({ seq: 42, ts: NOW })], [entry], NAME, true)).toEqual({
+      strict: true,
+      seq: 42,
+      seen: NOW - 5000,
+      verifiedAt: NOW - 7000,
+    });
+  });
+
+  test("recover 但历史还没加载出来（seq 基线为 null）⇒ 先不认消息证据，别抢跑", () => {
+    const base = joinBaseline([], [], NAME, true);
+    expect(base.seq).toBeNull();
+    expect(checkinEvidence([msg({ seq: 3, ts: NOW - 900_000 })], [], NAME, base)).toBeNull();
+  });
+});
+
+describe("④ 自验证据（#996 的帧对 / 服务端 verified_at，#1005）", () => {
+  const PREFIX = "[wake-verify]";
+  const strict = { strict: true, seq: 100, seen: null, verifiedAt: NOW - 600_000 };
+
+  test("服务端盖了比基线更新的 verified_at ⇒ 算验过", () => {
+    const entry = presence({ wake: { kind: "serve", verified_at: NOW } as PresenceEntry["wake"] });
+    expect(selfVerifiedEvidence([], [entry], NAME, strict, PREFIX)).toBe(true);
+  });
+
+  test("verified_at 还是上次那个（没变新）⇒ 不算", () => {
+    const entry = presence({ wake: { kind: "serve", verified_at: strict.verifiedAt! } as PresenceEntry["wake"] });
+    expect(selfVerifiedEvidence([], [entry], NAME, strict, PREFIX)).toBe(false);
+  });
+
+  test("基线之后出现 [wake-verify] 帧对（自发自回）⇒ 算验过", () => {
+    const frames = [msg({ seq: 101, ts: NOW, body: PREFIX + " @aaa" }), msg({ seq: 102, ts: NOW, reply_to: 101 })];
+    expect(selfVerifiedEvidence(frames, [], NAME, strict, PREFIX)).toBe(true);
+  });
+
+  test("帧对在基线之前（上一次验证留下的）⇒ 不算", () => {
+    const frames = [msg({ seq: 8, ts: NOW - 900_000, body: PREFIX + " @aaa" }), msg({ seq: 9, ts: NOW - 900_000, reply_to: 8 })];
+    expect(selfVerifiedEvidence(frames, [], NAME, strict, PREFIX)).toBe(false);
   });
 });
 
