@@ -418,8 +418,9 @@ export function codexHookIdentityFix(
     case "env-config-unusable":
       return `unset AGENTPARTY_CONFIG            # 这个会话指着一份用不了的身份配置，去掉它或改指对的那份`;
     case "harness-mismatch":
-      // 身份是绑给别的 harness 的：codex 不抢。想让 codex 也接它，就用 codex 的接入包再加入一次。
-      return `party init --channel ${channel}${serverFlag} --harness codex    # 这个身份是用别的 harness 加入的，codex 不认领；要让 codex 接它，用 codex 的接入包重新加入`;
+      // 身份是绑给别的 harness 的：codex 不抢。想让 codex 也接它，就用 codex 的接入包（party invite）
+      // 再 join 一次——别拿 party init 手搓，半截 join 看着正常、被 @ 时静默不醒（#955）。
+      return `AGENTPARTY_TOKEN='<T>' party join --channel ${channel}${serverFlag} --as <name> --harness codex --yes    # 这个身份是用别的 harness 加入的，codex 不认领；要让 codex 接它，用 codex 的接入包重新 join`;
     case "ambiguous-binding":
     case "ambiguous":
     case "registry-identity-unresolvable":

@@ -440,7 +440,8 @@ describe("pins #924：同 harness 同频道堆了一串历史身份，加入后�
     ] as const) {
       const fix = codexHookIdentityFix(reason, { channel: CHANNEL, server: SERVER });
       expect(fix.trim().length).toBeGreaterThan(0);
-      expect(fix.startsWith("party ") || fix.startsWith("unset ")).toBe(true);
+      // token 只许走环境变量前缀、不进 argv（#676），所以 `AGENTPARTY_TOKEN='…' party join …` 也算可执行。
+      expect(/^(?:[A-Z_]+=\S+ )?party |^unset /.test(fix)).toBe(true);
     }
   });
 });
@@ -526,9 +527,10 @@ describe("pins #960：反推各档解析出的身份若绑给了别的 harness �
     expect(result.identity.source).toBe("env");
   });
 
-  test("harness-mismatch 的修复命令指向 codex 的接入包（--harness codex）", () => {
+  test("harness-mismatch 的修复命令是 party join --harness codex，不是 party init 手搓（#955）", () => {
     const fix = codexHookIdentityFix("harness-mismatch", { channel: CHANNEL, server: SERVER });
-    expect(fix).toContain("party init");
+    expect(fix).toMatch(/^AGENTPARTY_TOKEN=\S+ party join\b/);
     expect(fix).toContain("--harness codex");
+    expect(fix).not.toMatch(/(^|\s)party init\b/);
   });
 });
