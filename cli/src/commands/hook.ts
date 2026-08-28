@@ -1162,6 +1162,11 @@ export interface CodexStopWakeDeps {
   channel: (cwd: string) => string | null;
   /** 前台唤醒是否启用（沿用 #893 的 codex-autowake 开关）。 */
   enabled: () => boolean;
+  /**
+   * 触发本次 Stop 的 codex 是不是人在用的会话（#982，与 codex-report 同一道判定）。
+   * `non-interactive` ⇒ 放行不注入、不解析身份；`interactive` / `unknown` / 缺省 ⇒ 原路径。
+   */
+  sessionKind?: () => CodexSessionKindProbe;
   /** serve/watch 落在本地的欠账——**可选快路径**，没有也照样能判（#903）。 */
   stuck: (channel: string, cwd: string) => Pick<StuckWake, "seq" | "first_wake_ts"> | null;
   /**
@@ -1225,6 +1230,8 @@ export function defaultCodexStopWakeDeps(
   return {
     channel: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
     enabled: () => resolveCodexAutoWakeMode(env, home).mode !== "off",
+    // #982：与 SessionStart 同一道探测——先读本会话的 rollout 头（#976），读不到再看进程形态。
+    sessionKind: () => probeCodexSessionKind({ hookParentPid: pid, sessionId, env }),
     // 游标/欠账必须落在**解析出来那个身份**的作用域里：拿另一个身份的游标当 since，
     // 查询要么恒空（漏叫）要么把老 @ 翻出来。env / cwd 两档的作用域与历史逐字一致。
     stuck: (channel, cwd) => {
@@ -1298,6 +1305,15 @@ export async function handleCodexStopRecord(
   // 先过便宜闸再花网络：不是 Stop / 是续跑 / 被关掉 / 没绑频道，一次请求都不发（#903）。
   if (!codexStopWakeGate({ payload: record, channel, enabled: deps.enabled() }).ok) return;
   const boundChannel = channel as string;
+  // #982：身份解析之前先判会话形态——被 Claude 委托的一次性 codex 每回合都触发 Stop，此前每回合
+  // 都走一遍身份解析、打一条 harness-mismatch / 解析不出的长文，与 SessionStart（codex-report）
+  // 的 skip(non-interactive) 一行不一致。non-interactive ⇒ 放行，一行留痕即止；interactive /
+  // unknown ⇒ 原路径（Stop 不拉唤醒层，unknown 在这里没有更贵的一侧）。探测炸了也按原路径。
+  const sessionKind = probeCodexStopSessionKind(deps);
+  if (sessionKind?.kind === "non-interactive") {
+    deps.log(`codex-stop: skip(non-interactive) ${codexSessionKindLogTag(sessionKind)}`);
+    return;
+  }
   const cursor = deps.cursor(boundChannel, cwd);
   const seenPath = deps.seenPath(boundChannel, cwd);
   const seenEntries = seenPath === null ? [] : deps.readSeen(seenPath);
@@ -1352,6 +1368,16 @@ export async function handleCodexStopRecord(
     `codex-stop: 在当前 codex 会话里注入了 #${decision.pointer.channel} seq ${decision.pointer.seq} 的指针` +
       (depth === undefined ? "" : `（第 1/${depth.remaining + 1}${depth.exact ? "" : "+"} 条，提示里已给出排空命令）`),
   );
+}
+
+/** #982：Stop 路径的形态探测；没注入 / 探测抛异常都当「没结论」，走原路径。 */
+function probeCodexStopSessionKind(deps: CodexStopWakeDeps): CodexSessionKindProbe | null {
+  if (deps.sessionKind === undefined) return null;
+  try {
+    return deps.sessionKind();
+  } catch {
+    return null;
+  }
 }
 
 /**
