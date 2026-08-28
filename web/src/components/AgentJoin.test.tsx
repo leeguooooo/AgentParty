@@ -789,16 +789,30 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(join).toContain("party serve");
   });
 
-  test("② 的说明必须警告明文 token 别贴到公开地方（安全行移出复制内容后不能丢）", async () => {
+  // 安全行移出复制内容后不能丢；而且 interactive 与 unattended 的命令**都**带明文 token，
+  // 警告只挂在其中一支就是漏（codex stop-time review 连着抓了两轮）。
+  test.each([
+    ["interactive", false],
+    ["unattended", true],
+  ] as const)("② 带明文 token 的两种模式都要警告别贴到公开地方（%s）", async (_label: string, useUnattended: boolean) => {
     const s = stepper();
+    if (useUnattended) {
+      act(() => {
+        const radios = s.r.root.findAll((n) => n.props.type === "radio" && typeof n.props.onChange === "function");
+        radios.find((n) => String(n.props.value) === "unattended")?.props.onChange({ target: { value: "unattended" } });
+      });
+    }
     await s.generate();
-    const hints = s.r.root
-      .findAll((n) => n.props.className === "agent-join-hint")
-      .map((n) => String(n.children.join("")));
-    const runHint = hints.find((h) => h.includes("AGENTPARTY_TOKEN") || h.includes("token"));
-    expect(runHint).toBeDefined();
-    expect(/公开|public/i.test(runHint ?? "")).toBe(true);
-    expect(/argv|ps|history/i.test(runHint ?? "")).toBe(true);
+    const safety = s.r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"));
+    expect(safety).toHaveLength(1);
+    const text = String(safety[0]!.children.join(""));
+    expect(/公开|public/i.test(text)).toBe(true);
+    expect(/argv|ps|history/i.test(text)).toBe(true);
+  });
+
+  test("recover 不带 token ⇒ 不渲染那条安全警告（没有明文可泄露）", () => {
+    const r = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });
+    expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"))).toHaveLength(0);
   });
 
   test("标题两种句式都完整：接入是「让 X 加入」，重连是「把 X 重新接上」", async () => {

@@ -942,6 +942,12 @@ export function AgentJoin({
                     {t("AgentJoin.errCopy")}
                   </p>
                 )}
+                {/* 明文 token 的安全警告与分支解耦：interactive 与 unattended 的命令里都带 token，
+                    只挂在其中一支就会漏（codex stop-time review on fc1aa5c）。recover 不带 token，
+                    自然不渲染。 */}
+                {session.token !== null && (
+                  <p className="agent-join-hint agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
+                )}
                 {session.token !== null && (
                   <p className="banner banner--yellow agent-join-warn" role="status">
                     {t("AgentJoin.tokenWarn")}
