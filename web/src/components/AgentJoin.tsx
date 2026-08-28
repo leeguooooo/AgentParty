@@ -23,6 +23,7 @@ import {
 import { copyText, saveAgentToken } from "../lib/agentTokenVault";
 import {
   buildJoinPack,
+  buildStepperCommand,
   DEFAULT_JOIN_RUNNER,
   guessJoinPackHarness,
   type JoinPackHarness,
@@ -410,7 +411,7 @@ export function AgentJoin({
       // http://tauri.localhost / dev 的 127.0.0.1:5173，agent 拿去 `party init --server` 会因非 http(s)
       // 报错或连不上。优先用打包注入的 apiBase(VITE_API_BASE=真后端)，仅同源 web 部署(apiBase 为空)回退 location.origin。
       const server = apiOrigin();
-      const command = buildJoinPack(mode, {
+      const packInput = {
         slug,
         agentName: agent.name,
         agentToken: agent.token,
@@ -420,7 +421,11 @@ export function AgentJoin({
         runner,
         harness,
         t,
-      });
+      };
+      // 存进 vault 的是**完整接入包**（「频道身份」面板要把它发给别人的机器，含 install 兜底）；
+      // 引导里第 ② 步只展示那一条命令——install 已经是第 ① 步（#1005 owner 实测：同一条命令出现两遍）。
+      const command = buildJoinPack(mode, packInput);
+      const stepCommand = buildStepperCommand(mode, packInput);
       const sinceTs = nowFn();
       saveAgentToken({
         account: accountKey,
@@ -442,7 +447,7 @@ export function AgentJoin({
         runner,
         recover: false,
         token: agent.token,
-        command,
+        command: stepCommand,
         sinceTs,
         baseline: joinBaseline(messages, presence, agent.name, false),
       });
@@ -472,7 +477,7 @@ export function AgentJoin({
     setRotateState("busy");
     try {
       const agent = await rotateChannelAgent(token, slug, session.name);
-      const command = buildJoinPack(session.mode, {
+      const packInput = {
         slug,
         agentName: agent.name,
         agentToken: agent.token,
@@ -482,7 +487,8 @@ export function AgentJoin({
         runner: session.runner,
         harness: session.harness,
         t,
-      });
+      };
+      const command = buildJoinPack(session.mode, packInput);
       saveAgentToken({
         account: accountKey,
         slug,
@@ -497,7 +503,10 @@ export function AgentJoin({
       setRotateState("idle");
       setCopiedKey(null);
       setCopyErr(false);
-      setPhase({ kind: "stepper", session: { ...session, token: agent.token, command } });
+      setPhase({
+        kind: "stepper",
+        session: { ...session, token: agent.token, command: buildStepperCommand(session.mode, packInput) },
+      });
     } catch {
       setRotateState("error");
     }
@@ -910,7 +919,7 @@ export function AgentJoin({
                 ) : (
                   // interactive：复制接入命令，贴进 agent 自己的 harness。
                   <>
-                    <p className="agent-join-hint">{t("AgentJoin.doneLead")}</p>
+                    <p className="agent-join-hint">{t("AgentJoin.step2.runHint")}</p>
                     <CommandBlock
                       id="join"
                       command={session.command}

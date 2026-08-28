@@ -2,7 +2,7 @@
 // （AgentTokens）都调这一份，两个入口的产物从结构上逐字节同构，杜绝再漂移（#584 复盘）。
 // 独立成模块而不放 agentTokenVault：AgentJoin 的测试整体 mock 了 vault 模块，
 // builder 放那边会让组件测试拿到假实现。
-import { AGENT_NAME_RE, buildInteractiveJoinPack, channelDecisionSnapshotBodyLines, charterSnapshotBodyLines } from "@agentparty/shared/onboarding";
+import { AGENT_NAME_RE, buildInteractiveJoinPack, joinCommandLine, channelDecisionSnapshotBodyLines, charterSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import type { ChannelCharter } from "./api";
 import type { DesktopAgentRunner } from "./desktopAgent";
 import type { TFunc } from "../i18n/useT";
@@ -106,6 +106,25 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
 export const MIN_CLI_UNATTENDED = RELEASE_CLI_VERSION;
 
 export type JoinPackMode = "interactive" | "unattended";
+
+/**
+ * 分步引导（#1005）里第 ② 步展示/复制的命令：**只有那一条 `party join`**。
+ *
+ * 完整接入包（buildJoinPack）里那半句「没有 party 命令就先装 curl … | sh」是发给远方 agent 的兜底；
+ * 引导已经把装 CLI 单列成第 ① 步，再带一次就是同一条命令在同一个弹窗里出现两遍（owner 实测指出）。
+ * 安全提示同理——引导里做成界面文字，不塞进要复制的内容。unattended 是给人跑的值守脚本，原样不动。
+ */
+export function buildStepperCommand(mode: JoinPackMode, input: FullJoinPackInput): string {
+  if (mode === "unattended") return buildUnattendedJoinPack(input);
+  return joinCommandLine({
+    slug: input.slug,
+    server: input.server,
+    token: input.agentToken,
+    agentName: input.agentName,
+    harness: input.harness ?? "other",
+    inviterName: AGENT_NAME_RE.test(input.inviterName) ? input.inviterName : null,
+  });
+}
 
 export function buildJoinPack(mode: JoinPackMode, input: FullJoinPackInput): string {
   return mode === "unattended" ? buildUnattendedJoinPack(input) : buildFullJoinPack(input);

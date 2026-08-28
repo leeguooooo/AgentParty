@@ -751,6 +751,26 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(rotated).toContain("ap_rotated");
   });
 
+  // owner 实测（#1005 上线后）：① 已经单列「装 party」，② 的粘贴稿里又带一句
+  // 「没有 party 命令就先装 curl … | sh」——同一条命令在同一个弹窗里出现两遍。
+  test("② 只给那一条 party join，不再重复 ① 的安装命令、也不夹引导句", async () => {
+    const s = stepper();
+    await s.generate();
+    const join = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    expect(join.split("\n")).toHaveLength(1);
+    expect(join.startsWith("AGENTPARTY_TOKEN=")).toBe(true);
+    expect(join).toContain("party join");
+    expect(join).not.toContain("install.sh");
+    expect(join).not.toContain("#");
+    // ① 那条才是安装命令，两者不重复。
+    const install = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "install").props.children[0].props.children,
+    );
+    expect(install).toContain("install.sh");
+  });
+
   test("标题两种句式都完整：接入是「让 X 加入」，重连是「把 X 重新接上」", async () => {
     const s = stepper();
     await s.generate();
