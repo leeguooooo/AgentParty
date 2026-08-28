@@ -60,7 +60,7 @@ import {
   unreadFromCursor,
   writeStatuslineCache,
 } from "../statusline-cache";
-import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
+import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchRecentMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
 import { attemptWakeProxy, socketWakeProxyForwarder, type WakeProxyDeps } from "../serve-wake-proxy";
 import { buildRuntimeTopology } from "../runtime-topology";
@@ -1796,8 +1796,9 @@ export interface ServeOptions {
   /** Local runner readiness gate. It must pass before opening the channel socket or claiming a lease. */
   startupCheck?: (signal: AbortSignal) => Promise<void>;
   sdkRunner?: SdkRunnerOptions;
-  // serve 挂上后声明自己「可被唤醒」的钩子；run() 注入真实实现，测试可省略/替换
-  advertise?: (signal?: AbortSignal) => Promise<void>;
+  // serve 挂上后声明自己「可被唤醒」的钩子；run() 注入真实实现，测试可省略/替换。
+  // self = welcome 里服务端认定的本身份名（#959 去重要按它找「我上一条状态帧」）。
+  advertise?: (signal?: AbortSignal, self?: string) => Promise<void>;
   /**
    * 首个 welcome 已被本次 runServe 实际消费。外层 supervisor 只能在这个边界后
    * 把后续连接视为「内部重启」；连 welcome 都没收到的失败仍必须保留用户的
@@ -1834,23 +1835,76 @@ export interface ServeOptions {
   signal?: AbortSignal;
 }
 
+/** 去重时往回翻多少条历史找「本身份上一条状态帧」。 */
+export const SERVE_ADVERTISE_DEDUPE_LOOKBACK = 50;
+
+export function serveWakeNote(runner: "codex" | "claude" | "codex-sdk" | "custom"): string {
+  return runner === "custom"
+    ? "serve supervisor 已挂上——被 @ 时启动一次自定义进程"
+    : `serve supervisor 已挂上——被 @ 时由独立频道 ${runner} 接待会话回复`;
+}
+
+export interface AdvertiseServeWakeDeps {
+  /** welcome 里服务端认定的本身份名；不知道就没法找「我上一条状态帧」，只能照发。 */
+  self?: string | null;
+  post?: typeof postMessage;
+  recent?: typeof fetchRecentMessages;
+  /** 去重命中时留一行痕迹（stderr）；缺省不出声。 */
+  out?: (line: string) => void;
+}
+
+/**
+ * 本身份在频道里最后那条状态帧，是不是与这次要发的 waiting 帧正文完全相同（#959）。
+ * 只比 state + note：这两样就是历史里看得见的全部；presence 侧的 wake/residency 已由上一条同样的
+ * 帧落好，而且 serve 断连时服务端**不撤销** wake_kind=serve（markOffline 只清 watch/daemon），
+ * 所以不再发一条也不会让身份变成「不可唤醒」。任何取不到历史的情况一律返回 false（照发，行为不变）。
+ */
+export async function serveWakeAlreadyAdvertised(
+  auth: ResolvedAuthDetailed,
+  channel: string,
+  note: string,
+  deps: AdvertiseServeWakeDeps,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const self = deps.self ?? null;
+  if (self === null || self === "" || !auth.server || !auth.token) return false;
+  try {
+    const recent = await (deps.recent ?? fetchRecentMessages)(
+      auth.server, auth.token, channel, SERVE_ADVERTISE_DEDUPE_LOOKBACK, {}, signal,
+    );
+    const last = [...recent]
+      .sort((l, r) => r.seq - l.seq)
+      .find((frame) => frame.kind === "status" && frame.sender.name === self);
+    if (last === undefined) return false;
+    return last.state === "waiting" && (last.note ?? "") === note;
+  } catch {
+    return false;
+  }
+}
+
 // serve 一挂上就把 presence 标成可唤醒：residency=supervised + wake.kind=serve。
 // 没这一步，agent 跑了 serve 但 presence 仍是 null → 别人 party wake test @你 会判 not_auto_wakeable，
 // agent 得自己再手动 party status --wake-kind serve --residency supervised 才行（外部 agent 就卡在这半天）。
+//
+// #959：上线帧**去重**。本身份在频道里的上一条状态帧若与这条一字不差，就不再发——一个反复
+// 拉起/回收的唤醒层曾把同一句话刷了 28 遍、把频道烧到 loop guard，而这 28 条对任何读者都是零信息。
 export async function advertiseServeWake(
   auth: ResolvedAuthDetailed,
   channel: string,
   runner: "codex" | "claude" | "codex-sdk" | "custom",
   signal?: AbortSignal,
+  deps: AdvertiseServeWakeDeps = {},
 ): Promise<void> {
   if (!auth.server || !auth.token) return;
-  await postMessage(auth.server, auth.token, channel, {
+  const note = serveWakeNote(runner);
+  if (await serveWakeAlreadyAdvertised(auth, channel, note, deps, signal)) {
+    deps.out?.(`serve: 上线状态帧与本身份上一条一字不差，不再重复发（#${channel}）`);
+    return;
+  }
+  await (deps.post ?? postMessage)(auth.server, auth.token, channel, {
     kind: "status",
     state: "waiting",
-    note:
-      runner === "custom"
-        ? "serve supervisor 已挂上——被 @ 时启动一次自定义进程"
-        : `serve supervisor 已挂上——被 @ 时由独立频道 ${runner} 接待会话回复`,
+    note,
     mentions: [],
     residency: "supervised",
     wake: { kind: "serve" },
@@ -5608,7 +5662,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
           try {
             if (o.advertise !== undefined) {
               await awaitWithAbort(
-                o.advertise(lifecycleController.signal),
+                o.advertise(lifecycleController.signal, self),
                 lifecycleController.signal,
               );
             }
@@ -7019,12 +7073,13 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
         },
         onCursor: (c) => saveCursor(channel, c),
         onRevCursor: (r) => saveRevCursor(channel, r),
-        advertise: (signal) =>
+        advertise: (signal, self) =>
           advertiseServeWake(
             currentAuth,
             channel,
             (runner ?? "custom") as "codex" | "claude" | "codex-sdk" | "custom",
             signal,
+            { self: self ?? null, out: (line) => console.error(terminalOutput(line)) },
           ),
         fetchCharter: (signal) => fetchChannelCharter(currentServer, currentToken, channel, signal),
         autoUpgrade: flags["auto-upgrade"] === true,

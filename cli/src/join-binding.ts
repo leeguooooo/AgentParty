@@ -204,12 +204,13 @@ const MAX_ANCESTRY_HOPS = 24;
 
 type SpawnLike = typeof spawnSync;
 
-interface ProcessRow {
+export interface ProcessRow {
   ppid: number;
   args: string;
 }
 
-function readProcessTable(spawn: SpawnLike): Map<number, ProcessRow> {
+/** 一次 `ps` 读出整张进程表（pid → 父 pid + 命令行）。失败返回空表——调用方据此「不知道，不猜」。 */
+export function readProcessTable(spawn: SpawnLike = spawnSync): Map<number, ProcessRow> {
   const table = new Map<number, ProcessRow>();
   try {
     const result = spawn("ps", ["-axo", "pid=,ppid=,args="], {
