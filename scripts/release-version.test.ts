@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
@@ -22,6 +22,12 @@ import {
   type ReleaseVersionFileSystem,
   type ReleaseVersionPaths,
 } from "./release-version";
+
+// 这个文件里「release shell cleanup」「release main 推送落地」两组用例每条都真起 `bash scripts/release.sh`
+// 和真 git 仓库（init/commit/push 到本地 bare origin），单跑 39 条约 10s；bun 默认每条 5s，
+// 在多会话并发的开发机上跑 `bun run check:scripts` 时贴线超时（2026-08-28 两次发版各被不同的一条
+// 5.2s / 7.6s 卡住，代码本身没问题）。子进程用例的预算按「慢机器」给，不按「空闲机器」给。
+setDefaultTimeout(30_000);
 
 const cleanup: string[] = [];
 
