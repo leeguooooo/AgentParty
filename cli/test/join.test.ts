@@ -133,6 +133,112 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(verdict).toContain("当前这个会话还挂着旧插件");
   });
 
+  // owner 真机截图（0.2.220）：第 0 步打了 ✓「插件 0.2.217 → 已更新到 0.2.220」，同一屏又印
+  // 「claude 插件未完全装上（手动 update，然后重开会话）」——两句不可能同时为真。
+  // 根因：成败按 marketplace add / plugin install / enable 的**退出码**判，而它们在「已加过 /
+  // 已装过」时本来就返回非 0；真实判据是最终装好的版本等于 CLI 版本。
+  test("子命令返回非 0 但 update 把版本对齐了 ⇒ 第 0 步只报更新成功，不再自相矛盾地印「未完全装上」", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      deps(record, { installedPluginVersion: "0.2.217", noisyPluginSubcommands: true }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(stepLine(logs, 0)).toContain(`claude 插件 0.2.217 → 已更新到 ${RUNNING_VERSION}`);
+    expect(out).not.toContain("未完全装上");
+    // 「需重开会话」照旧要说——当前会话还挂着旧插件。
+    expect(out).toContain("重开");
+  });
+
+  // codex stop-time review on 208a7f1：`plugin update` 退出非 0 但其实已生效时，
+  // 旧实现不再读一次版本（after=before）⇒ 上层以为没更新过：结论丢掉「差一次重开」，
+  // 而第 0 步另一次探测读到新版本又打出「版本与 CLI 一致」的假绿。
+  test("plugin update 退出非 0 但版本已生效 ⇒ 按事实算「已更新」，重开提示不能丢", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      deps(record, { installedPluginVersion: "0.2.217", pluginUpdateNoisyButWorks: true }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(stepLine(logs, 0)).toContain(`claude 插件 0.2.217 → 已更新到 ${RUNNING_VERSION}`);
+    // 绝不能说成「本来就一致」——当前会话还挂着 0.2.217。
+    expect(stepLine(logs, 0)).not.toContain("版本与 CLI 一致");
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toBeDefined();
+    expect(verdict).toContain("重开");
+    // 这一档是**确定**换过版本，结论就该说确定话——但同样不许承诺新会话「就能唤醒」。
+    expect(verdict).toContain("当前这个会话还挂着旧插件");
+    // 「真能叫醒」同样预设了结果（第七轮）：验证的措辞必须中性。
+    expect(verdict).not.toMatch(/一定能|就能唤醒|真能/);
+    expect(verdict).toContain("party wake verify");
+    expect(verdict).toContain("能不能叫醒");
+  });
+
+  // codex stop-time review on b88a58c：update 之后那一次重读失败（plugin list 偶发读不出）时，
+  // sync 退化成「没更新过」，而第 0 步的壳探测又读到新版本 ⇒ 再次「版本与 CLI 一致」假绿 + 丢重开。
+  test("update 后重读失败但壳探测读到新版本 ⇒ 仍按事实算「已更新」并提示重开", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      // 2 = 让 sync 的重读与它的重试都读不出来，只剩后面的权威壳探测能读到。
+      deps(record, { installedPluginVersion: "0.2.217", pluginListFailsAfterUpdate: 2 }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(stepLine(logs, 0)).toContain(`claude 插件 0.2.217 → 已更新到 ${RUNNING_VERSION}`);
+    expect(stepLine(logs, 0)).not.toContain("版本与 CLI 一致");
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toContain("重开");
+  });
+
+  // codex stop-time review on 274de76：连**进场那次**版本读都失败时，before 未知、changedByShell 也
+  // 失效 ⇒ 又回到「版本与 CLI 一致」的假绿并丢掉重开。说不清就得说说不清，重开按保守一侧保留。
+  test("进场版本读不出来 ⇒ 不许说「版本与 CLI 一致」，并保留重开提示", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      // 3 = 进场读 + 它的重试 + sync 内部那次读，全部读不出；第 4 次（权威壳探测）能读到。
+      deps(record, { installedPluginVersion: RUNNING_VERSION, pluginListFailsAtStart: 3 }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(stepLine(logs, 0)).not.toContain("版本与 CLI 一致");
+    expect(stepLine(logs, 0)).toContain("读不出来");
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    // 结论也不许把「说不清」写成确定事实（codex review 第五轮）：不能出现「当前这个会话还挂着旧插件」。
+    expect(verdict).toContain("读不出来");
+    expect(verdict).toContain("保险起见");
+    expect(verdict).not.toContain("当前这个会话还挂着旧插件");
+    // 也不许对「新会话一定能被唤醒」打包票（第六轮）：那个会话还没起、没验证过，只能指向真验证。
+    expect(verdict).not.toMatch(/一定能|就能唤醒|真能/);
+    expect(verdict).toContain("party wake verify");
+    expect(verdict).toContain("能不能叫醒");
+  });
+
+  test("子命令返回非 0 且最终版本仍不对 ⇒ 照实报未装好，不能被「按最终事实判」放过", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      deps(record, { installedPluginVersion: "0.2.203", noisyPluginSubcommands: true, failPluginUpdate: true }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/未完全装上|版本不一致/);
+    expect(logs.find((l) => l.startsWith("✅"))).toBeUndefined();
+  });
+
   test("#961：update 没成、插件仍是旧版 ⇒ 第 0 步报 plugin_version_mismatch 并停在那、不印 ✅，修法是 update 不是 install", async () => {
     mock = startRestMock();
     const record: string[][] = [];

@@ -29,11 +29,34 @@ export interface SpawnBehavior {
    */
   installedPluginVersion?: string | null;
   failPluginUpdate?: boolean; // plugin update 返回非 0
+  /**
+   * `marketplace add` / `plugin install` / `plugin enable` 返回非 0（真机常见：已加过 marketplace、
+   * 已装过插件时就会这样），但 update 照样把版本对齐——用来钉「按最终事实判成败，不按退出码」。
+   */
+  noisyPluginSubcommands?: boolean;
+  /**
+   * `plugin update` 退出非 0 **但版本其实已经换好**（真机常见）。用来钉「按装好的版本判，
+   * 不按退出码」——否则上层会以为没更新过，结论丢掉「差一次重开」，而另一处探测读到新版本
+   * 又打出「版本与 CLI 一致」的假绿。
+   */
+  pluginUpdateNoisyButWorks?: boolean;
+  /**
+   * update 之后的头 N 次 `plugin list` 读不出来（真机偶发）。用来钉「换没换版本」这个事实
+   * 不能挂在单次重读上——读失败时上层必须用权威壳探测兜底，否则又是「版本与 CLI 一致」的假绿。
+   */
+  pluginListFailsAfterUpdate?: number;
+  /** 一开始的头 N 次 `plugin list` 读不出来：连「之前是什么版本」都不知道。 */
+  pluginListFailsAtStart?: number;
 }
 interface PluginState {
   installed: string | null;
+  /** 还要让多少次 `plugin list` 读失败（pluginListFailsAfterUpdate 用）。 */
+  listFailuresLeft?: number;
 }
 export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: PluginState): JoinDeps["spawn"] {
+  if (behavior.pluginListFailsAtStart !== undefined && state.listFailuresLeft === undefined) {
+    state.listFailuresLeft = behavior.pluginListFailsAtStart;
+  }
   return ((cmd: string, args: readonly string[]) => {
     record.push([cmd, ...args]);
     const base = { pid: 0, output: [], stdout: "", stderr: "", signal: null } as Record<string, unknown>;
@@ -46,6 +69,10 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
     }
     if (cmd === "claude" && args[0] === "--version") return { ...base, status: 0, stdout: "2.1.200 (Claude Code)\n" };
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "list") {
+      if ((state.listFailuresLeft ?? 0) > 0) {
+        state.listFailuresLeft = (state.listFailuresLeft ?? 0) - 1;
+        return { ...base, status: 1 };
+      }
       const rows = state.installed === null
         ? []
         : [{ id: PLUGIN, version: state.installed, enabled: true, installPath: "/nowhere/agentparty" }];
@@ -54,12 +81,16 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "install") {
       // 真机行为：已装就只回 "already installed"，版本原地不动。
       if (state.installed === null) state.installed = RUNNING_VERSION;
-      return { ...base, status: 0 };
+      return { ...base, status: behavior.noisyPluginSubcommands ? 1 : 0 };
+    }
+    if (cmd === "claude" && args[0] === "plugin" && (args[1] === "marketplace" || args[1] === "enable")) {
+      return { ...base, status: behavior.noisyPluginSubcommands ? 1 : 0 };
     }
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "update") {
       if (behavior.failPluginUpdate) return { ...base, status: 1 };
       state.installed = RUNNING_VERSION;
-      return { ...base, status: 0 };
+      if (behavior.pluginListFailsAfterUpdate !== undefined) state.listFailuresLeft = behavior.pluginListFailsAfterUpdate;
+      return { ...base, status: behavior.pluginUpdateNoisyButWorks ? 1 : 0 };
     }
     return { ...base, status: 0 };
   }) as unknown as JoinDeps["spawn"];
