@@ -153,6 +153,27 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(out).toContain("重开");
   });
 
+  // codex stop-time review on 208a7f1：`plugin update` 退出非 0 但其实已生效时，
+  // 旧实现不再读一次版本（after=before）⇒ 上层以为没更新过：结论丢掉「差一次重开」，
+  // 而第 0 步另一次探测读到新版本又打出「版本与 CLI 一致」的假绿。
+  test("plugin update 退出非 0 但版本已生效 ⇒ 按事实算「已更新」，重开提示不能丢", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      deps(record, { installedPluginVersion: "0.2.217", pluginUpdateNoisyButWorks: true }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(stepLine(logs, 0)).toContain(`claude 插件 0.2.217 → 已更新到 ${RUNNING_VERSION}`);
+    // 绝不能说成「本来就一致」——当前会话还挂着 0.2.217。
+    expect(stepLine(logs, 0)).not.toContain("版本与 CLI 一致");
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toBeDefined();
+    expect(verdict).toContain("重开");
+  });
+
   test("子命令返回非 0 且最终版本仍不对 ⇒ 照实报未装好，不能被「按最终事实判」放过", async () => {
     mock = startRestMock();
     const record: string[][] = [];

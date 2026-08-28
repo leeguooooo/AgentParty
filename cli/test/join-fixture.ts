@@ -34,6 +34,12 @@ export interface SpawnBehavior {
    * 已装过插件时就会这样），但 update 照样把版本对齐——用来钉「按最终事实判成败，不按退出码」。
    */
   noisyPluginSubcommands?: boolean;
+  /**
+   * `plugin update` 退出非 0 **但版本其实已经换好**（真机常见）。用来钉「按装好的版本判，
+   * 不按退出码」——否则上层会以为没更新过，结论丢掉「差一次重开」，而另一处探测读到新版本
+   * 又打出「版本与 CLI 一致」的假绿。
+   */
+  pluginUpdateNoisyButWorks?: boolean;
 }
 interface PluginState {
   installed: string | null;
@@ -67,7 +73,7 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "update") {
       if (behavior.failPluginUpdate) return { ...base, status: 1 };
       state.installed = RUNNING_VERSION;
-      return { ...base, status: 0 };
+      return { ...base, status: behavior.pluginUpdateNoisyButWorks ? 1 : 0 };
     }
     return { ...base, status: 0 };
   }) as unknown as JoinDeps["spawn"];

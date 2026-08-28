@@ -94,11 +94,21 @@ export function syncClaudePluginToCli(spawn: PluginSpawn, cliVersion: string): C
   if (before === undefined) return { kind: "unreadable", before, after: before };
   if (before === null) return { kind: "not_installed", before, after: before };
   if (before === cliVersion) return { kind: "current", before, after: before };
-  if (!runClaudePluginUpdate(spawn)) {
-    return { kind: "update_failed", before, after: before, fix: claudePluginMismatchFix(before, cliVersion) };
-  }
+  // 退出码只是线索，**装好的版本才是事实**：update 退出非 0 但其实已经换好版本是真机常见形态
+  // （owner 0.2.220 截图那一类）。以前这里非 0 就直接返回 after=before，于是上层看到「没更新过」
+  // → 结论丢掉「差一次重开」，而第 0 步另一次探测又读到新版本、打出「版本与 CLI 一致」的假绿。
+  // 所以：不管退出码，更新之后一律重新读一次，按真实版本分类。
+  const ranOk = runClaudePluginUpdate(spawn);
   const after = installedClaudePluginVersion(spawn);
   if (after === cliVersion) return { kind: "updated", before, after };
+  if (!ranOk) {
+    return {
+      kind: "update_failed",
+      before,
+      after: after ?? before,
+      fix: claudePluginMismatchFix(typeof after === "string" ? after : before, cliVersion),
+    };
+  }
   return {
     kind: "still_mismatched",
     before,
