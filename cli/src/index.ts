@@ -8,7 +8,11 @@ const VERSION = pkg.version;
 
 const HELP = `party — agentparty cli
 
-usage: party <command> [args]
+usage: party [--config PATH] <command> [args]
+
+global options:
+  --config PATH                                        use this exact identity config for one command
+  --config-b64 BASE64URL                               portable encoded form used by injected wake prompts
 
 commands:
   login     [--server URL]                          browser sign-in, store account session (human)
@@ -75,7 +79,50 @@ watch defaults to a 240s timeout. With --follow, it stays attached unless --time
 
 exit codes: 0 ok/new message · 2 watch timeout (prints TIMEOUT) · 3 bad token · 4 loop guard · 5 archived · 6 stream ended (re-arm watch / restart serve) · 7 cli self-upgraded (restart serve) · 8 workflow guard (stop, wait for human) · 9 rate limited (back off)`;
 
-export async function main(argv: string[]): Promise<number> {
+export interface GlobalCliArgs {
+  argv: string[];
+  configPath: string | null;
+  error: string | null;
+}
+
+export function decodeGlobalConfigPath(value: string): string | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const decoded = Buffer.from(value, "base64url").toString("utf8");
+    if (decoded === "" || decoded.includes("\u0000")) return null;
+    return Buffer.from(decoded, "utf8").toString("base64url") === value ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Only leading global flags are consumed; subcommand flags remain byte-for-byte untouched. */
+export function parseGlobalCliArgs(argv: readonly string[]): GlobalCliArgs {
+  const rest = [...argv];
+  let configPath: string | null = null;
+  while (rest[0] === "--config" || rest[0] === "--config-b64") {
+    const flag = rest.shift()!;
+    const value = rest.shift();
+    if (value === undefined || value === "") {
+      return { argv: rest, configPath, error: `${flag} requires a non-empty value` };
+    }
+    if (configPath !== null) {
+      return { argv: rest, configPath, error: "--config/--config-b64 may be passed only once" };
+    }
+    if (flag === "--config-b64") {
+      const decoded = decodeGlobalConfigPath(value);
+      if (decoded === null) {
+        return { argv: rest, configPath, error: "--config-b64 must be canonical base64url UTF-8" };
+      }
+      configPath = decoded;
+    } else {
+      configPath = value;
+    }
+  }
+  return { argv: rest, configPath, error: null };
+}
+
+async function dispatch(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
     console.log(HELP);
@@ -215,6 +262,24 @@ export async function main(argv: string[]): Promise<number> {
       console.error(`unknown command: ${cmd}`);
       console.log(HELP);
       return 1;
+  }
+}
+
+export async function main(argv: string[]): Promise<number> {
+  const parsed = parseGlobalCliArgs(argv);
+  if (parsed.error !== null) {
+    console.error(parsed.error);
+    return 1;
+  }
+  const previous = process.env.AGENTPARTY_CONFIG;
+  if (parsed.configPath !== null) process.env.AGENTPARTY_CONFIG = parsed.configPath;
+  try {
+    return await dispatch(parsed.argv);
+  } finally {
+    if (parsed.configPath !== null) {
+      if (previous === undefined) delete process.env.AGENTPARTY_CONFIG;
+      else process.env.AGENTPARTY_CONFIG = previous;
+    }
   }
 }
 

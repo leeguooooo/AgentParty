@@ -37,6 +37,7 @@
 // 就没打算让 codex 接本频道，安静退出）；恰 1 个 ⇒ 认领；≥2 个才是歧义。没有绑定记录的老配置保留。
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import {
   agentpartyHome,
   explicitConfigPath,
@@ -79,6 +80,8 @@ export interface CodexHookIdentity {
   token: string;
   /** 频道身份（`config.identity.name`）；人类账号 config 没有则 null。 */
   name: string | null;
+  /** 身份 owner；老 config 可能没有。仅作一致性防线，不参与猜测身份。 */
+  owner: string | null;
   /**
    * cursor / 欠账是否该按 config 作用域读（`loadCursorForConfig`）。
    * env 档由 `process.env.AGENTPARTY_CONFIG` 天然作用域化，cwd 档保持历史的 cwd 作用域，
@@ -110,7 +113,8 @@ export interface CodexHookIdentityDeps {
   candidates: (channel: string) => LocalAgentConfigHint[];
   codexSessions: () => ClaudeSessionRegistryEntry[];
   /** 给定 codex 进程下可见的 agentparty MCP 注册所用的 config 路径（已去重）。 */
-  mcpConfigPaths: (pid: number) => string[];
+  /** null = 子进程数超过安全扫描上限，证据不完整；调用方必须 fail closed。 */
+  mcpConfigPaths: (pid: number) => string[] | null;
   /** #924：加入时落盘的 (harness, server, channel, owner) → identity 绑定。 */
   joinBindings: () => JoinBinding[];
   /** codex 本体的 pid——hook 是它的子进程，故取 `process.ppid`。 */
@@ -158,7 +162,12 @@ function identityKey(server: string, name: string | null): string {
  * token 必须在（人类账号没有 agent token 时唤醒本就无从谈起），server 必须能 heal，
  * 缓存身份若绑了另一个频道 ⇒ 不认（那是别的频道的 handle）。
  */
-function usableConfig(config: Config | null, channel: string): { server: string; token: string; name: string | null } | null {
+function usableConfig(config: Config | null, channel: string): {
+  server: string;
+  token: string;
+  name: string | null;
+  owner: string | null;
+} | null {
   if (config === null) return null;
   const { server, token, identity } = config;
   if (typeof server !== "string" || typeof token !== "string" || token === "") return null;
@@ -167,7 +176,8 @@ function usableConfig(config: Config | null, channel: string): { server: string;
   const scope = identity?.channel_scope;
   if (typeof scope === "string" && scope !== channel) return null;
   const name = typeof identity?.name === "string" && identity.name !== "" ? identity.name : null;
-  return { server: healed, token, name };
+  const owner = typeof identity?.owner === "string" && identity.owner !== "" ? identity.owner : null;
+  return { server: healed, token, name, owner };
 }
 
 function distinctCandidateKeys(candidates: LocalAgentConfigHint[]): Map<string, LocalAgentConfigHint> {
@@ -210,16 +220,32 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
 
   // 该 codex 进程下**看得见**哪些绑定本频道的身份。既是第 ④ 档的信号本体，也是第 ② 档
   // 绑定的佐证。最多算一次（一次 `ps`），后面各档共用。
-  type UsableAt = { path: string; server: string; token: string; name: string | null };
-  let mcpEvidence: Map<string, UsableAt> | null = null;
-  const evidence = (): Map<string, UsableAt> => {
+  type UsableAt = {
+    path: string;
+    server: string;
+    token: string;
+    name: string | null;
+    owner: string | null;
+  };
+  let mcpEvidence: Map<string, UsableAt[]> | null = null;
+  let mcpEvidenceIncomplete = false;
+  const evidence = (): Map<string, UsableAt[]> => {
     if (mcpEvidence !== null) return mcpEvidence;
-    const found = new Map<string, UsableAt>();
-    for (const path of deps.mcpConfigPaths(deps.pid)) {
+    const found = new Map<string, UsableAt[]>();
+    const paths = deps.mcpConfigPaths(deps.pid);
+    if (paths === null) {
+      mcpEvidenceIncomplete = true;
+      mcpEvidence = found;
+      return found;
+    }
+    for (const path of paths) {
+      if (!isAbsolute(path)) continue;
       const usable = usableConfig(deps.readConfigFile(path), channel);
       if (usable === null) continue;
       const key = identityKey(usable.server, usable.name);
-      if (!found.has(key)) found.set(key, { path, ...usable });
+      const rows = found.get(key) ?? [];
+      if (!rows.some((row) => row.path === path)) rows.push({ path, ...usable });
+      found.set(key, rows);
     }
     mcpEvidence = found;
     return found;
@@ -230,11 +256,39 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
   if (bindings.length > 0) {
     // 绑定指向的 config 已经不可用（被删、没 token、改绑了别的频道）＝这条绑定过期了，跳过它。
     // 绝不把一条过期绑定当成「解析成功」，也绝不因为它存在就放弃后面的兜底。
-    let alive = bindings
-      .map((binding) => ({ binding, usable: usableConfig(deps.readConfigFile(binding.config_path), channel) }))
+    const loaded = bindings
+      .map((binding) => ({
+        binding,
+        usable: isAbsolute(binding.config_path)
+          ? usableConfig(deps.readConfigFile(binding.config_path), channel)
+          : null,
+      }));
+    const inconsistent = loaded.filter((row) =>
+      row.usable !== null &&
+      (
+        identityKey(row.binding.server, row.binding.identity) !== identityKey(row.usable.server, row.usable.name) ||
+        (row.binding.owner !== null && row.usable.owner !== null && row.binding.owner !== row.usable.owner)
+      ));
+    if (inconsistent.length > 0) {
+      return {
+        ok: false,
+        reason: "ambiguous-binding",
+        detail:
+          `#${channel} 的 join binding 元数据与其 config 内容不一致` +
+          `（${inconsistent.map((row) => row.binding.identity).join(", ")}）——路径可能被覆盖，放弃`,
+      };
+    }
+    let alive = loaded
       .filter((row): row is { binding: JoinBinding; usable: NonNullable<ReturnType<typeof usableConfig>> } =>
         row.usable !== null);
     const seen = evidence();
+    if (mcpEvidenceIncomplete) {
+      return {
+        ok: false,
+        reason: "ambiguous",
+        detail: `codex 进程 ${deps.pid} 的 MCP 扫描失败或超过上限——现场身份证据不完整，放弃`,
+      };
+    }
     if (alive.length > 0 && seen.size > 0) {
       // 佐证：这个 codex 进程下明明看得见本频道的身份，那么本会话的绑定必须在其中。
       // 一条都对不上 ⇒ 这些绑定属于**另一个 harness 实例**（终端 codex vs 桌面 codex 各自
@@ -249,12 +303,58 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
     }
     if (alive.length === 1) {
       const only = alive[0]!;
+      // #1012：binding 绑定的是「哪一个身份」，但它记下的 config 路径可能只是这个身份的旧副本。
+      // 真机现场同一 token/identity 有两份 config：旧 binding 副本的 cursor=0，当前 Codex 进程
+      // 实际挂着的 MCP config cursor=1934。继续用旧路径会把已经处理过的整段 @ 重新注入，随后
+      // 模型再按 cwd 默认身份回错另一台 server。只要当前进程对同一个 server+identity 给出了
+      // 唯一现场证据，就让现场路径承载 token/cursor；binding 仍然负责 harness/owner 身份授权。
+      const live = seen.get(identityKey(only.usable.server, only.usable.name)) ?? [];
+      if (live.length > 1) {
+        return {
+          ok: false,
+          reason: "ambiguous",
+          detail:
+            `codex 进程 ${deps.pid} 下同一身份 ${only.usable.name ?? "?"}@${only.usable.server} ` +
+            `同时挂着 ${live.length} 份 config——共享 app-server 无法证明本会话属于哪条游标作用域，放弃`,
+        };
+      }
+      const selected = live.length === 0
+        ? { path: only.binding.config_path, ...only.usable }
+        : live[0]!;
+      if (selected.token !== only.usable.token) {
+        return {
+          ok: false,
+          reason: "ambiguous",
+          detail:
+            `codex 进程 ${deps.pid} 下的现场 config 与 join binding 对 ` +
+            `${only.usable.name ?? "?"}@${only.usable.server} 使用不同 token——无法证明是同一凭据，放弃`,
+        };
+      }
+      if (
+        (selected.owner !== null &&
+          only.usable.owner !== null &&
+          selected.owner !== only.usable.owner) ||
+        (selected.owner !== null &&
+          only.binding.owner !== null &&
+          selected.owner !== only.binding.owner)
+      ) {
+        return {
+          ok: false,
+          reason: "ambiguous",
+          detail:
+            `codex 进程 ${deps.pid} 下的现场 config 与 join binding 对 ` +
+            `${only.usable.name ?? "?"}@${only.usable.server} 记着不同 owner——无法证明是同一身份，放弃`,
+        };
+      }
       return {
         ok: true,
         identity: {
           source: "join-binding",
-          configPath: only.binding.config_path,
-          ...only.usable,
+          configPath: selected.path,
+          server: selected.server,
+          token: selected.token,
+          name: selected.name,
+          owner: selected.owner,
           configScopedState: true,
         },
       };
@@ -352,8 +452,25 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
   // ④ 该 codex 进程下挂着的 agentparty MCP 注册——接入包写进 env 的那份身份。
   {
     const found = evidence();
+    if (mcpEvidenceIncomplete) {
+      return {
+        ok: false,
+        reason: "ambiguous",
+        detail: `codex 进程 ${deps.pid} 的 MCP 扫描失败或超过上限——现场身份证据不完整，放弃`,
+      };
+    }
     if (found.size === 1) {
-      const only = [...found.values()][0]!;
+      const group = [...found.values()][0]!;
+      if (group.length !== 1) {
+        return {
+          ok: false,
+          reason: "ambiguous",
+          detail:
+            `codex 进程 ${deps.pid} 下同一频道身份同时挂着 ${group.length} 份 config` +
+            `（${describe(group)}）——游标作用域不唯一，放弃`,
+        };
+      }
+      const only = group[0]!;
       const owner = boundElsewhere({ server: only.server, name: only.name, configPath: only.path });
       if (owner !== null) return harnessMismatch(owner, only);
       return {
@@ -364,13 +481,14 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
           server: only.server,
           token: only.token,
           name: only.name,
+          owner: only.owner,
           configScopedState: true,
         },
       };
     }
     if (found.size > 1) {
       // #971：歧义只在 **codex 可认领的** 候选之间算。绑给别的 harness 的身份先剔掉。
-      const rows = [...found.values()].filter((row) =>
+      const rows = [...found.values()].flat().filter((row) =>
         boundElsewhere({ server: row.server, name: row.name, configPath: row.path }) === null);
       if (rows.length === 1) {
         const only = rows[0]!;
@@ -382,6 +500,7 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
             server: only.server,
             token: only.token,
             name: only.name,
+            owner: only.owner,
             configScopedState: true,
           },
         };
@@ -389,7 +508,7 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
       if (rows.length === 0) {
         return noCodexBinding(
           `codex 进程 ${deps.pid} 下挂着的 ${found.size} 个绑 #${channel} 的身份` +
-            `（${describe([...found.values()])}）全是用别的 harness 加入的`,
+          `（${describe([...found.values()].flat())}）全是用别的 harness 加入的`,
         );
       }
       return {
@@ -500,21 +619,21 @@ export function codexHookIdentityFix(
 
 /** 一次 `ps` 调用的上限，绝不吃满 hook 预算。 */
 const PS_TIMEOUT_MS = 1_500;
-const PS_MAX_CHILDREN = 16;
+const PS_MAX_CHILDREN = 512;
 
 type SpawnLike = typeof spawnSync;
 
-function psLines(args: string[], spawn: SpawnLike): string[] {
+function psLines(args: string[], spawn: SpawnLike): string[] | null {
   try {
     const result = spawn("ps", args, {
       encoding: "utf8",
       timeout: PS_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     });
-    if (result.status !== 0 || typeof result.stdout !== "string") return [];
+    if (result.status !== 0 || typeof result.stdout !== "string") return null;
     return result.stdout.split("\n").filter((line) => line.trim() !== "");
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -522,26 +641,39 @@ function psLines(args: string[], spawn: SpawnLike): string[] {
  * 读出给定 codex 进程下所有 agentparty MCP 子进程注册时用的 `AGENTPARTY_CONFIG`（去重）。
  *
  * macOS/Linux 的 `ps eww` 会连环境变量一起打印，且只对本 uid 的进程可读——正好够用。
- * 任何失败一律返回空数组（＝这条线索不可用，调用方继续往下走或放弃）。
+ * `[]` 只表示扫描成功且没有候选；扫描失败或超过安全上限返回 `null`，调用方必须失败关闭。
  */
-export function codexMcpConfigPaths(pid: number, spawn: SpawnLike = spawnSync): string[] {
+export function codexMcpConfigPaths(
+  pid: number,
+  spawn: SpawnLike = spawnSync,
+  platform: NodeJS.Platform = process.platform,
+): string[] | null {
   if (!Number.isInteger(pid) || pid <= 1) return [];
-  if (process.platform === "win32") return [];
+  // Windows 没有这条 `ps eww` 证据链。把 unsupported 当证据不完整，而不是“确定没有 MCP”，
+  // 否则会回退旧 binding config，重演 cursor=0 的跨实例误投。
+  if (platform === "win32") return null;
   const children: number[] = [];
-  for (const line of psLines(["-axo", "pid=,ppid=,args="], spawn)) {
+  const processLines = psLines(["-axo", "pid=,ppid=,args="], spawn);
+  if (processLines === null) return null;
+  for (const line of processLines) {
     const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
     if (match === null) continue;
     if (Number(match[2]) !== pid) continue;
     if (!looksLikePartyMcpCommand(match[3]!)) continue;
     children.push(Number(match[1]));
-    if (children.length >= PS_MAX_CHILDREN) break;
+    if (children.length > PS_MAX_CHILDREN) return null;
   }
   if (children.length === 0) return [];
   const paths: string[] = [];
-  for (const line of psLines(["eww", "-o", "command=", "-p", children.join(",")], spawn)) {
-    const found = /(?:^|\s)AGENTPARTY_CONFIG=(\S+)/.exec(line);
+  const environmentLines = psLines(["eww", "-o", "command=", "-p", children.join(",")], spawn);
+  if (environmentLines === null) return null;
+  for (const line of environmentLines) {
+    // `ps eww` does not quote spaces in environment values. Stop at the next NAME=VALUE field,
+    // not at the first whitespace, otherwise `/Users/me/Agent Party/config.json` becomes `/Users/me/Agent`.
+    const found = /(?:^|\s)AGENTPARTY_CONFIG=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|$)/.exec(line);
     if (found === null) continue;
-    if (!paths.includes(found[1]!)) paths.push(found[1]!);
+    const path = found[1]!.trimEnd();
+    if (path !== "" && !paths.includes(path)) paths.push(path);
   }
   return paths;
 }

@@ -43,6 +43,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteJson } from "./atomic-json";
 import type { StuckWake } from "./config";
+import { isSlug } from "./validation";
 import { t, type WakeLang } from "./wake-note-i18n";
 
 /** seen 集合的落盘目录，与 #893 的 marker 目录并列。 */
@@ -81,10 +82,15 @@ export const CODEX_STOP_WAKE_DEBT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export const CODEX_STOP_WAKE_QUERY_TIMEOUT_MS = 3_000;
 
-/** 交回给会话的指针：只有 channel+seq，正文永远去频道读。 */
+/** 交回给会话的指针：正文永远去频道读；configPath 只固定本机后续命令的身份作用域。 */
 export interface CodexStopWakePointer {
   channel: string;
   seq: number;
+  /**
+   * Stop hook 查询这条 seq 时实际使用的身份 config。存在时，注入提示里的可执行读命令必须把
+   * 它钉进 AGENTPARTY_CONFIG，不能让模型回落到 cwd/global 后跑去另一台同名频道。
+   */
+  configPath?: string;
   /**
    * 积压深度（#958）：这条 seq 之后还排着几条 @ 我的消息。缺省＝不知道（老服务端 / 走的是本地
    * 欠账快路径），此时提示里**不许**假装只有一条——只是不说深度。`exact=false` 表示是下限
@@ -99,6 +105,24 @@ export interface CodexStopWakePointer {
  */
 export function codexStopWakeDrainCommand(channel: string): string {
   return `party ack --drain --channel ${channel}`;
+}
+
+export function codexStopWakeConfigOption(configPath: string): string | null {
+  if (configPath === "" || configPath.includes("\u0000")) return null;
+  return `--config-b64 ${Buffer.from(configPath, "utf8").toString("base64url")}`;
+}
+
+export function codexStopWakeScopedPartyCommand(
+  configPath: string,
+  args: readonly string[],
+): string | null {
+  const configOption = codexStopWakeConfigOption(configPath);
+  if (configOption === null) return null;
+  // Stop prompt 只生成这两条固定命令；channel 必须仍是服务端合法 slug，其余参数均由本模块生成。
+  const channel = args[0] === "history" ? args[1] : args[0] === "ack" ? args[3] : undefined;
+  if (channel === undefined || !isSlug(channel)) return null;
+  if (args.some((arg) => !/^[A-Za-z0-9._-]+$/.test(arg))) return null;
+  return `party ${configOption} ${args.join(" ")}`;
 }
 
 export function codexStopWakeSeenPath(home: string, target: string): string {
@@ -216,6 +240,18 @@ export function codexStopWakeReason(pointer: CodexStopWakePointer, lang: WakeLan
   // #1003：文案从 wake-note-i18n 取，语言由调用方按接收 agent 的语言判定（hook.ts 走 resolveWakeLang）。
   // 缺省 zh 是这条文案的历史行为（它一直是中文的），别让老调用方悄悄变成英文。
   const backlog = pointer.backlog;
+  const scopedDrain = pointer.configPath === undefined
+    ? null
+    : codexStopWakeScopedPartyCommand(
+      pointer.configPath,
+      ["ack", "--drain", "--channel", pointer.channel],
+    );
+  const scopedHistory = pointer.configPath === undefined
+    ? null
+    : codexStopWakeScopedPartyCommand(
+      pointer.configPath,
+      ["history", pointer.channel, "--since", String(Math.max(0, pointer.seq - 1))],
+    );
   if (backlog !== undefined && backlog.remaining > 0) {
     // #958：积压时说清「第 1/N 条、还剩几条」，并把一次排空的命令直接给出来。每轮只推进一条是
     // 对的（不漏消息），但用户必须知道自己在排队、以及怎么不用拿回合数去换。排空命令本身会把
@@ -223,18 +259,23 @@ export function codexStopWakeReason(pointer: CodexStopWakePointer, lang: WakeLan
     const remaining = `${backlog.remaining}${backlog.exact ? "" : "+"}`;
     const total = `${backlog.remaining + 1}${backlog.exact ? "" : "+"}`;
     return clampUtf8(
-      t(lang, "codex.stop.backlog", {
+      t(lang, scopedDrain === null ? "codex.stop.backlog" : "codex.stop.backlog.scoped", {
         channel: pointer.channel,
         seq: pointer.seq,
         total,
         remaining,
-        drain: codexStopWakeDrainCommand(pointer.channel),
+        drain: scopedDrain ?? codexStopWakeDrainCommand(pointer.channel),
       }),
       CODEX_STOP_WAKE_REASON_MAX_BYTES,
     );
   }
   return clampUtf8(
-    t(lang, "codex.stop.single", { channel: pointer.channel, seq: pointer.seq, since: Math.max(0, pointer.seq - 1) }),
+    t(lang, scopedHistory === null ? "codex.stop.single" : "codex.stop.single.scoped", {
+      channel: pointer.channel,
+      seq: pointer.seq,
+      since: Math.max(0, pointer.seq - 1),
+      history: scopedHistory ?? `party history ${pointer.channel} --since ${Math.max(0, pointer.seq - 1)}`,
+    }),
     CODEX_STOP_WAKE_REASON_MAX_BYTES,
   );
 }

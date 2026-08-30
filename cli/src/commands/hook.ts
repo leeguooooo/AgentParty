@@ -33,14 +33,17 @@ import {
   defaultCodexHookIdentityDeps,
   resolveCodexHookIdentity,
   type CodexHookIdentity,
+  type CodexHookIdentityDeps,
   type CodexHookIdentityRefusal,
   type CodexHookIdentityResolution,
 } from "../codex-session-identity";
 import {
   CODEX_STOP_WAKE_QUERY_TIMEOUT_MS,
+  codexStopWakeConfigOption,
   codexStopWakeGate,
   codexStopWakeQuerySince,
   codexStopWakeReason,
+  codexStopWakeScopedPartyCommand,
   codexStopWakeSeenPath,
   decideCodexStopWake,
   liveCodexStopWakeSeen,
@@ -1177,6 +1180,11 @@ export interface CodexStopWakeDeps {
    */
   nextMention: (channel: string, cwd: string, since: number) => Promise<NextMention | null>;
   cursor: (channel: string, cwd: string) => number;
+  /**
+   * 查询/游标实际使用的身份 config。注入 prompt 必须把后续 CLI 命令钉在同一路径；缺省保留
+   * 老调用方的 cwd/global 行为。
+   */
+  configPath?: (channel: string, cwd: string) => string | null;
   /** 已注入过的 seq 集合的落盘路径；拿不到身份时返回 null（→ 无法去重，必须放行）。 */
   seenPath: (channel: string, cwd: string) => string | null;
   readSeen: (path: string) => CodexStopWakeSeenEntry[];
@@ -1195,6 +1203,7 @@ export function defaultCodexStopWakeDeps(
   env: NodeJS.ProcessEnv = process.env,
   sessionId: string | null = null,
   pid: number = process.ppid,
+  hookIdentityDeps: CodexHookIdentityDeps = defaultCodexHookIdentityDeps(env, pid),
 ): CodexStopWakeDeps {
   const home = agentpartyHome(env);
   // #917：身份只解析一次，全部下游（查询用的 token/实例、游标作用域、seen 集合）都用它。
@@ -1211,7 +1220,7 @@ export function defaultCodexStopWakeDeps(
           cwd,
           channel,
           sessionId,
-          deps: defaultCodexHookIdentityDeps(env, pid),
+          deps: hookIdentityDeps,
         }),
       };
     }
@@ -1270,6 +1279,7 @@ export function defaultCodexStopWakeDeps(
         ? loadCursorForConfig(channel, resolved.configPath)
         : loadCursor(channel, cwd);
     },
+    configPath: (channel, cwd) => identity(channel, cwd)?.configPath ?? null,
     seenPath: (channel, cwd) => {
       const resolved = target(channel, cwd);
       return resolved === null ? null : codexStopWakeSeenPath(home, resolved);
@@ -1385,6 +1395,12 @@ export async function handleCodexStopRecord(
     deps.log("codex-stop: 拿不到本会话的唯一身份（见上一条解析日志），无法去重，本次放行不注入");
     return;
   }
+  const configPath = deps.configPath?.(boundChannel, cwd) ?? null;
+  const configOption = configPath === null ? null : codexStopWakeConfigOption(configPath);
+  if (configPath !== null && configOption === null) {
+    deps.log("codex-stop: 本会话 config 路径无法安全编码进 prompt，本次放行不注入");
+    return;
+  }
   // #1003：只有确定要 block 才去判语言（可能多一跳历史查询）；任何异常都退到 zh（历史行为），不影响注入。
   let lang: WakeLang = "zh";
   if (deps.wakeLang !== undefined) {
@@ -1394,11 +1410,29 @@ export async function handleCodexStopRecord(
       lang = "zh";
     }
   }
+  const pointer: CodexStopWakePointer = {
+    ...decision.pointer,
+    ...(configPath === null ? {} : { configPath }),
+  };
+  const reason = codexStopWakeReason(pointer, lang);
+  if (configOption !== null) {
+    const requiredCommand = pointer.backlog !== undefined && pointer.backlog.remaining > 0
+      ? codexStopWakeScopedPartyCommand(configPath!, ["ack", "--drain", "--channel", pointer.channel])
+      : codexStopWakeScopedPartyCommand(
+        configPath!,
+        ["history", pointer.channel, "--since", String(Math.max(0, pointer.seq - 1))],
+      );
+    // 512B 截断绝不能留下半条 config 或裸命令；装不下就放行，宁可这次不叫也不误投另一实例。
+    if (requiredCommand === null || !reason.includes(`\`${requiredCommand}\``)) {
+      deps.log("codex-stop: 固定身份的可执行命令装不进 512B prompt，本次放行不注入");
+      return;
+    }
+  }
   // 先落盘再打印。反过来的话，打印后崩一次就会对同一条 @ 反复注入。
   deps.recordSeen(seenPath, decision.pointer.seq, deps.now());
   deps.emit(JSON.stringify({
     decision: "block",
-    reason: codexStopWakeReason(decision.pointer, lang),
+    reason,
   }));
   const depth = decision.pointer.backlog;
   deps.log(

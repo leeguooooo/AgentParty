@@ -441,6 +441,7 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     })).toBe(true);
     const d = deps(record, {}, logs);
     d.codexAncestorPid = () => process.pid;
+    d.codexSessionId = () => sessionId;
     const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
     expect(code).toBe(0);
     const entry = listCodexSessions().find((e) => e.session_id === sessionId);
@@ -452,12 +453,127 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(logs.join("\n")).not.toContain("没入册");
   });
 
+  test("#1012：共享 app-server 同 PID 多 task 时按当前 session id 精确更新，绝不改最早那条", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const olderId = "019f95e8-2c0b-7903-8779-cd102c5ecd40";
+    const currentId = "019f95e8-2c0b-7903-8779-cd102c5ecd41";
+    expect(registerCodexSession({
+      session_id: olderId,
+      pid: process.pid,
+      display_name: null,
+      channel: "older-channel",
+      identity: "older-agent",
+      server: "https://older.example.com",
+      cwd: "/tmp/older-task",
+      registered_at: 1,
+    })).toBe(true);
+    expect(registerCodexSession({
+      session_id: currentId,
+      pid: process.pid,
+      display_name: null,
+      channel: "elsewhere",
+      identity: null,
+      server: null,
+      cwd: process.cwd(),
+      registered_at: 2,
+    })).toBe(true);
+    const d = deps(record, {}, logs);
+    d.codexAncestorPid = () => process.pid;
+    d.codexSessionId = () => currentId;
+
+    expect(await runJoin(baseOpts({ harnessFlag: "codex" }), d)).toBe(0);
+    const entries = listCodexSessions();
+    expect(entries.find((entry) => entry.session_id === olderId)).toMatchObject({
+      channel: "older-channel",
+      identity: "older-agent",
+      server: "https://older.example.com",
+      cwd: "/tmp/older-task",
+    });
+    expect(entries.find((entry) => entry.session_id === currentId)).toMatchObject({
+      channel: "dev",
+      identity: "agent",
+      server: new URL(mock.url).origin,
+      cwd: process.cwd(),
+    });
+    expect(logs.join("\n")).not.toContain("拒绝");
+  });
+
+  test("#1012：共享 app-server 同 PID 多 task 且拿不到 session id 时失败关闭，不改任何条目", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const firstId = "019f95e8-2c0b-7903-8779-cd102c5ecd42";
+    const secondId = "019f95e8-2c0b-7903-8779-cd102c5ecd43";
+    for (const [sessionId, channel, registeredAt] of [
+      [firstId, "first-channel", 1],
+      [secondId, "second-channel", 2],
+    ] as const) {
+      expect(registerCodexSession({
+        session_id: sessionId,
+        pid: process.pid,
+        display_name: null,
+        channel,
+        identity: null,
+        server: null,
+        cwd: process.cwd(),
+        registered_at: registeredAt,
+      })).toBe(true);
+    }
+    const d = deps(record, {}, logs);
+    d.codexAncestorPid = () => process.pid;
+    d.codexSessionId = () => null;
+
+    expect(await runJoin(baseOpts({ harnessFlag: "codex" }), d)).toBe(0);
+    expect(listCodexSessions().map((entry) => ({ id: entry.session_id, channel: entry.channel }))).toEqual([
+      { id: firstId, channel: "first-channel" },
+      { id: secondId, channel: "second-channel" },
+    ]);
+    expect(logs.join("\n")).toContain("同时有 2 个 Codex task");
+    expect(logs.join("\n")).toContain("拒绝按注册时间猜会话");
+  });
+
+  test("#1012：环境给了当前 session id 但注册表只有别的 task 时不回退唯一 PID 候选", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const otherId = "019f95e8-2c0b-7903-8779-cd102c5ecd44";
+    const currentId = "019f95e8-2c0b-7903-8779-cd102c5ecd45";
+    expect(registerCodexSession({
+      session_id: otherId,
+      pid: process.pid,
+      display_name: null,
+      channel: "other-channel",
+      identity: "other-agent",
+      server: "https://other.example.com",
+      cwd: "/tmp/other-task",
+    })).toBe(true);
+    const d = deps(record, {}, logs);
+    d.codexAncestorPid = () => process.pid;
+    d.codexSessionId = () => currentId;
+
+    expect(await runJoin(baseOpts({ harnessFlag: "codex" }), d)).toBe(0);
+    expect(listCodexSessions()).toEqual([
+      expect.objectContaining({
+        session_id: otherId,
+        channel: "other-channel",
+        identity: "other-agent",
+        server: "https://other.example.com",
+        cwd: "/tmp/other-task",
+      }),
+    ]);
+    expect(logs.join("\n")).toContain(`当前 Codex 会话 ${currentId} 不在 pid`);
+    expect(logs.join("\n")).toContain("拒绝改写同进程里的其它 task");
+  });
+
   test("#957：找不到本会话的注册表条目时不伪造，如实提示唤醒层会提前退场", async () => {
     mock = startRestMock();
     const record: string[][] = [];
     const logs: string[] = [];
     const d = deps(record, {}, logs);
     d.codexAncestorPid = () => process.pid; // 有 codex 进程，但注册表里没它
+    d.codexSessionId = () => "019f95e8-2c0b-7903-8779-cd102c5ecd4c";
     const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
     expect(code).toBe(0);
     expect(logs.join("\n")).toContain("没入册");

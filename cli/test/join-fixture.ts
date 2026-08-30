@@ -190,6 +190,7 @@ export function joinDeps(tmp: string, record: string[][], behavior: SpawnBehavio
     startCodexWakeLayer: async () => ({ action: "start", channel: "dev", cwd: process.cwd(), args: [] }),
     codexWakeLayerLive: async () => ({ pid: 4242, source: "serve-lock" }),
     codexAncestorPid: () => null,
+    codexSessionId: () => null,
     // 第 2 步（#988）：默认「没法问」（无 TTY）——按 harness 默认走；交互用例逐个覆盖。
     chooseReceiveMode: async () => null,
     // 第 3 步（#988）：本机没配 party claude 默认参数；有默认参数的用例逐个覆盖。

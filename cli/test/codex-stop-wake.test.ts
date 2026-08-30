@@ -6,6 +6,7 @@
 //   session_id / stop_hook_active / transcript_path / turn_id
 // 注意没有 agent_id / agent_type / prompt——反推版把 SubagentStop 的字段混了进来。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,9 +15,11 @@ import {
   CODEX_STOP_WAKE_REASON_MAX_BYTES,
   CODEX_STOP_WAKE_SEEN_TTL_MS,
   appendCodexStopWakeSeen,
+  codexStopWakeConfigOption,
   codexStopWakeDrainCommand,
   codexStopWakeQuerySince,
   codexStopWakeReason,
+  codexStopWakeScopedPartyCommand,
   codexStopWakeSeenPath,
   decideCodexStopWake,
   hasCodexStopWakeSeen,
@@ -202,6 +205,80 @@ describe("codexStopWakeReason", () => {
   test("只给指针，不给正文（频道是唯一数据源）", () => {
     expect(codexStopWakeReason({ channel: "pwtk", seq: 42 })).toContain("party history");
   });
+
+  test("config-scoped 单条提示把可复制 history 命令钉在同一身份，路径空格与单引号安全引用", () => {
+    const configPath = "/tmp/agent party/leo's config.json";
+    const command = codexStopWakeScopedPartyCommand(
+      configPath,
+      ["history", "pwtk", "--since", "41"],
+    );
+    expect(command).not.toBeNull();
+    const reason = codexStopWakeReason({ channel: "pwtk", seq: 42, configPath });
+    expect(reason).toContain(`\`${command}\``);
+    expect(reason).not.toContain("`party history");
+    expect(reason.match(/`/g)?.length ?? 0).toBe(2);
+    expect(Buffer.byteLength(reason, "utf8")).toBeLessThanOrEqual(CODEX_STOP_WAKE_REASON_MAX_BYTES);
+  });
+
+  test("config-scoped backlog 提示把 drain 命令钉在同一身份，不留下裸 ack 命令", () => {
+    const configPath = "/tmp/agent party/config.json";
+    const command = codexStopWakeScopedPartyCommand(
+      configPath,
+      ["ack", "--drain", "--channel", "pwtk"],
+    );
+    const reason = codexStopWakeReason({
+      channel: "pwtk",
+      seq: 42,
+      backlog: { remaining: 2, exact: true },
+      configPath,
+    });
+    expect(reason).toContain(`\`${command}\``);
+    expect(reason).not.toContain("`party ack");
+    expect(reason.match(/`/g)?.length ?? 0).toBe(2);
+    expect(Buffer.byteLength(reason, "utf8")).toBeLessThanOrEqual(CODEX_STOP_WAKE_REASON_MAX_BYTES);
+  });
+
+  test("config path 用 base64url 跨 shell 传递；NUL 或非法 channel 仍拒绝", () => {
+    for (const path of ["/tmp/a\nconfig", "/tmp/a`config", "/tmp/a' config"]) {
+      expect(codexStopWakeConfigOption(path)).toMatch(/^--config-b64 [A-Za-z0-9_-]+$/);
+      expect(codexStopWakeScopedPartyCommand(path, ["history", "pwtk", "--since", "41"]))
+        .toMatch(/^party --config-b64 [A-Za-z0-9_-]+ history pwtk --since 41$/);
+    }
+    expect(codexStopWakeConfigOption("/tmp/a\u0000config")).toBeNull();
+    expect(codexStopWakeScopedPartyCommand("/tmp/config", ["history", "bad`channel", "--since", "41"]))
+      .toBeNull();
+  });
+
+  test("scoped 命令经 /bin/sh 执行仍保持 config 与 argv 字面值，不执行路径里的 shell 载荷", () => {
+    const root = mkdtempSync(join(tmpdir(), "ap-stop-quote-"));
+    try {
+      const marker = join(root, "must-not-exist");
+      const configPath = `${root}/agent party/'$(touch ${marker});config.json`;
+      const channel = "dev";
+      const command = codexStopWakeScopedPartyCommand(
+        configPath,
+        ["history", channel, "--since", "41"],
+      );
+      expect(command).not.toBeNull();
+      const result = spawnSync(
+        "/bin/sh",
+        ["-c", `party() { printf '%s\\n' "$@"; }\n${command}`],
+        { encoding: "utf8", env: { ...process.env, AGENTPARTY_CONFIG: "wrong-default" } },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim().split("\n")).toEqual([
+        "--config-b64",
+        Buffer.from(configPath, "utf8").toString("base64url"),
+        "history",
+        channel,
+        "--since",
+        "41",
+      ]);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("seen 集合落盘", () => {
@@ -335,6 +412,42 @@ describe("handleCodexStopRecord", () => {
       emit: () => order.push("emit"),
     }));
     expect(order).toEqual(["seen", "emit"]);
+  });
+
+  test("真实 config affinity：注入的 history 命令沿用查询身份，不回落 cwd/global", async () => {
+    const configPath = "/tmp/agent party/target's config.json";
+    await handleCodexStopRecord(stopPayload(), {}, deps({ configPath: () => configPath }));
+    expect(emitted).toHaveLength(1);
+    const output = JSON.parse(emitted[0]!) as { reason: string };
+    const command = codexStopWakeScopedPartyCommand(
+      configPath,
+      ["history", "pwtk", "--since", "41"],
+    );
+    expect(output.reason).toContain(`\`${command}\``);
+    expect(output.reason).not.toContain("`party history");
+    expect(seenStore.get(join(home, "seen.json"))).toEqual([{ seq: 42, ts: NOW }]);
+  });
+
+  test("scoped 命令若被 512B 截在闭合反引号前 ⇒ 放行且不写 seen", async () => {
+    const tooLong = `/tmp/${"x".repeat(500)}`;
+    await handleCodexStopRecord(
+      stopPayload(),
+      {},
+      deps({
+        channel: () => "x".repeat(64),
+        configPath: () => tooLong,
+      }),
+    );
+    expect(emitted).toEqual([]);
+    expect(seenStore.size).toBe(0);
+    expect(logged.join("\n")).toContain("装不进 512B");
+  });
+
+  test("config 路径含 NUL、无法编码成 CLI selector ⇒ 放行且不写 seen", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, deps({ configPath: () => "/tmp/bad\u0000config" }));
+    expect(emitted).toEqual([]);
+    expect(seenStore.size).toBe(0);
+    expect(logged.join("\n")).toContain("无法安全编码进 prompt");
   });
 
   test("拿不到身份（去不了重）→ 放行，绝不注入", async () => {

@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { workspaceId } from "../src/config";
+import { decodeGlobalConfigPath, main as mainInProcess, parseGlobalCliArgs } from "../src/index";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
 const indexPath = join(import.meta.dir, "..", "src", "index.ts");
@@ -46,12 +47,106 @@ async function runCli(args: string[], env: Record<string, string | undefined> = 
 }
 
 describe("cli subprocess", () => {
+  test("global config parser consumes only leading selector flags and preserves subcommand argv", () => {
+    const path = "/tmp/identity config.json";
+    const encoded = Buffer.from(path, "utf8").toString("base64url");
+    expect(parseGlobalCliArgs(["--config", path, "history", "dev", "--config", "subcommand-value"]))
+      .toEqual({
+        argv: ["history", "dev", "--config", "subcommand-value"],
+        configPath: path,
+        error: null,
+      });
+    expect(parseGlobalCliArgs(["--config-b64", encoded, "whoami", "--json"])).toEqual({
+      argv: ["whoami", "--json"],
+      configPath: path,
+      error: null,
+    });
+    expect(decodeGlobalConfigPath(encoded)).toBe(path);
+  });
+
+  test("in-process main restores the caller's AGENTPARTY_CONFIG after dispatch", async () => {
+    const previous = process.env.AGENTPARTY_CONFIG;
+    const originalLog = console.log;
+    process.env.AGENTPARTY_CONFIG = "/tmp/original.json";
+    console.log = () => {};
+    try {
+      expect(await mainInProcess(["--config", "/tmp/one-shot.json", "--version"])).toBe(0);
+      expect(process.env.AGENTPARTY_CONFIG).toBe("/tmp/original.json");
+    } finally {
+      console.log = originalLog;
+      if (previous === undefined) delete process.env.AGENTPARTY_CONFIG;
+      else process.env.AGENTPARTY_CONFIG = previous;
+    }
+  });
+
   test("--help exits 0", async () => {
     const r = await runCli(["--help"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("party <command>");
+    expect(r.stdout).toContain("party [--config PATH] <command>");
+    expect(r.stdout).toContain("use this exact identity config for one command");
     expect(r.stdout).toContain("presence uplink remains launcher/serve-scoped");
     expect(r.stdout).not.toContain("install makes any session visible");
+  });
+
+  test("global --config pins one command to the exact identity config and restores normal routing", async () => {
+    const seen: Array<{ path: string; auth: string | null }> = [];
+    restServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        seen.push({ path: url.pathname, auth: req.headers.get("authorization") });
+        return Response.json({
+          name: "scoped-agent",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: "owner",
+          channel_scope: "agentparty",
+        });
+      },
+    });
+    const configPath = join(home, "identity config.json");
+    writeFileSync(configPath, JSON.stringify({
+      server: `http://127.0.0.1:${restServer.port}`,
+      token: "scoped-token",
+      identity: { name: "scoped-agent", channel_scope: "agentparty", owner: "owner" },
+    }));
+
+    const result = await runCli(["--config", configPath, "whoami", "--json"], {
+      AGENTPARTY_CONFIG: undefined,
+    });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      name: "scoped-agent",
+      effective_server: `http://127.0.0.1:${restServer.port}`,
+      config: { kind: "explicit", path: configPath },
+    });
+    const encoded = Buffer.from(configPath, "utf8").toString("base64url");
+    const portable = await runCli(["--config-b64", encoded, "whoami", "--json"], {
+      AGENTPARTY_CONFIG: undefined,
+    });
+    expect(portable.code).toBe(0);
+    expect(JSON.parse(portable.stdout)).toMatchObject({
+      name: "scoped-agent",
+      config: { kind: "explicit", path: configPath },
+    });
+    expect(seen).toEqual([
+      { path: "/api/me", auth: "Bearer scoped-token" },
+      { path: "/api/me", auth: "Bearer scoped-token" },
+    ]);
+  });
+
+  test("global --config rejects a missing value and duplicates before dispatch", async () => {
+    const missing = await runCli(["--config"]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("--config requires a non-empty value");
+    const duplicate = await runCli(["--config", "/a", "--config", "/b", "whoami"]);
+    expect(duplicate.code).toBe(1);
+    expect(duplicate.stderr).toContain("--config/--config-b64 may be passed only once");
+    const invalid = await runCli(["--config-b64", "not+base64", "whoami"]);
+    expect(invalid.code).toBe(1);
+    expect(invalid.stderr).toContain("canonical base64url UTF-8");
   });
 
   test("compiled-distribution Cross-session verifier is reachable through bridge", async () => {
