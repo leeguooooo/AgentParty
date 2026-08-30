@@ -3,19 +3,19 @@
 // 痛点：Claude 侧装上 Marketplace plugin 就能被跨机唤醒，codex 侧却必须人工挂一个
 // `party bridge codex` / `party serve` 进程。owner 原话：「他不监听」。
 //
-// 为什么不是 MCP 反向唤醒（已实测证伪，别再走）：
+// 为什么不是 MCP 自己反向唤醒（已实测证伪，别再走）：
 //   ① codex 0.145 的 initialize 只声明 `{"elicitation":{...}}`，**不声明 sampling**——
 //      二进制里那 16 处 `sampling/createMessage` 是协议完整性，运行时不给 server 用；
 //   ② 会话 idle 时主动发 `elicitation/create`，23ms 自动回 `{"action":"decline"}`，
 //      不弹用户、不拉起会话。与 Claude Code 的 #844 结论一致。
 //
-// 于是照抄 Claude 侧真正的机制：Claude 的「零常驻」从来不是零进程——**插件的 MCP server
-// 就是那个常驻进程**，随会话自动起、用户无感。codex 这边把它放在 SessionStart hook
-// （#877 已接线 `party hook codex-report`）里：会话一开，顺手把唤醒层拉起来。
+// ChatGPT Desktop 新路径：连接 App 自己的 0600 IPC router，发现目标 task 的 renderer owner，
+// 再用 thread-follower-start-turn + codex_app toolOutput 把 @ 送进已有 task。裸 Codex CLI
+// 没有这条 host 能力，才回落 `party serve --runner codex`。
 //
 // 三条硬约束：
-//   1. **语义诚实**（#879）：拉起的是 `party serve --runner codex`，被 @ 时起的是一个
-//      **全新的 runner 会话**，不是用户眼前这个终端会话。任何文案都不许暗示「你那个会话会醒」。
+//   1. **语义诚实**（#879）：native 路径进入现有 ChatGPT task；裸 CLI 回落才是一个
+//      **全新的 runner 会话**。任何文案都必须说清当前走的是哪一条。
 //   2. **默认开启**（owner 拍板：「我们应该做到直接能用，不要让用户选择」）——多拨一个开关
 //      本身就是体验断层。但 `off` 必须仍然有效：默认替用户做对的事，不等于剥夺控制权。
 //   3. **hook 铁律**：stdout 恒空、不阻塞、失败静默 exit 0。所以「失败要响亮」只能落到
@@ -322,6 +322,7 @@ export type CodexAutoWakeSkipReason =
   | "harness-mismatch"
   | "no-codex-binding"
   | "no-agent-token"
+  | "native-source-missing"
   | "already-serving"
   | "already-starting"
   | "flapping";
@@ -338,6 +339,10 @@ export interface CodexAutoWakeDecisionInput {
   serveHolderPid: number | null;
   /** config 里是否有可用的 agent 身份（server+token）。 */
   hasAgentToken: boolean;
+  /** ChatGPT Desktop 的私有 IPC 可用；此时不应再悄悄退回新 runner。 */
+  nativeDesktop?: boolean;
+  /** 同 app-server、同频道身份下的一对真实 ChatGPT task。 */
+  nativeRoute?: { targetThreadId: string; sourceThreadId: string } | null;
   /**
    * 上一次拉起的唤醒层进程（标记仍然作数）。serve 连不上服务端时会在自己的重连 supervisor
    * 里无限重试、走不到抢锁那步，只靠 serveHolderPid 会让断网时每开一个会话堆一个进程。
@@ -370,9 +375,9 @@ export interface CodexSessionKindLike {
 /**
  * 纯决策：拉不拉、拉什么。所有 I/O 由调用方提供，测试不需要真起进程。
  *
- * 拉的是 `party hook codex-autowake --supervise --channel C`——它在**同一个进程里**跑
- * `party serve <ch> --runner codex`，另外挂一条 codex 会话存活探测用于收尾。
- * 不选 `party bridge codex`：bridge 要接管 TUI，天然不适合被 hook 自动拉起。
+ * 拉的是 `party hook codex-autowake --supervise --channel C`。ChatGPT Desktop 有两个
+ * 同身份 task 时它跑 native bridge；裸 Codex CLI 才在同进程回落 serve runner。
+ * 旧 `party bridge codex` 要接管 TUI，天然不适合被 hook 自动拉起。
  */
 export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAutoWakeDecision {
   if (input.mode !== "serve") {
@@ -416,6 +421,15 @@ export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAut
       detail: "config 里没有 agent token（人类账号会话不自动拉 serve）——先 `party init` 绑定 agent 身份",
     };
   }
+  if (input.nativeDesktop === true && input.nativeRoute == null) {
+    return {
+      action: "skip",
+      reason: "native-source-missing",
+      detail:
+        `ChatGPT Desktop IPC 已可用，但 #${channel} 上当前只有一个同身份 task；` +
+        `等待第二个 task 入册后再建立原生跨任务通道，不退回后台新 runner`,
+    };
+  }
   if (input.serveHolderPid !== null) {
     return {
       action: "skip",
@@ -447,7 +461,21 @@ export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAut
     action: "start",
     channel,
     cwd: input.cwd,
-    args: ["hook", "codex-autowake", "--supervise", "--channel", channel],
+    args: [
+      "hook",
+      "codex-autowake",
+      "--supervise",
+      "--channel",
+      channel,
+      ...(input.nativeRoute == null
+        ? []
+        : [
+            "--target-thread",
+            input.nativeRoute.targetThreadId,
+            "--source-thread",
+            input.nativeRoute.sourceThreadId,
+          ]),
+    ],
   };
 }
 

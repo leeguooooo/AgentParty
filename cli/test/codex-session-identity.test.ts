@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  loadCursorForConfig,
   saveCursorForConfig,
   writeState,
   writeWorkspaceConfigOnly,
@@ -28,8 +29,8 @@ import {
   type BindingHarness,
 } from "../src/join-binding";
 import { codexAutoWakeAuth, codexAutoWakeTarget } from "../src/codex-auto-wake";
-import { codexStopWakeSeenPath } from "../src/codex-stop-wake";
-import { defaultCodexStopWakeDeps } from "../src/commands/hook";
+import { codexStopWakeScopedPartyCommand, codexStopWakeSeenPath } from "../src/codex-stop-wake";
+import { defaultCodexStopWakeDeps, handleCodexStopRecord } from "../src/commands/hook";
 
 const CHANNEL = "agentparty";
 const CWD_SERVER = "https://agentparty.leeguoo.com";
@@ -311,13 +312,53 @@ describe("MCP 子进程扫描", () => {
     expect(calls).toHaveLength(2);
   });
 
-  test("ps 挂了 / pid 不合法 ⇒ 空数组（这条线索不可用，绝不抛）", () => {
+  test("共享 ChatGPT app-server 的第 56 个 MCP 子进程也会被扫描，不再被旧 16 条上限截掉", () => {
+    const pids = Array.from({ length: 56 }, (_, index) => 3000 + index);
+    const targetPath = "/agents/live-target.json";
+    const spawn = ((_bin: string, args: string[]) => {
+      if (args[0] === "-axo") {
+        return {
+          status: 0,
+          stdout: pids.map((pid) => `${pid} 69445 party mcp --channel agentparty`).join("\n"),
+        };
+      }
+      expect(args).toEqual(["eww", "-o", "command=", "-p", pids.join(",")]);
+      return {
+        status: 0,
+        stdout: `party mcp --channel agentparty AGENTPARTY_CONFIG=${targetPath}`,
+      };
+    }) as unknown as typeof import("node:child_process").spawnSync;
+    expect(codexMcpConfigPaths(69445, spawn)).toEqual([targetPath]);
+  });
+
+  test("ps eww 里的 AGENTPARTY_CONFIG 含空格时保留完整路径，不截成第一个词", () => {
+    const spawn = ((_bin: string, args: string[]) => ({
+      status: 0,
+      stdout: args[0] === "-axo"
+        ? "3002 69445 party mcp --channel agentparty"
+        : "party mcp --channel agentparty AGENTPARTY_CONFIG=/Users/leo/Agent Party/live.json TERM=xterm-256color",
+    })) as unknown as typeof import("node:child_process").spawnSync;
+    expect(codexMcpConfigPaths(69445, spawn)).toEqual(["/Users/leo/Agent Party/live.json"]);
+  });
+
+  test("MCP 子进程超过安全上限 ⇒ 返回证据不完整 sentinel，解析器不能把它当空证据回退旧 binding", () => {
+    const spawn = ((_bin: string, args: string[]) => ({
+      status: 0,
+      stdout: args[0] === "-axo"
+        ? Array.from({ length: 513 }, (_, index) => `${3000 + index} 69445 party mcp --channel agentparty`).join("\n")
+        : "must not reach second ps",
+    })) as unknown as typeof import("node:child_process").spawnSync;
+    expect(codexMcpConfigPaths(69445, spawn)).toBeNull();
+  });
+
+  test("ps 挂了 ⇒ 证据不完整 null；pid 不合法 ⇒ 成功判定无候选 []", () => {
     const dead = (() => {
       throw new Error("ps: command not found");
     }) as unknown as typeof import("node:child_process").spawnSync;
-    expect(codexMcpConfigPaths(69445, dead)).toEqual([]);
+    expect(codexMcpConfigPaths(69445, dead)).toBeNull();
     expect(codexMcpConfigPaths(1, dead)).toEqual([]);
     expect(codexMcpConfigPaths(-1, dead)).toEqual([]);
+    expect(codexMcpConfigPaths(69445, dead, "win32")).toBeNull();
   });
 });
 
@@ -419,6 +460,215 @@ describe("pins #924：同 harness 同频道堆了一串历史身份，加入后�
     // 落到就地取证的那一档，解析出的是本进程真正挂着的那个身份——绝不误投给 codex13。
     expect(result.identity.source).toBe("mcp-registration");
     expect(result.identity.name).toBe("lark-ad72b3f9749e-agentparty-codex7");
+  });
+
+  test("同一身份的旧 binding config 与本进程 MCP config 路径不同 ⇒ 沿用现场 MCP 路径，绝不回放旧游标", () => {
+    const identity = "lark-ad72b3f9749e-agentparty-codex13";
+    const config = agentConfig(identity, SERVER, "same-live-token");
+    const staleBindingPath = writeAgentConfig("agentparty-codex13-old.json", config);
+    const liveMcpPath = writeAgentConfig("agentparty-codex13-live.json", config);
+    saveCursorForConfig(CHANNEL, 0, staleBindingPath);
+    saveCursorForConfig(CHANNEL, 1934, liveMcpPath);
+    writeWorkspaceConfigOnly(agentConfig(CWD_NAME, CWD_SERVER, "wrong-cwd-token"), cwd);
+    writeState({ channel: CHANNEL, cursor: 851 }, cwd);
+    bind(staleBindingPath, identity);
+
+    const result = resolve({ mcpConfigPaths: () => [liveMcpPath] }, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.source).toBe("join-binding");
+    expect(result.identity.configPath).toBe(liveMcpPath);
+    expect(result.identity.server).toBe(SERVER);
+    expect(result.identity.token).toBe("same-live-token");
+    expect(result.identity.server).not.toBe(CWD_SERVER);
+    expect(loadCursorForConfig(CHANNEL, result.identity.configPath!)).toBe(1934);
+    expect(loadCursorForConfig(CHANNEL, result.identity.configPath!)).not.toBe(
+      loadCursorForConfig(CHANNEL, staleBindingPath),
+    );
+  });
+
+  test("真实 Stop 接线：A 旧游标 + B 现场游标 + C 错实例 ⇒ 只用 B 的 server/token/since/prompt", async () => {
+    const requests: Array<{ path: string; auth: string | null }> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        requests.push({ path: `${url.pathname}${url.search}`, auth: req.headers.get("authorization") });
+        const since = Number(url.searchParams.get("since") ?? "0");
+        return Response.json(
+          since >= 1935
+            ? { seq: 1936, seqs: [1936], truncated: false }
+            : { seq: 1902, seqs: [1902, 1910, 1922, 1923, 1935, 1936], truncated: false },
+        );
+      },
+    });
+    try {
+      const pwtk = `http://127.0.0.1:${server.port}`;
+      const identity = "lark-ad72b3f9749e-agentparty-codex13";
+      const targetToken = "same-live-token";
+      const targetConfig = agentConfig(identity, pwtk, targetToken);
+      const staleBindingPath = writeAgentConfig("agentparty-codex13-stop-old.json", targetConfig);
+      const liveMcpPath = writeAgentConfig("agentparty-codex13-stop-live.json", targetConfig);
+      saveCursorForConfig(CHANNEL, 0, staleBindingPath);
+      saveCursorForConfig(CHANNEL, 1935, liveMcpPath);
+      writeWorkspaceConfigOnly(agentConfig(CWD_NAME, CWD_SERVER, "wrong-cwd-token"), cwd);
+      writeState({ channel: CHANNEL, cursor: 851 }, cwd);
+      writeJoinBinding(joinBindingsPath(home), {
+        harness: "codex",
+        server: pwtk,
+        channel: CHANNEL,
+        owner: null,
+        identity,
+        config_path: staleBindingPath,
+        cwd: "/Users/leo/github.com/agent-browser-stealth",
+        created_at: 1_700_000_000_000,
+      });
+
+      const identityDeps = {
+        ...defaultCodexHookIdentityDeps(process.env, 4242),
+        mcpConfigPaths: () => [liveMcpPath],
+      };
+      const env = {
+        PATH: process.env.PATH,
+        AGENTPARTY_HOME: home,
+        AGENTPARTY_CHANNEL: CHANNEL,
+      };
+      const emitted: string[] = [];
+      const wake = defaultCodexStopWakeDeps(env, SESSION_ID, 4242, identityDeps);
+      await handleCodexStopRecord(
+        {
+          hook_event_name: "Stop",
+          stop_hook_active: false,
+          session_id: SESSION_ID,
+          cwd,
+        },
+        env,
+        {
+          ...wake,
+          sessionKind: () => ({ kind: "interactive", detail: "test" }),
+          wakeLang: async () => "zh",
+          emit: (line) => emitted.push(line),
+        },
+      );
+
+      expect(requests).toEqual([{
+        path: `/api/channels/${CHANNEL}/next-mention?since=1935`,
+        auth: `Bearer ${targetToken}`,
+      }]);
+      expect(emitted).toHaveLength(1);
+      const output = JSON.parse(emitted[0]!) as { decision: string; reason: string };
+      expect(output.decision).toBe("block");
+      expect(output.reason).toContain("1936");
+      expect(output.reason).not.toContain("1902");
+      const command = codexStopWakeScopedPartyCommand(
+        liveMcpPath,
+        ["history", CHANNEL, "--since", "1935"],
+      );
+      expect(output.reason).toContain(`\`${command}\``);
+      expect(output.reason).not.toContain(CWD_SERVER);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("同 server/name 的 binding 与现场 MCP config token 不同 ⇒ 失败关闭，不把换名凭据当别名", () => {
+    const identity = "lark-ad72b3f9749e-agentparty-codex13";
+    const staleBindingPath = writeAgentConfig(
+      "agentparty-codex13-old-token.json",
+      agentConfig(identity, SERVER, "old-token"),
+    );
+    const liveMcpPath = writeAgentConfig(
+      "agentparty-codex13-new-token.json",
+      agentConfig(identity, SERVER, "new-token"),
+    );
+    bind(staleBindingPath, identity);
+
+    const result = resolve({ mcpConfigPaths: () => [liveMcpPath] }, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous");
+    expect(result.detail).toContain("不同 token");
+  });
+
+  test("共享 app-server 下同一身份同时挂两份 MCP config ⇒ 游标作用域不唯一，失败关闭", () => {
+    const identity = "lark-ad72b3f9749e-agentparty-codex13";
+    const config = agentConfig(identity, SERVER, "same-token");
+    const staleBindingPath = writeAgentConfig("agentparty-codex13-binding.json", config);
+    const liveA = writeAgentConfig("agentparty-codex13-live-a.json", config);
+    const liveB = writeAgentConfig("agentparty-codex13-live-b.json", config);
+    bind(staleBindingPath, identity);
+
+    const result = resolve({ mcpConfigPaths: () => [liveA, liveB] }, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous");
+    expect(result.detail).toContain("同时挂着 2 份 config");
+  });
+
+  test("MCP 现场扫描失败/溢出 ⇒ 证据不完整，绝不回退旧 binding 路径", () => {
+    const identity = "lark-ad72b3f9749e-agentparty-codex13";
+    const staleBindingPath = writeAgentConfig(
+      "agentparty-codex13-incomplete-scan.json",
+      agentConfig(identity, SERVER, "same-token"),
+    );
+    bind(staleBindingPath, identity);
+    const result = resolve({ mcpConfigPaths: () => null }, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous");
+    expect(result.detail).toContain("证据不完整");
+  });
+
+  test("binding config 与现场别名的非空 owner 矛盾 ⇒ 失败关闭", () => {
+    const identity = "lark-ad72b3f9749e-agentparty-codex13";
+    const boundConfig = agentConfig(identity, SERVER, "same-token");
+    boundConfig.identity!.owner = "owner-a";
+    const liveConfig = agentConfig(identity, SERVER, "same-token");
+    liveConfig.identity!.owner = "owner-b";
+    const staleBindingPath = writeAgentConfig("agentparty-codex13-owner-a.json", boundConfig);
+    const liveMcpPath = writeAgentConfig("agentparty-codex13-owner-b.json", liveConfig);
+    bind(staleBindingPath, identity, "codex", { owner: "owner-a" });
+
+    const result = resolve({ mcpConfigPaths: () => [liveMcpPath] }, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous");
+    expect(result.detail).toContain("不同 owner");
+  });
+
+  test("binding owner 非空、旧 config owner 缺失、现场 owner 矛盾 ⇒ 仍失败关闭", () => {
+    const identity = "lark-ad72b3f9749e-agentparty-codex13";
+    const staleBindingPath = writeAgentConfig(
+      "agentparty-codex13-owner-legacy.json",
+      agentConfig(identity, SERVER, "same-token"),
+    );
+    const liveConfig = agentConfig(identity, SERVER, "same-token");
+    liveConfig.identity!.owner = "owner-b";
+    const liveMcpPath = writeAgentConfig("agentparty-codex13-owner-live.json", liveConfig);
+    bind(staleBindingPath, identity, "codex", { owner: "owner-a" });
+
+    const result = resolve({ mcpConfigPaths: () => [liveMcpPath] }, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous");
+    expect(result.detail).toContain("不同 owner");
+  });
+
+  test("binding 路径被覆盖成另一个身份 ⇒ 拒绝被篡改的绑定，不静默改投", () => {
+    const identity = "lark-ad72b3f9749e-agentparty-codex13";
+    const bindingPath = writeAgentConfig(
+      "agentparty-codex13-overwritten.json",
+      agentConfig(identity, SERVER, "same-token"),
+    );
+    bind(bindingPath, identity);
+    writeFileSync(bindingPath, JSON.stringify(agentConfig("someone-else", SERVER, "same-token")));
+
+    const result = resolve({ mcpConfigPaths: () => [] }, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous-binding");
+    expect(result.detail).toContain("元数据与其 config 内容不一致");
   });
 
   test("绑定指向的 config 已经没了 ⇒ 当没有绑定，绝不当成解析成功", () => {

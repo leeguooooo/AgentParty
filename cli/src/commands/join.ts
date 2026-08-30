@@ -58,7 +58,11 @@ import {
   runningServePid,
 } from "../codex-auto-wake";
 import { defaultInstanceLockDir, isSameLiveProcess } from "../instance-lock";
-import { listCodexSessions, registerCodexSession } from "../claude-session-registry";
+import {
+  isClaudeSessionRegistrySessionId,
+  listCodexSessions,
+  registerCodexSession,
+} from "../claude-session-registry";
 import {
   claudeArmCommand,
   claudeServeCommand,
@@ -233,6 +237,11 @@ export interface JoinDeps {
   codexWakeLayerLive: () => Promise<CodexWakeLayerLiveness | null>;
   /** 跑 join 的那个 codex 进程 pid（进程祖先链）；找不到 null。用于把本会话在注册表里挂到本频道。 */
   codexAncestorPid: () => number | null;
+  /**
+   * 当前 Codex task/thread id。ChatGPT.app 的多个 task 共用同一个 app-server PID，PID 只能证明
+   * 属于这批 task，不能选出眼前这个；缺失时只允许 PID 下恰好一个注册表候选。
+   */
+  codexSessionId: () => string | null;
   /**
    * 第 2 步（claude 档）：有 TTY 且未 --yes 时问用户选接收方式。返回 null ＝ 没法问（无 TTY），
    * 按 harness 默认走并把所选印出来。--yes 时 runJoin 根本不调它。缺省 readline 一问。
@@ -571,9 +580,31 @@ function adoptCodexSessionForChannel(
     if (pid === null) {
       return "找不到跑 join 的 codex 进程（不在 codex 会话里跑？）——唤醒层在没有入册 codex 会话时会自动退场";
     }
-    const entry = listCodexSessions().find((e) => e.pid === pid);
-    if (entry === undefined) {
+    const candidates = listCodexSessions().filter((entry) => entry.pid === pid);
+    if (candidates.length === 0) {
       return "本会话没入册（SessionStart 时还没绑频道）——唤醒层约 60s 后会判无人使用而退场；新开一个 codex 会话即可长期挂着";
+    }
+    const sessionId = deps.codexSessionId();
+    let entry: (typeof candidates)[number];
+    if (sessionId !== null) {
+      if (!isClaudeSessionRegistrySessionId(sessionId)) {
+        return `当前 Codex session id 不合法（${sessionId}）——拒绝按共享 PID 猜会话，注册表未更新`;
+      }
+      const exact = candidates.find(
+        (candidate) => candidate.session_id.toLowerCase() === sessionId.toLowerCase(),
+      );
+      if (exact === undefined) {
+        return `当前 Codex 会话 ${sessionId} 不在 pid ${pid} 的注册表候选中——拒绝改写同进程里的其它 task`;
+      }
+      entry = exact;
+    } else if (candidates.length === 1) {
+      // 老 Codex/终端环境没有 task id 时保留兼容，但只在 PID 本身已经能唯一定位时采用。
+      entry = candidates[0]!;
+    } else {
+      return (
+        `pid ${pid} 下同时有 ${candidates.length} 个 Codex task，且当前环境没有唯一 session id` +
+        "——拒绝按注册时间猜会话，注册表未更新"
+      );
     }
     if (entry.channel === slug && (entry.identity ?? null) === identity) return null;
     const ok = registerCodexSession({
@@ -789,7 +820,9 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       ctx.identity = identity;
       // 注册 MCP（先探后加，#898）。claude/codex 各走各的；other（探不出）两条都试——「不知道就都覆盖」。
       if (harness === "claude" || harness === "other") detail.push(outcomeLine("注册 claude MCP", registerClaudeMcp(deps, mcpName, configPath, slug)));
-      if (harness === "codex" || harness === "other") detail.push(outcomeLine("注册 codex MCP", registerCodexMcp(deps, mcpName, configPath, slug)));
+      if (harness === "codex" || harness === "other") {
+        detail.push(outcomeLine("注册 codex MCP", registerCodexMcp(deps, mcpName, configPath, slug)));
+      }
       // claude 档：crossSessionInbound=accept（#844），否则跨会话 @ 默认 hold 会被 drop。
       if (harness === "claude") detail.push(outcomeLine("开启跨会话 @ 接收", setClaudeInboxAccept(deps)));
       // 报到（#597）。init 只写配置不发言，必须补这一条，否则网页/频道里看不到你。能 @ 邀请人就 @。
@@ -1264,6 +1297,18 @@ export async function run(argv: string[]): Promise<number> {
 }
 
 /** 真机注入点（`party join` 与 `party recover` 共用）：真 spawn / init / hook / send，探活走真锁、真注册表。 */
+export function codexSessionIdFromEnvironment(env: NodeJS.ProcessEnv): string | null {
+  const threadId = typeof env.CODEX_THREAD_ID === "string" && env.CODEX_THREAD_ID !== ""
+    ? env.CODEX_THREAD_ID
+    : null;
+  const legacySessionId = typeof env.CODEX_SESSION_ID === "string" && env.CODEX_SESSION_ID !== ""
+    ? env.CODEX_SESSION_ID
+    : null;
+  const candidate = threadId ?? legacySessionId;
+  if (candidate === null || !isClaudeSessionRegistrySessionId(candidate)) return null;
+  return candidate.toLowerCase();
+}
+
 export function defaultJoinDeps(slug: string): JoinDeps {
   return {
     spawn: spawnSync,
@@ -1297,6 +1342,7 @@ export function defaultJoinDeps(slug: string): JoinDeps {
       const found = findHarnessAncestor(process.ppid);
       return found !== null && found.harness === "codex" ? found.pid : null;
     },
+    codexSessionId: () => codexSessionIdFromEnvironment(process.env),
     chooseReceiveMode: promptReceiveMode,
     claudeDefaultArgs: () => resolveClaudeDefaultArgs(process.env, agentpartyHome()),
     chooseLaunchMode: promptLaunchMode,

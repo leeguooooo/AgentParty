@@ -55,10 +55,11 @@ List who is in a channel, tiered by how you can reach them:
               reason/harness/harness_source/remedy). When it cannot be known, who says
               nothing: a wrong remedy is worse than none (#891). No remedy ever tells you
               to start party serve — serve hands the @ to a background runner, which is
-              exactly the behaviour #897 rejected. A codex session has NO per-session
-              inbox: give it the Stop hook (party hook install --codex) so the @ surfaces
-              in the session you are looking at, or hold its app-server connection with
-              party bridge codex — installing a Claude plugin does nothing for codex.
+              exactly the behaviour #897 rejected. ChatGPT Desktop has a native cross-task
+              inbox: use party bridge codex-app with exact source/target task ids. Bare
+              Codex CLI has no equivalent host inbox: use the Stop hook
+              (party hook install --codex), or own its app-server connection with
+              party bridge codex. Installing a Claude plugin does nothing for either path.
 A "⏳ busy" tag means the target is serially handling a wake (e.g. a long run): it
 is reachable but a reply will be slow — an ask that times out means "busy", not
 "offline", so do not re-@ it. "N queued" shows how many wakes are already waiting.
@@ -287,17 +288,27 @@ export function wakeGuidanceOf(r: Row, channel: string): WakeGuidance | undefine
   // CLI 时插件的 SessionStart 唤醒根本没布上。所以 install 之后必须跟一步 update。
   const remedy =
     found.harness === "codex"
-      ? [`party hook install --codex`, `party bridge codex ${ch}`]
+      ? [
+          `party hook install --codex`,
+          `party bridge codex-app ${ch} --target-thread <task-id> --source-thread <another-task-id>`,
+          `party bridge codex ${ch}`,
+        ]
       : [`claude plugin install agentparty@agentparty`, `claude plugin update agentparty@agentparty`];
   return { reason: "no_wake_layer", harness: found.harness, harness_source: found.source, remedy };
 }
 
 // 终端可读版：把结构化建议渲染成一句「怎么修」。codex 档绝不说「装插件即可」——那是 Claude 专属，
-// codex 装了插件依然叫不醒（#879 已实测：codex 无默认 per-session socket 收件箱）。
+// ChatGPT Desktop 走原生跨任务通道；裸 Codex CLI 才回落 Stop hook / app-server bridge。
 export function wakeGuidanceNote(g: WakeGuidance | undefined): string {
   if (g === undefined) return "";
   if (g.harness === "codex") {
-    return ` · ↳ fix: a codex session has no per-session inbox — give it the Stop hook so the @ surfaces in the session you are looking at: run ${g.remedy[0]} (then it picks pending @s up at the end of a turn), or ${g.remedy[1]} to hold its app-server connection right now`;
+    const native = g.remedy.find((item) => item.includes("bridge codex-app"));
+    const bareBridge = g.remedy.find((item) => item.includes("bridge codex "));
+    if (native !== undefined) {
+      return ` · ↳ fix: ChatGPT Desktop can receive @ in an existing task through its native cross-task path: run ${native}. For bare Codex CLI, run ${g.remedy[0]} to pull pending @s at Stop, or ${bareBridge ?? "party bridge codex <channel>"} to own the app-server connection`;
+    }
+    // Compatibility with rows serialized by pre-native clients.
+    return ` · ↳ fix: bare Codex has no native host inbox — run ${g.remedy[0]} to pull pending @s at Stop, or ${bareBridge ?? g.remedy[1] ?? "party bridge codex <channel>"} to own the app-server connection`;
   }
   // 已装旧版时第一条只会回 already installed（不升级），所以第二条 update 不是可选项。
   return ` · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed and matches the party CLI version — run ${g.remedy[0]}, then ${g.remedy[1] ?? "claude plugin update agentparty@agentparty"} (install never upgrades an already-installed plugin), restart Claude Code and rejoin the channel`;

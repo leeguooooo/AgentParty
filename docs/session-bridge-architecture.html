@@ -338,6 +338,23 @@ Current-session tools:
     <section aria-labelledby="codex">
       <h2 id="codex">Codex app-server 单写协议</h2>
       <p>
+        ChatGPT Desktop 另有一条不争抢 writer 的原生路径：AgentParty 连接 App 自己的 0600 IPC
+        router，用 <code>thread-owner-discovery</code> 找到目标 renderer，再调用
+        <code>thread-follower-start-turn</code>。请求仍使用 ChatGPT 自己的
+        <code>codex_app/send_message_to_thread</code> toolOutput XML，因此目标 task 保留原生来源标签与链接。
+      </p>
+      <pre><code>party bridge codex-app &lt;channel&gt; \
+  --target-thread &lt;existing-task-id&gt; \
+  --source-thread &lt;another-task-id&gt;
+
+ChatGPT Desktop 0600 IPC router
+  → thread-owner-discovery
+  → thread-follower-start-turn
+  → codex_app/send_message_to_thread toolOutput XML
+  → existing target task
+  → canonical snapshot / patches exact reconciliation
+  → linked AgentParty reply</code></pre>
+      <p>
         <code>thread/resume</code> 能让多个连接重入同一个 running thread，但“都能读状态”不等于“都能写”。
         Codex 的 <code>turn/start</code> 会先替换活动 task。AgentParty proxy 必须成为唯一写者，
         TUI 和频道输入都经过同一个串行仲裁器。

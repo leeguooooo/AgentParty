@@ -43,6 +43,7 @@ import {
   codexAutoWakeServeDeps,
   defaultCodexAutoWakeDeps,
   handleCodexHookRecord,
+  parseCodexAutoWakeSupervisorArgs,
   maybeStartCodexAutoWake,
   runCodexAutoWakeSupervise,
   type CodexAutoWakeSpawnDeps,
@@ -186,6 +187,56 @@ describe("拉起决策", () => {
     });
   });
 
+  test("ChatGPT Desktop 有第二个同身份 task → 自动拉原生 bridge，不另起 runner", () => {
+    const targetThreadId = CODEX_SESSION_ID;
+    const sourceThreadId = "01a0499f-2ce2-76e1-8734-733f8f169c28";
+    expect(decideCodexAutoWake({
+      mode: "serve",
+      channel: "dev",
+      cwd: "/tmp/project",
+      serveHolderPid: null,
+      hasAgentToken: true,
+      nativeDesktop: true,
+      nativeRoute: { targetThreadId, sourceThreadId },
+    })).toEqual({
+      action: "start",
+      channel: "dev",
+      cwd: "/tmp/project",
+      args: [
+        "hook", "codex-autowake", "--supervise", "--channel", "dev",
+        "--target-thread", targetThreadId,
+        "--source-thread", sourceThreadId,
+      ],
+    });
+  });
+
+  test("native supervisor 只解析 -- 终止符之前的线程参数", () => {
+    expect(parseCodexAutoWakeSupervisorArgs([
+      "--supervise", "--channel", "dev", "--", "--target-thread", CODEX_SESSION_ID,
+      "--source-thread", "01a0499f-2ce2-76e1-8734-733f8f169c28",
+    ])).toEqual({ channel: "dev", targetThreadId: undefined, sourceThreadId: undefined });
+    expect(parseCodexAutoWakeSupervisorArgs([
+      "--supervise", "--channel", "dev", "--target-thread", CODEX_SESSION_ID,
+      "--source-thread", "01a0499f-2ce2-76e1-8734-733f8f169c28", "--", "ignored",
+    ])).toEqual({
+      channel: "dev",
+      targetThreadId: CODEX_SESSION_ID,
+      sourceThreadId: "01a0499f-2ce2-76e1-8734-733f8f169c28",
+    });
+  });
+
+  test("Desktop IPC 可用但还没有第二个 task → 等待，不退回后台新 runner", () => {
+    expect(decideCodexAutoWake({
+      mode: "serve",
+      channel: "dev",
+      cwd: "/tmp/project",
+      serveHolderPid: null,
+      hasAgentToken: true,
+      nativeDesktop: true,
+      nativeRoute: null,
+    })).toMatchObject({ action: "skip", reason: "native-source-missing" });
+  });
+
   test("已有 serve 在跑 → 不拉第二个（一条 @ 跑两次 runner ＝ 双份回帖 / 副作用跑两遍）", () => {
     const decision = decideCodexAutoWake({
       mode: "serve",
@@ -284,6 +335,24 @@ describe("SessionStart 接线", () => {
     expect(d.calls[0]!.cwd).toBe("/tmp/project");
     expect(d.calls[0]!.env[CODEX_AUTO_WAKE_ENV]).toBe("off");
     expect(d.lines.join("\n")).toContain("started:");
+  });
+
+  test("native bridge 子进程继承身份解析器选中的精确 config，不回落全局身份", () => {
+    const d = deps({
+      readConfigAt: () => ({
+        server: "https://party.example.com",
+        token: "agent-token",
+        configPath: "/tmp/exact-agentparty-config.json",
+      }),
+      nativeDesktop: () => true,
+      nativeRoute: () => ({
+        targetThreadId: CODEX_SESSION_ID,
+        sourceThreadId: "01a0499f-2ce2-76e1-8734-733f8f169c28",
+      }),
+    });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start" });
+    expect(d.calls[0]?.env.AGENTPARTY_CONFIG).toBe("/tmp/exact-agentparty-config.json");
+    expect(d.calls[0]?.args).toContain("--target-thread");
   });
 
   test("已有 serve 在跑时，第二个 codex 会话一个都不再拉", () => {
@@ -516,6 +585,27 @@ describe("生命周期：codex 没有 SessionEnd，靠 pid 探活收尾", () => 
     expect(servedArgvs).toEqual([["dev", "--runner", "codex"]]);
     expect(terminated).toBe(1);
     expect(lines.join("\n")).toContain("reaping:");
+  });
+
+  test("supervise 有 native route 时只运行 ChatGPT bridge", async () => {
+    const calls: unknown[] = [];
+    const result = await runCodexAutoWakeSupervise("dev", {
+      env: {},
+      liveOwners: () => 1,
+      nativeRoute: {
+        targetThreadId: CODEX_SESSION_ID,
+        sourceThreadId: "01a0499f-2ce2-76e1-8734-733f8f169c28",
+      },
+      nativeBridge: async (options) => { calls.push(options); return 0; },
+      serve: async () => { throw new Error("native route must not start serve runner"); },
+    });
+    expect(result).toBe(0);
+    expect(calls).toEqual([{
+      channel: "dev",
+      targetThreadId: CODEX_SESSION_ID,
+      sourceThreadId: "01a0499f-2ce2-76e1-8734-733f8f169c28",
+      env: {},
+    }]);
   });
 
   test("回收只发一次信号，不会在 serve 收口期间连发", async () => {
