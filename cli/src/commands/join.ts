@@ -1297,6 +1297,18 @@ export async function run(argv: string[]): Promise<number> {
 }
 
 /** 真机注入点（`party join` 与 `party recover` 共用）：真 spawn / init / hook / send，探活走真锁、真注册表。 */
+export function codexSessionIdFromEnvironment(env: NodeJS.ProcessEnv): string | null {
+  const threadId = typeof env.CODEX_THREAD_ID === "string" && env.CODEX_THREAD_ID !== ""
+    ? env.CODEX_THREAD_ID
+    : null;
+  const legacySessionId = typeof env.CODEX_SESSION_ID === "string" && env.CODEX_SESSION_ID !== ""
+    ? env.CODEX_SESSION_ID
+    : null;
+  const candidate = threadId ?? legacySessionId;
+  if (candidate === null || !isClaudeSessionRegistrySessionId(candidate)) return null;
+  return candidate.toLowerCase();
+}
+
 export function defaultJoinDeps(slug: string): JoinDeps {
   return {
     spawn: spawnSync,
@@ -1330,14 +1342,7 @@ export function defaultJoinDeps(slug: string): JoinDeps {
       const found = findHarnessAncestor(process.ppid);
       return found !== null && found.harness === "codex" ? found.pid : null;
     },
-    codexSessionId: () => {
-      const values = [process.env.CODEX_THREAD_ID, process.env.CODEX_SESSION_ID]
-        .filter((value): value is string => typeof value === "string" && value !== "")
-        .map((value) => value.toLowerCase());
-      const distinct = [...new Set(values)];
-      if (distinct.length !== 1 || !isClaudeSessionRegistrySessionId(distinct[0])) return null;
-      return distinct[0]!;
-    },
+    codexSessionId: () => codexSessionIdFromEnvironment(process.env),
     chooseReceiveMode: promptReceiveMode,
     claudeDefaultArgs: () => resolveClaudeDefaultArgs(process.env, agentpartyHome()),
     chooseLaunchMode: promptLaunchMode,

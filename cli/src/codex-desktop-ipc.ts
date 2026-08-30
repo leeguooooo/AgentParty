@@ -137,7 +137,9 @@ export function validateCodexDesktopIpcRoute(
   const source = entries.find((entry) => entry.session_id.toLowerCase() === route.sourceThreadId.toLowerCase());
   if (
     target === undefined || source === undefined || target.pid !== source.pid ||
-    target.channel !== source.channel || target.server !== source.server || target.identity !== source.identity
+    target.channel !== source.channel ||
+    target.server === undefined || source.server === undefined || target.server !== source.server ||
+    target.identity === undefined || source.identity === undefined || target.identity !== source.identity
   ) {
     throw new CodexDesktopIpcUnavailableError(
       `ChatGPT IPC source and target are not registered to the same app-server identity`,
@@ -187,6 +189,7 @@ export interface CodexDesktopIpcClientOptions {
   env?: NodeJS.ProcessEnv;
   clientType?: string;
   requestTimeoutMs?: number;
+  startTurnTimeoutMs?: number;
 }
 
 export interface CodexDesktopIpcTransport {
@@ -222,11 +225,13 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
   private closed = false;
   private readonly socketPath: string;
   private readonly timeoutMs: number;
+  private readonly startTurnTimeoutMs: number;
   private readonly clientType: string;
 
   constructor(options: CodexDesktopIpcClientOptions = {}) {
     this.socketPath = codexDesktopIpcSocketPath(options.env ?? process.env);
     this.timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.startTurnTimeoutMs = options.startTurnTimeoutMs ?? 30_000;
     this.clientType = options.clientType ?? "agentparty-native-bridge";
   }
 
@@ -300,7 +305,7 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
           context: { inheritThreadSettings: true, threadStartKind: "user" },
         },
       },
-      { targetClientId: ownerClientId, timeoutMs: 30_000 },
+      { targetClientId: ownerClientId, timeoutMs: this.startTurnTimeoutMs },
     );
     const result = object(response.result) && object(response.result.result)
       ? response.result.result
@@ -425,12 +430,17 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
   }
 
   private handleData(chunk: Buffer): void {
+    if (this.closed) return;
     this.incoming = Buffer.concat([this.incoming, chunk]);
     for (;;) {
       if (this.incoming.length < 4) return;
       const length = this.incoming.readUInt32LE(0);
       if (length === 0 || length > MAX_IPC_FRAME_BYTES) {
-        this.handleClose(new Error(`Invalid ChatGPT IPC frame length ${length}`));
+        const error = new Error(`Invalid ChatGPT IPC frame length ${length}`);
+        const socket = this.socket;
+        this.handleClose(error);
+        socket?.destroy();
+        this.socket = null;
         return;
       }
       if (this.incoming.length < length + 4) return;
@@ -438,7 +448,11 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
       try {
         message = JSON.parse(this.incoming.subarray(4, length + 4).toString("utf8"));
       } catch (error) {
-        this.handleClose(error instanceof Error ? error : new Error(String(error)));
+        const cause = error instanceof Error ? error : new Error(String(error));
+        const socket = this.socket;
+        this.handleClose(cause);
+        socket?.destroy();
+        this.socket = null;
         return;
       }
       this.incoming = this.incoming.subarray(length + 4);
@@ -550,17 +564,31 @@ function canonicalTurns(state: Record<string, unknown>): CodexDesktopTurn[] {
   return out;
 }
 
+const FORBIDDEN_PATCH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
 function applyPatch(root: Record<string, unknown>, raw: unknown): void {
   if (!object(raw) || typeof raw.op !== "string" || !Array.isArray(raw.path) || raw.path.length === 0) {
     throw new Error(`Invalid ChatGPT IPC patch`);
   }
-  const path = raw.path;
+  const path: Array<string | number> = [];
+  for (const segment of raw.path) {
+    if (
+      (typeof segment !== "string" && typeof segment !== "number") ||
+      (typeof segment === "number" && (!Number.isSafeInteger(segment) || segment < 0))
+    ) {
+      throw new Error(`Invalid ChatGPT IPC patch path segment`);
+    }
+    if (typeof segment === "string" && FORBIDDEN_PATCH_SEGMENTS.has(segment)) {
+      throw new Error(`Rejected ChatGPT IPC patch path segment`);
+    }
+    path.push(segment);
+  }
   let target: unknown = root;
   for (const segment of path.slice(0, -1)) {
     if (!object(target) && !Array.isArray(target)) throw new Error(`Invalid ChatGPT IPC patch path`);
-    target = (target as Record<string | number, unknown>)[segment as string | number];
+    target = (target as Record<string | number, unknown>)[segment];
   }
-  const key = path[path.length - 1] as string | number;
+  const key = path[path.length - 1]!;
   if (Array.isArray(target) && typeof key === "number") {
     if (raw.op === "add") target.splice(key, 0, raw.value);
     else if (raw.op === "remove") target.splice(key, 1);

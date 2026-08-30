@@ -161,7 +161,7 @@ export async function retryClaudeBridgeEndpoint<T>(
   }
 }
 
-const HELP = `usage: party bridge <claude|codex|codex-app> [channel] [options] [-- <harness args...>]
+const HELP = `usage: party bridge <claude|codex|codex-app> [channel] [options]
 
 forms:
   party bridge claude [channel|--channel C] [--cross-session auto|off|required] [--cross-session-inbound accept|hold|refuse] [--check [--json]] [-- <claude args...>]

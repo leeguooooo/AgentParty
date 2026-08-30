@@ -61,6 +61,16 @@ describe("cli subprocess", () => {
       configPath: path,
       error: null,
     });
+    expect(parseGlobalCliArgs(["--config", path, "--", "whoami", "--json"])).toEqual({
+      argv: ["whoami", "--json"],
+      configPath: path,
+      error: null,
+    });
+    expect(parseGlobalCliArgs(["--", "whoami"])).toEqual({
+      argv: ["whoami"],
+      configPath: null,
+      error: null,
+    });
     expect(decodeGlobalConfigPath(encoded)).toBe(path);
   });
 
@@ -200,6 +210,8 @@ describe("cli subprocess", () => {
     const help = await runCli(["bridge", "claude", "verify", "--help"]);
     expect(help.code).toBe(0);
     expect(help.stdout.startsWith("usage: party bridge <claude|codex|codex-app>")).toBe(true);
+    expect(help.stdout.split("\n")[0]).not.toContain("harness args");
+    expect(help.stdout).toContain("party bridge codex  [channel|--channel C]");
     expect(help.stderr).toBe("");
   });
 

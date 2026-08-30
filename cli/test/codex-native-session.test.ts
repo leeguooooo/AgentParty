@@ -14,12 +14,14 @@ const TARGET = "01a0499f-2ce2-76e1-8734-733f8f169c28";
 class MockTransport implements CodexDesktopIpcTransport {
   starts = 0;
   closed = false;
+  calls: string[] = [];
   startError: Error | null = null;
   waitResult: Promise<CodexDesktopTurn> = Promise.resolve(completed("turn-1", "native final"));
-  async connect() {}
+  async connect() { this.calls.push("connect"); }
   async discoverThreadOwner() { return "owner"; }
-  async followThread() {}
+  async followThread() { this.calls.push("followThread"); }
   async startDelegatedTurn() {
+    this.calls.push("startDelegatedTurn");
     this.starts += 1;
     if (this.startError !== null) throw this.startError;
     return { turnId: "turn-1", ownerClientId: "owner" };
@@ -46,10 +48,12 @@ describe("CodexNativeSessionController", () => {
       ipcFactory: () => transport,
     });
     let beforeWrite = 0;
+    let authorized = 0;
     const input: CodexBridgeInput = {
       text: "AgentParty body",
       clientUserMessageId: "agentparty:delivery-1",
-      beforeWrite: () => { beforeWrite += 1; },
+      beforeWrite: () => { beforeWrite += 1; transport.calls.push("beforeWrite"); },
+      checkWriteAuthorized: () => { authorized += 1; transport.calls.push("checkWriteAuthorized"); },
     };
     const completedText = new Promise<string>((resolve) => {
       controller.onTurnCompleted((turn) => {
@@ -58,6 +62,10 @@ describe("CodexNativeSessionController", () => {
     });
     expect(await controller.submit(input)).toEqual({ kind: "started", turnId: "turn-1" });
     expect(beforeWrite).toBe(1);
+    expect(authorized).toBe(1);
+    expect(transport.calls.slice(0, 5)).toEqual([
+      "connect", "followThread", "beforeWrite", "checkWriteAuthorized", "startDelegatedTurn",
+    ]);
     expect(await completedText).toBe("native final");
     expect(controller.turnForClientId(input.clientUserMessageId)?.status).toBe("completed");
     expect(transport.closed).toBe(true);
@@ -73,11 +81,34 @@ describe("CodexNativeSessionController", () => {
       ipcFactory: () => transport,
     });
     const input = { text: "once", clientUserMessageId: "agentparty:duplicate" };
-    const first = await controller.submit(input);
-    expect(await controller.submit(input)).toEqual({ kind: "duplicate", turnId: "turn-1" });
+    const [first, duplicate] = await Promise.all([controller.submit(input), controller.submit(input)]);
+    expect(duplicate).toEqual({ kind: "duplicate", turnId: "turn-1" });
     expect(transport.starts).toBe(1);
     release(completed("turn-1", "done"));
     expect(first).toEqual({ kind: "started", turnId: "turn-1" });
+  });
+
+  test("authorization rejection rolls back after beforeWrite and closes the client", async () => {
+    const transport = new MockTransport();
+    const controller = new CodexNativeSessionController({
+      sourceThreadId: SOURCE,
+      targetThreadId: TARGET,
+      ipcFactory: () => transport,
+    });
+    let rejected = 0;
+    await expect(controller.submit({
+      text: "denied",
+      clientUserMessageId: "agentparty:denied",
+      beforeWrite: () => { transport.calls.push("beforeWrite"); },
+      checkWriteAuthorized: () => { transport.calls.push("checkWriteAuthorized"); throw new Error("lease lost"); },
+      onWriteRejected: () => { rejected += 1; transport.calls.push("onWriteRejected"); },
+    })).rejects.toThrow("lease lost");
+    expect(transport.starts).toBe(0);
+    expect(transport.closed).toBe(true);
+    expect(rejected).toBe(1);
+    expect(transport.calls).toEqual([
+      "connect", "followThread", "beforeWrite", "checkWriteAuthorized", "onWriteRejected",
+    ]);
   });
 
   test("definitive IPC rejection rolls back the write boundary", async () => {
@@ -121,5 +152,46 @@ describe("CodexNativeSessionController", () => {
     expect(await done).toBe("reconciled final");
     expect(rejected).toBe(0);
     expect(dispatches).toEqual(["uncertain", "started"]);
+  });
+
+  test("completed turn without final text remains completed", async () => {
+    const transport = new MockTransport();
+    transport.waitResult = Promise.resolve({ turnId: "turn-empty", status: "completed", params: {}, items: [] });
+    const controller = new CodexNativeSessionController({
+      sourceThreadId: SOURCE,
+      targetThreadId: TARGET,
+      ipcFactory: () => transport,
+    });
+    const done = new Promise<{ status: string; itemCount: number }>((resolve) => {
+      controller.onTurnCompleted((turn) => resolve({ status: turn.status, itemCount: turn.items?.length ?? 0 }));
+    });
+    expect(await controller.submit({
+      text: "empty",
+      clientUserMessageId: "agentparty:empty",
+    })).toEqual({ kind: "started", turnId: "turn-1" });
+    expect(await done).toEqual({ status: "completed", itemCount: 0 });
+  });
+
+  test("unresolved unknown listeners are isolated", async () => {
+    const transport = new MockTransport();
+    transport.startError = new CodexDesktopIpcUnknownOutcomeError("lost response");
+    transport.waitResult = Promise.reject(new CodexDesktopIpcRequestError("cannot reconcile"));
+    const logs: string[] = [];
+    const controller = new CodexNativeSessionController({
+      sourceThreadId: SOURCE,
+      targetThreadId: TARGET,
+      ipcFactory: () => transport,
+      log: (line) => logs.push(line),
+    });
+    controller.onUnresolvedUnknown(() => { throw new Error("listener one failed"); });
+    const notified = new Promise<void>((resolve) => {
+      controller.onUnresolvedUnknown(() => { resolve(); });
+    });
+    expect(await controller.submit({
+      text: "unknown",
+      clientUserMessageId: "agentparty:listener-isolation",
+    })).toEqual({ kind: "uncertain", reason: "unknown_outcome" });
+    await notified;
+    expect(logs.join("\n")).toContain("unresolved-unknown listener failed: listener one failed");
   });
 });

@@ -119,6 +119,7 @@ export function parseGlobalCliArgs(argv: readonly string[]): GlobalCliArgs {
       configPath = value;
     }
   }
+  if (rest[0] === "--") rest.shift();
   return { argv: rest, configPath, error: null };
 }
 

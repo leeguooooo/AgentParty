@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CodexDesktopIpcClient,
+  CodexDesktopIpcUnknownOutcomeError,
   codexDelegationEnvelope,
   selectCodexDesktopIpcRoute,
 } from "../src/codex-desktop-ipc";
@@ -209,5 +210,113 @@ describe("ChatGPT Desktop follower IPC", () => {
       { ...base, session_id: TARGET },
       { ...base, session_id: SOURCE, identity: "other" },
     ])).toBeNull();
+    expect(selectCodexDesktopIpcRoute(TARGET, 7, [
+      { ...base, session_id: TARGET },
+      { ...base, session_id: SOURCE, identity: undefined },
+    ])).toBeNull();
+  });
+
+  test("start-turn timeout is an unknown outcome and must not be replayed", async () => {
+    root = mkdtempSync(join(tmpdir(), "agentparty-ipc-"));
+    const ipcDir = join(root, "ipc");
+    mkdirSync(ipcDir, { mode: 0o700 });
+    const socketPath = join(ipcDir, "ipc.sock");
+    server = createServer((socket) => {
+      reader(socket, (message) => {
+        if (message.type !== "request" || typeof message.requestId !== "string") return;
+        if (message.method === "initialize") {
+          socket.write(frame({
+            type: "response", requestId: message.requestId, resultType: "success",
+            handledByClientId: "client-timeout", result: { clientId: "client-timeout" },
+          }));
+        } else if (message.method === "thread-owner-discovery") {
+          socket.write(frame({
+            type: "response", requestId: message.requestId, resultType: "success",
+            handledByClientId: "owner-timeout", result: {},
+          }));
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("error", reject);
+      server!.listen(socketPath, () => { chmodSync(socketPath, 0o600); resolve(); });
+    });
+    const client = new CodexDesktopIpcClient({
+      env: { CODEX_HOME: root },
+      requestTimeoutMs: 100,
+      startTurnTimeoutMs: 20,
+    });
+    await client.connect();
+    await expect(client.startDelegatedTurn({
+      targetThreadId: TARGET,
+      sourceThreadId: SOURCE,
+      prompt: "timeout",
+      clientUserMessageId: "agentparty:timeout",
+    })).rejects.toBeInstanceOf(CodexDesktopIpcUnknownOutcomeError);
+    client.close();
+  });
+
+  test("revision mismatch discards patches and requests a fresh snapshot", async () => {
+    root = mkdtempSync(join(tmpdir(), "agentparty-ipc-"));
+    const ipcDir = join(root, "ipc");
+    mkdirSync(ipcDir, { mode: 0o700 });
+    const socketPath = join(ipcDir, "ipc.sock");
+    let followCount = 0;
+    server = createServer((socket) => {
+      reader(socket, (message) => {
+        if (message.type === "request" && message.method === "initialize" && typeof message.requestId === "string") {
+          socket.write(frame({
+            type: "response", requestId: message.requestId, resultType: "success",
+            handledByClientId: "client-revision", result: { clientId: "client-revision" },
+          }));
+          return;
+        }
+        if (message.type !== "broadcast" || message.method !== "thread-stream-following-changed") return;
+        followCount += 1;
+        socket.write(frame({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "owner-revision",
+          targetClientIds: ["client-revision"],
+          version: 11,
+          params: {
+            conversationId: TARGET,
+            hostId: "local",
+            change: {
+              type: followCount === 1 ? "snapshot" : "snapshot",
+              revision: 1,
+              conversationState: {
+                turnHistory: { kind: "canonical", history: { entitiesByKey: {} } },
+              },
+            },
+          },
+        }));
+        if (followCount === 1) {
+          setTimeout(() => socket.write(frame({
+            type: "broadcast",
+            method: "thread-stream-state-changed",
+            sourceClientId: "owner-revision",
+            targetClientIds: ["client-revision"],
+            version: 11,
+            params: {
+              conversationId: TARGET,
+              hostId: "local",
+              change: { type: "patches", baseRevision: 9, revision: 10, patches: [] },
+            },
+          })), 5);
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once("error", reject);
+      server!.listen(socketPath, () => { chmodSync(socketPath, 0o600); resolve(); });
+    });
+    const client = new CodexDesktopIpcClient({ env: { CODEX_HOME: root }, requestTimeoutMs: 500 });
+    await client.connect();
+    await client.followThread(TARGET);
+    const deadline = Date.now() + 500;
+    while (followCount < 2 && Date.now() < deadline) await Bun.sleep(5);
+    expect(followCount).toBe(2);
+    client.close();
   });
 });

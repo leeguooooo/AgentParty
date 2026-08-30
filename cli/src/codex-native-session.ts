@@ -121,10 +121,10 @@ export class CodexNativeSessionController implements CodexAgentPartySession {
     await client.connect();
     await client.followThread(this.options.targetThreadId, this.options.hostId ?? "local");
     await input.beforeWrite?.();
-    input.checkWriteAuthorized?.();
 
     let accepted: { turnId: string };
     try {
+      input.checkWriteAuthorized?.();
       accepted = await client.startDelegatedTurn({
         targetThreadId: this.options.targetThreadId,
         sourceThreadId: this.options.sourceThreadId,
@@ -215,7 +215,11 @@ export class CodexNativeSessionController implements CodexAgentPartySession {
 
   private async emitUnresolvedUnknown(input: CodexBridgeInput): Promise<void> {
     for (const listener of this.unresolvedUnknownListeners) {
-      await listener({ threadId: this.options.targetThreadId, input });
+      try {
+        await listener({ threadId: this.options.targetThreadId, input });
+      } catch (error) {
+        this.log(`codex-native: unresolved-unknown listener failed: ${errorText(error)}`);
+      }
     }
   }
 
@@ -248,13 +252,13 @@ function inProgressTurn(input: CodexBridgeInput, turnId: string): CodexTurn {
 function completedTurn(turn: CodexDesktopTurn): CodexTurn {
   if (turn.status === "completed") {
     const text = finalAgentText(turn);
-    if (text !== null) {
-      return {
-        id: turn.turnId,
-        status: "completed",
-        items: [{ id: `ipc-final-${randomUUID()}`, type: "agentMessage", phase: "final_answer", text }],
-      };
-    }
+    return {
+      id: turn.turnId,
+      status: "completed",
+      items: text === null
+        ? []
+        : [{ id: `ipc-final-${randomUUID()}`, type: "agentMessage", phase: "final_answer", text }],
+    };
   }
   return {
     id: turn.turnId,

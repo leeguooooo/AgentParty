@@ -43,6 +43,7 @@ import {
   codexAutoWakeServeDeps,
   defaultCodexAutoWakeDeps,
   handleCodexHookRecord,
+  parseCodexAutoWakeSupervisorArgs,
   maybeStartCodexAutoWake,
   runCodexAutoWakeSupervise,
   type CodexAutoWakeSpawnDeps,
@@ -206,6 +207,21 @@ describe("拉起决策", () => {
         "--target-thread", targetThreadId,
         "--source-thread", sourceThreadId,
       ],
+    });
+  });
+
+  test("native supervisor 只解析 -- 终止符之前的线程参数", () => {
+    expect(parseCodexAutoWakeSupervisorArgs([
+      "--supervise", "--channel", "dev", "--", "--target-thread", CODEX_SESSION_ID,
+      "--source-thread", "01a0499f-2ce2-76e1-8734-733f8f169c28",
+    ])).toEqual({ channel: "dev", targetThreadId: undefined, sourceThreadId: undefined });
+    expect(parseCodexAutoWakeSupervisorArgs([
+      "--supervise", "--channel", "dev", "--target-thread", CODEX_SESSION_ID,
+      "--source-thread", "01a0499f-2ce2-76e1-8734-733f8f169c28", "--", "ignored",
+    ])).toEqual({
+      channel: "dev",
+      targetThreadId: CODEX_SESSION_ID,
+      sourceThreadId: "01a0499f-2ce2-76e1-8734-733f8f169c28",
     });
   });
 

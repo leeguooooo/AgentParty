@@ -13,7 +13,14 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BEHAVIOR_CONTRACT_BODY_LINES } from "@agentparty/shared/onboarding";
-import { probeClaudeArmedListener, probeCodexWakeLayer, runJoin, type JoinDeps, type JoinOptions } from "../src/commands/join";
+import {
+  codexSessionIdFromEnvironment,
+  probeClaudeArmedListener,
+  probeCodexWakeLayer,
+  runJoin,
+  type JoinDeps,
+  type JoinOptions,
+} from "../src/commands/join";
 import { classifyListenerCommand } from "../src/claude-armed-listener";
 import { healServerUrl } from "../src/validation";
 import { RUNNING_VERSION } from "../src/upgrade";
@@ -49,6 +56,15 @@ const rulesPath = () => join(tmp, ".agentparty", "agents", "agentparty-bot-dev.r
 const bindingsPath = () => join(tmp, ".agentparty", "join-bindings.json");
 
 describe("party join —— 一条命令跑完整段接入（#944）", () => {
+  test("Codex 会话优先采用当前 thread id，旧 session id 只作兜底", () => {
+    const threadId = "019f95e8-2c0b-7903-8779-cd102c5ecd4a";
+    const legacyId = "019f95e8-2c0b-7903-8779-cd102c5ecd4b";
+    expect(codexSessionIdFromEnvironment({ CODEX_THREAD_ID: threadId, CODEX_SESSION_ID: legacyId }))
+      .toBe(threadId);
+    expect(codexSessionIdFromEnvironment({ CODEX_SESSION_ID: legacyId })).toBe(legacyId);
+    expect(codexSessionIdFromEnvironment({ CODEX_THREAD_ID: "invalid", CODEX_SESSION_ID: legacyId })).toBeNull();
+  });
+
   test("claude 档 happy path：config / rules / 绑定 / MCP 注册 / 报到全部落地，引导报「✅ 接入完成」", async () => {
     mock = startRestMock();
     const record: string[][] = [];

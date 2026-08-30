@@ -1654,20 +1654,33 @@ export async function runCodexAutoWakeSupervise(
   }
 }
 
+export function parseCodexAutoWakeSupervisorArgs(argv: readonly string[]): {
+  channel?: string;
+  targetThreadId?: string;
+  sourceThreadId?: string;
+} {
+  const boundary = argv.indexOf("--");
+  const flags = boundary === -1 ? argv : argv.slice(0, boundary);
+  const valueAfter = (name: string): string | undefined => {
+    const index = flags.indexOf(name);
+    return index >= 0 ? flags[index + 1] : undefined;
+  };
+  return {
+    channel: valueAfter("--channel"),
+    targetThreadId: valueAfter("--target-thread"),
+    sourceThreadId: valueAfter("--source-thread"),
+  };
+}
+
 function runCodexAutoWakeCommand(argv: string[]): Promise<number> | number {
   const env = process.env;
   const home = agentpartyHome(env);
   if (argv[0] === "--supervise") {
-    const idx = argv.indexOf("--channel");
-    const channel = idx >= 0 ? argv[idx + 1] : undefined;
+    const { channel, targetThreadId, sourceThreadId } = parseCodexAutoWakeSupervisorArgs(argv);
     if (!channel) {
       console.error("hook codex-autowake --supervise 需要 --channel <channel>");
       return 1;
     }
-    const targetIdx = argv.indexOf("--target-thread");
-    const sourceIdx = argv.indexOf("--source-thread");
-    const targetThreadId = targetIdx >= 0 ? argv[targetIdx + 1] : undefined;
-    const sourceThreadId = sourceIdx >= 0 ? argv[sourceIdx + 1] : undefined;
     if ((targetThreadId === undefined) !== (sourceThreadId === undefined)) {
       console.error("native codex-autowake 必须同时给 --target-thread 与 --source-thread");
       return 1;
