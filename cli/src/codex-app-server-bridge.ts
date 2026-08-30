@@ -115,23 +115,23 @@ export interface CodexFrontendReset {
   threadId: string | null;
 }
 type FrontendResetListener = (event: CodexFrontendReset) => void;
-type ThreadSwitchMethod =
+export type ThreadSwitchMethod =
   | "thread/start"
   | "thread/resume"
   | "thread/fork"
   | "thread/rollback"
   | "thread/inject_items";
-type ThreadSwitchGuard = (attempt: {
+export type ThreadSwitchGuard = (attempt: {
   method: ThreadSwitchMethod;
   currentThreadId: string;
   targetThreadId: string | null;
 }) => void;
-type SessionMutationGuard = (attempt: {
+export type SessionMutationGuard = (attempt: {
   method: ThreadSwitchMethod | CodexInteractiveMutation;
   currentThreadId: string | null;
   mode: "wait" | "check";
 }) => void | Promise<void>;
-type UnresolvedUnknownListener = (event: {
+export type UnresolvedUnknownListener = (event: {
   threadId: string;
   input: CodexBridgeInput;
 }) => void | Promise<void>;
@@ -667,8 +667,8 @@ interface AccumulatedAgentMessage {
 const MAX_RETAINED_COMPLETED_TURNS = 256;
 const MAX_RETAINED_COMPLETED_TURN_BYTES = 16 * 1024 * 1024;
 
-type DispatchListener = (input: CodexBridgeInput, dispatch: CodexDispatch) => void | Promise<void>;
-type CompletedTurnListener = (turn: CodexTurn) => void | Promise<void>;
+export type DispatchListener = (input: CodexBridgeInput, dispatch: CodexDispatch) => void | Promise<void>;
+export type CompletedTurnListener = (turn: CodexTurn) => void | Promise<void>;
 
 function asThread(value: unknown): CodexThread | null {
   if (!isObject(value) || typeof value.id !== "string" || !isObject(value.status) || typeof value.status.type !== "string") {
@@ -2971,7 +2971,7 @@ interface ParkedCodexContinuation {
 export interface CodexAgentPartyBridgeOptions {
   channel: string;
   connection: BridgeConnection;
-  session: CodexSessionController;
+  session: CodexAgentPartySession;
   postReply: (reply: {
     body: string;
     mentions: string[];
@@ -2989,6 +2989,25 @@ export interface CodexAgentPartyBridgeOptions {
     update: DeliveryUpdateFrame,
   ) => Promise<AuthoritativeDeliveryState | void>;
   log?: (line: string) => void;
+}
+
+/**
+ * The delivery ledger needs a small session-facing contract. The classic
+ * bridge implements it with a directly owned app-server connection; the
+ * native ChatGPT bridge implements it through codex_app tools on Desktop's
+ * existing app-server.
+ */
+export interface CodexAgentPartySession {
+  readonly activeThreadId: string | null;
+  onDispatch(listener: DispatchListener): () => void;
+  onTurnCompleted(listener: CompletedTurnListener): () => void;
+  onThreadSwitch(listener: ThreadSwitchGuard): () => void;
+  onSessionMutation(listener: SessionMutationGuard): () => void;
+  onUnresolvedUnknown(listener: UnresolvedUnknownListener): () => void;
+  abandonUnknownOutcome(threadId: string, input: CodexBridgeInput): Promise<CodexDispatch>;
+  cancelQueued(clientUserMessageId: string): Promise<boolean>;
+  submit(input: CodexBridgeInput): Promise<CodexDispatch>;
+  turnForClientId(clientId: string): CodexTurn | null;
 }
 
 function deliveryUpdate(

@@ -199,7 +199,7 @@ describe("cli subprocess", () => {
   test("Cross-session verifier mode does not reserve the verify channel name", async () => {
     const help = await runCli(["bridge", "claude", "verify", "--help"]);
     expect(help.code).toBe(0);
-    expect(help.stdout.startsWith("usage: party bridge <claude|codex>")).toBe(true);
+    expect(help.stdout.startsWith("usage: party bridge <claude|codex|codex-app>")).toBe(true);
     expect(help.stderr).toBe("");
   });
 

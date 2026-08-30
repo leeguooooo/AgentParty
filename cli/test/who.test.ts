@@ -503,7 +503,11 @@ describe("who wake guidance（#879/#891：判据在场才给建议，判不出�
       reason: "no_wake_layer",
       harness: "codex",
       harness_source: "agent_session",
-      remedy: ["party hook install --codex", "party bridge codex pwtk"],
+      remedy: [
+        "party hook install --codex",
+        "party bridge codex-app pwtk --target-thread <task-id> --source-thread <another-task-id>",
+        "party bridge codex pwtk",
+      ],
     });
   });
 
@@ -571,10 +575,14 @@ describe("who wake guidance（#879/#891：判据在场才给建议，判不出�
       reason: "no_wake_layer",
       harness: "codex",
       harness_source: "agent_session",
-      remedy: ["party hook install --codex", "party bridge codex pwtk"],
+      remedy: [
+        "party hook install --codex",
+        "party bridge codex-app pwtk --target-thread <task-id> --source-thread <another-task-id>",
+        "party bridge codex pwtk",
+      ],
     });
     expect(note).toBe(
-      " · ↳ fix: a codex session has no per-session inbox — give it the Stop hook so the @ surfaces in the session you are looking at: run party hook install --codex (then it picks pending @s up at the end of a turn), or party bridge codex pwtk to hold its app-server connection right now",
+      " · ↳ fix: ChatGPT Desktop can receive @ in an existing task through its native cross-task path: run party bridge codex-app pwtk --target-thread <task-id> --source-thread <another-task-id>. For bare Codex CLI, run party hook install --codex to pull pending @s at Stop, or party bridge codex pwtk to own the app-server connection",
     );
     expect(note).not.toContain("plugin");
     expect(note).not.toContain("party serve");
@@ -599,10 +607,12 @@ describe("who wake guidance（#879/#891：判据在场才给建议，判不出�
     expect(wakeGuidanceNote(undefined)).toBe("");
   });
 
-  test("help 文案钉住 codex 无 per-session 收件箱这条硬事实与 JSON 字段名", () => {
+  test("help 文案区分 ChatGPT native task inbox 与裸 Codex，并保留 JSON 字段名", () => {
     expect(HELP_TEXT).toContain("wake_guidance");
     expect(HELP_TEXT).toContain("pull_wake");
-    expect(HELP_TEXT).toContain("A codex session has NO per-session");
+    expect(HELP_TEXT).toContain("ChatGPT Desktop has a native cross-task");
+    expect(HELP_TEXT).toContain("Bare\n              Codex CLI has no equivalent host inbox");
+    expect(HELP_TEXT).toContain("party bridge codex-app");
     expect(HELP_TEXT).toContain("party bridge codex");
     expect(HELP_TEXT).toContain("party hook install --codex");
   });
@@ -802,7 +812,11 @@ describe("who 唤醒建议的装配（presence → 行 → 终端一行）", () 
       reason: "no_wake_layer",
       harness: "codex",
       harness_source: "agent_session",
-      remedy: ["party hook install --codex", "party bridge codex pwtk"],
+      remedy: [
+        "party hook install --codex",
+        "party bridge codex-app pwtk --target-thread <task-id> --source-thread <another-task-id>",
+        "party bridge codex pwtk",
+      ],
     });
     const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0);
     expect(line).toContain("⚠ no live wake layer");

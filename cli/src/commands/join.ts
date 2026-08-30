@@ -83,6 +83,11 @@ import {
   type ClaudePluginShellInspection,
 } from "./doctor";
 import type { CodexAutoWakeOutcome } from "./hook";
+import {
+  codexNativeBrokerMcpCommand,
+  codexNativeBrokerMcpName,
+  installCodexNativeBrokerScript,
+} from "../codex-native-broker";
 
 // 与 probeCodexWakeLayer 并排导出：两档的「唤醒层进程探活」都从这里拿（#957 / #979）。
 export { probeClaudeArmedListener };
@@ -242,6 +247,13 @@ export interface JoinDeps {
    * 属于这批 task，不能选出眼前这个；缺失时只允许 PID 下恰好一个注册表候选。
    */
   codexSessionId: () => string | null;
+  /** Signed ChatGPT Desktop MCP wrapper that holds the native broker. */
+  codexNativeBrokerMcp: (baseName: string) => {
+    name: string;
+    command: string;
+    args: string[];
+  } | null;
+  installCodexNativeBroker: () => void;
   /**
    * 第 2 步（claude 档）：有 TTY 且未 --yes 时问用户选接收方式。返回 null ＝ 没法问（无 TTY），
    * 按 harness 默认走并把所选印出来。--yes 时 runJoin 根本不调它。缺省 readline 一问。
@@ -333,6 +345,44 @@ function registerCodexMcp(deps: JoinDeps, name: string, configPath: string, slug
     return { level: "fail", msg: `codex MCP 注册失败：${name}`, remedy: addCmd };
   }
   return { level: "ok", msg: `MCP 已注册：${name}` };
+}
+
+/**
+ * ChatGPT Desktop native bridge holder. This MCP intentionally exposes zero
+ * model tools; its signed Node process only keeps the private cross-thread
+ * broker alive next to the existing AgentParty MCP.
+ */
+function registerCodexNativeBrokerMcp(deps: JoinDeps, baseName: string): StepOutcome {
+  const broker = deps.codexNativeBrokerMcp(baseName);
+  if (broker === null) {
+    return { level: "skip", msg: "本机没有 ChatGPT/Codex Desktop 的签名 Node；保留 Stop hook 兼容路径" };
+  }
+  try {
+    deps.installCodexNativeBroker();
+  } catch (error) {
+    return {
+      level: "warn",
+      msg: `写 native broker 脚本失败：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const name = broker.name;
+  const probe = deps.spawn("codex", ["mcp", "get", name], { encoding: "utf8", timeout: 30_000 });
+  if (probe.error !== undefined && (probe.error as NodeJS.ErrnoException).code === "ENOENT") {
+    return { level: "skip", msg: "本机没有 codex CLI，无法注册 ChatGPT native broker MCP" };
+  }
+  if (probe.status === 0) {
+    return { level: "ok", msg: `${name} 已注册（broker 脚本已刷新）` };
+  }
+  const added = deps.spawn(
+    "codex",
+    ["mcp", "add", name, "--", broker.command, ...broker.args],
+    { encoding: "utf8", timeout: 30_000 },
+  );
+  if (added.error !== undefined || added.status !== 0) {
+    const why = String(added.stderr || added.error || `exit ${String(added.status)}`).trim();
+    return { level: "warn", msg: `注册 ${name} 失败：${why}` };
+  }
+  return { level: "ok", msg: `${name} 已注册；重开 ChatGPT 后启用原生跨任务通道` };
 }
 
 const CLAUDE_PLUGIN = SHARED_CLAUDE_PLUGIN;
@@ -820,7 +870,10 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       ctx.identity = identity;
       // 注册 MCP（先探后加，#898）。claude/codex 各走各的；other（探不出）两条都试——「不知道就都覆盖」。
       if (harness === "claude" || harness === "other") detail.push(outcomeLine("注册 claude MCP", registerClaudeMcp(deps, mcpName, configPath, slug)));
-      if (harness === "codex" || harness === "other") detail.push(outcomeLine("注册 codex MCP", registerCodexMcp(deps, mcpName, configPath, slug)));
+      if (harness === "codex" || harness === "other") {
+        detail.push(outcomeLine("注册 codex MCP", registerCodexMcp(deps, mcpName, configPath, slug)));
+        detail.push(outcomeLine("注册 ChatGPT native broker", registerCodexNativeBrokerMcp(deps, mcpName)));
+      }
       // claude 档：crossSessionInbound=accept（#844），否则跨会话 @ 默认 hold 会被 drop。
       if (harness === "claude") detail.push(outcomeLine("开启跨会话 @ 接收", setClaudeInboxAccept(deps)));
       // 报到（#597）。init 只写配置不发言，必须补这一条，否则网页/频道里看不到你。能 @ 邀请人就 @。
@@ -1335,6 +1388,15 @@ export function defaultJoinDeps(slug: string): JoinDeps {
       const distinct = [...new Set(values)];
       if (distinct.length !== 1 || !isClaudeSessionRegistrySessionId(distinct[0])) return null;
       return distinct[0]!;
+    },
+    codexNativeBrokerMcp: (baseName) => {
+      const broker = codexNativeBrokerMcpCommand();
+      return broker === null
+        ? null
+        : { name: codexNativeBrokerMcpName(baseName), ...broker };
+    },
+    installCodexNativeBroker: () => {
+      installCodexNativeBrokerScript(process.env);
     },
     chooseReceiveMode: promptReceiveMode,
     claudeDefaultArgs: () => resolveClaudeDefaultArgs(process.env, agentpartyHome()),

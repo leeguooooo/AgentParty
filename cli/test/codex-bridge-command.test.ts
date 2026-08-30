@@ -387,6 +387,54 @@ describe("party bridge codex capability and argv boundary", () => {
     ])).toThrow("spans multiple threads");
   });
 
+  test("codex-app selects an existing Desktop target without launching another app-server", async () => {
+    const source = "01a04eb6-6349-7871-9c05-8eb15d68635f";
+    const target = "01a0499f-2ce2-76e1-8734-733f8f169c28";
+    const calls: unknown[] = [];
+    const code = await runBridge([
+      "codex-app",
+      "dev",
+      "--target-thread",
+      target,
+      "--source-thread",
+      source,
+    ], {
+      cwd: "/workspace",
+      env: { PATH: "/bin" },
+      runCodexNativeBridge: async (options) => {
+        calls.push(options);
+        return 23;
+      },
+      probeCodexCapabilities: async () => {
+        throw new Error("codex-app must not probe or launch a second Codex app-server");
+      },
+    });
+    expect(code).toBe(23);
+    expect(calls).toEqual([{
+      channel: "dev",
+      sourceThreadId: source,
+      targetThreadId: target,
+      hostId: "local",
+      cwd: "/workspace",
+      env: { PATH: "/bin" },
+    }]);
+  });
+
+  test("codex-app fails closed without two distinct valid task ids", async () => {
+    const thread = "01a04eb6-6349-7871-9c05-8eb15d68635f";
+    for (const argv of [
+      ["codex-app", "dev", "--target-thread", thread],
+      ["codex-app", "dev", "--target-thread", "bad", "--source-thread", thread],
+      ["codex-app", "dev", "--target-thread", thread, "--source-thread", thread],
+    ]) {
+      expect(await runBridge(argv, {
+        runCodexNativeBridge: async () => {
+          throw new Error("invalid native bridge must not start");
+        },
+      })).toBe(1);
+    }
+  });
+
   test("frontend recovery queue deduplicates generations and retains the newest restart", async () => {
     const queue = new CodexFrontendRecoveryQueue();
     const first = queue.next();

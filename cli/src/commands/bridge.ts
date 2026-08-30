@@ -52,6 +52,10 @@ import {
 } from "./doctor";
 import { runCodexSessionBridge, type CodexBridgeRuntimeOptions } from "./codex-bridge";
 import {
+  runCodexNativeBridge,
+  type CodexNativeBridgeRuntimeOptions,
+} from "./codex-native-bridge";
+import {
   codexSessionsRoot,
   formatCodexSessionLine,
   isCodexThreadId,
@@ -157,17 +161,19 @@ export async function retryClaudeBridgeEndpoint<T>(
   }
 }
 
-const HELP = `usage: party bridge <claude|codex> [channel] [options] [-- <harness args...>]
+const HELP = `usage: party bridge <claude|codex|codex-app> [channel] [options] [-- <harness args...>]
 
 forms:
   party bridge claude [channel|--channel C] [--cross-session auto|off|required] [--cross-session-inbound accept|hold|refuse] [--check [--json]] [-- <claude args...>]
   party bridge claude --verify --channel C --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] [--sender-cwd DIR] [--preflight-only] [--keep-artifacts]
   party bridge codex  [channel|--channel C] [--codex-bin PATH] [--resume THREAD_ID|--resume-last] [-- <codex args...>]
   party bridge codex  --list-sessions
+  party bridge codex-app [channel|--channel C] --target-thread THREAD_ID --source-thread THREAD_ID
 
 Attach AgentParty to the same interactive harness session:
   claude  native Claude Channel input and linked reply tool
   codex   one app-server writer shared by the Unix-remote TUI and AgentParty
+  codex-app  ChatGPT Desktop's native cross-task send_message_to_thread path
 
 requirements:
   Claude Code >= 2.1.80 with development Channels enabled by the local/org policy.
@@ -192,6 +198,7 @@ examples:
   party bridge codex --list-sessions
   party bridge codex dev --resume-last
   party bridge codex dev --resume 01a01e72-8187-7d63-8e4d-9a1a9daa5451
+  party bridge codex-app dev --target-thread 01a01e72-8187-7d63-8e4d-9a1a9daa5451 --source-thread 01a01e72-8187-7d63-8e4d-9a1a9daa5452
 
 Without --resume/--resume-last the bridge opens a NEW Codex thread, so a session
 you are already watching will not receive the wake. --resume-last re-enters the
@@ -342,6 +349,7 @@ export interface BridgeDeps {
   ) => Promise<CodexCapabilityProbe>;
   launch?: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => Promise<number>;
   runCodexBridge?: (options: CodexBridgeRuntimeOptions) => Promise<number>;
+  runCodexNativeBridge?: (options: CodexNativeBridgeRuntimeOptions) => Promise<number>;
 }
 
 export interface CodexCapabilityProbe {
@@ -1802,7 +1810,7 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
   });
   const unknown = unknownFlagError(flags, [
     "channel", "codex-bin", "cross-session", "cross-session-inbound", "check", "json",
-    "resume", "resume-last", "list-sessions",
+    "resume", "resume-last", "list-sessions", "target-thread", "source-thread",
   ]);
   if (unknown !== null) {
     console.error(`${unknown}; put harness flags after --`);
@@ -1810,26 +1818,27 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
   }
   const flagError = valueFlagError(flags, [
     "channel", "codex-bin", "cross-session", "cross-session-inbound", "resume",
+    "target-thread", "source-thread",
   ]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
   }
   const harness = positionals[0];
-  if (harness !== "claude" && harness !== "codex") {
-    console.error("bridge supports: party bridge claude|codex [channel|--channel C] [-- <harness args...>]");
+  if (harness !== "claude" && harness !== "codex" && harness !== "codex-app") {
+    console.error("bridge supports: party bridge claude|codex|codex-app [channel|--channel C] [-- <harness args...>]");
     return 1;
   }
   if (positionals.length > 2) {
     console.error("too many bridge arguments; put harness arguments after --");
     return 1;
   }
-  if (harness === "claude" && flags["codex-bin"] !== undefined) {
+  if (harness !== "codex" && flags["codex-bin"] !== undefined) {
     console.error("--codex-bin is only valid with party bridge codex");
     return 1;
   }
   for (const codexOnly of ["resume", "resume-last", "list-sessions"] as const) {
-    if (harness === "claude" && flags[codexOnly] !== undefined) {
+    if (harness !== "codex" && flags[codexOnly] !== undefined) {
       console.error(`--${codexOnly} is only valid with party bridge codex`);
       return 1;
     }
@@ -1852,17 +1861,25 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
   if (harness === "codex" && flags["list-sessions"] === true) {
     return printCodexSessions(deps.env ?? process.env);
   }
-  if (harness === "codex" && flags["cross-session"] !== undefined) {
+  if (harness !== "codex-app" && (flags["target-thread"] !== undefined || flags["source-thread"] !== undefined)) {
+    console.error("--target-thread and --source-thread are only valid with party bridge codex-app");
+    return 1;
+  }
+  if (harness === "codex-app" && harnessArgs.length > 0) {
+    console.error("party bridge codex-app does not launch a harness and accepts nothing after --");
+    return 1;
+  }
+  if (harness !== "claude" && flags["cross-session"] !== undefined) {
     console.error("--cross-session is only valid with party bridge claude");
     return 1;
   }
-  if (harness === "codex" && flags["cross-session-inbound"] !== undefined) {
+  if (harness !== "claude" && flags["cross-session-inbound"] !== undefined) {
     console.error("--cross-session-inbound is only valid with party bridge claude");
     return 1;
   }
   const checkOnly = flags.check === true;
   const json = flags.json === true;
-  if (harness === "codex" && (checkOnly || json)) {
+  if (harness !== "claude" && (checkOnly || json)) {
     console.error("--check and --json are only valid with party bridge claude");
     return 1;
   }
@@ -1900,6 +1917,31 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
   if (!isSlug(channel)) {
     console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return 1;
+  }
+
+  if (harness === "codex-app") {
+    const targetThreadId = str(flags["target-thread"]) ?? (deps.env ?? process.env).CODEX_THREAD_ID;
+    const sourceThreadId = str(flags["source-thread"]);
+    if (targetThreadId === undefined || !isCodexThreadId(targetThreadId)) {
+      console.error("party bridge codex-app requires --target-thread THREAD_ID (or CODEX_THREAD_ID in the target task)");
+      return 1;
+    }
+    if (sourceThreadId === undefined || !isCodexThreadId(sourceThreadId)) {
+      console.error("party bridge codex-app requires --source-thread THREAD_ID for the native delegation label/link");
+      return 1;
+    }
+    if (sourceThreadId.toLowerCase() === targetThreadId.toLowerCase()) {
+      console.error("party bridge codex-app source and target must be different tasks");
+      return 1;
+    }
+    return await (deps.runCodexNativeBridge ?? runCodexNativeBridge)({
+      channel,
+      targetThreadId,
+      sourceThreadId,
+      hostId: "local",
+      cwd: deps.cwd ?? process.cwd(),
+      env: deps.env ?? process.env,
+    });
   }
 
   if (harness === "codex") {

@@ -36,7 +36,7 @@ commands:
   watch     [channel|--channel C] [--timeout N] [--mentions-only] [--follow] [--json]
   ack       [--channel C] [--seq N]                acknowledge a watch wake that needs no reply (#594)
   serve     [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all] | --profile owner/handle
-  bridge    claude [channel|--channel C] [--cross-session auto|off|required] [--cross-session-inbound accept|hold|refuse] [--check [--json]] | claude --verify --channel C --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] [--sender-cwd DIR] [--preflight-only] | codex [channel|--channel C] [-- <args...>]
+  bridge    claude [channel|--channel C] [--cross-session auto|off|required] [--cross-session-inbound accept|hold|refuse] [--check [--json]] | claude --verify --channel C --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] [--sender-cwd DIR] [--preflight-only] | codex [channel|--channel C] [-- <args...>] | codex-app [channel|--channel C] --target-thread ID --source-thread ID
                                                      attach AgentParty to the current interactive harness session
   claude    [channel] [-- <claude args...>] | --verify --channel C --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] (--preflight-only|--live)
                                                      start or verify a busy Marketplace durable Channel session

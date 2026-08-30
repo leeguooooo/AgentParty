@@ -16,7 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { stripTerminalControls } from "../format";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { AGENT_ACTIVITY_TTL_MS, type AgentActivity } from "@agentparty/shared";
 import { activityFromHookEvent, readActivityFile, writeActivityFile } from "../activity";
 import {
@@ -104,6 +104,8 @@ import {
   codexOwnHookCommand,
 } from "../codex-hook-trust";
 import { isPartyBinaryPath } from "../upgrade";
+import { selectCodexAppNativeRoute, type CodexAppNativeRoute } from "../codex-app-native";
+import { codexNativeBrokerMcpConfigured } from "../codex-native-broker";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
 import type { ServeSupervisorOptions } from "./serve";
 
@@ -571,9 +573,9 @@ async function runInstall(argv: string[]): Promise<number> {
     scope === "codex"
       ? "codex 交互式会话现在会在 SessionStart 入册到 ~/.agentparty/codex-sessions/；" +
         "codex 无会话结束事件，出册靠进程探活。\n" +
-        "已同时启用自动唤醒层（#893）：每个 codex 会话启动时自动拉起 `party serve <频道> --runner codex`，" +
-        "没人用了自动退场——不用再手挂任何东西。被 @ 唤醒的是一个**新的 codex runner 会话**，" +
-        "不是你眼前这个终端会话（#879）。\n" +
+        "已同时启用自动唤醒层：ChatGPT Desktop 在 native broker 生效且有第二个同身份 task 时，" +
+        "@ 会通过原生 cross-task 通道进入现有 task；裸 Codex CLI 才回落到新的 runner 会话。\n" +
+        "没人用了自动退场——不用再手挂任何东西。\n" +
         "如需关闭：`party hook codex-autowake off`。"
       : "普通 Claude session 只写本地 activity；频道 presence 上行仍需 party claude、" +
         "party bridge claude 或托管 serve lane。",
@@ -958,7 +960,7 @@ export function recordCodexSessionLifecycle(
  * harness-mismatch 要在日志里以自己的名字出现，不能混进 no-agent-token）、或什么都没有。
  */
 export type CodexAutoWakeIdentityLookup =
-  | { server?: unknown; token?: unknown }
+  | { server?: unknown; token?: unknown; configPath?: unknown }
   | { refused: CodexHookIdentityRefusal; detail: string }
   | null;
 
@@ -970,6 +972,10 @@ export interface CodexAutoWakeSpawnDeps {
   channelAt: (cwd: string) => string | null;
   /** 触发本次 SessionStart 的 codex 是不是人在用的会话（#959）；缺省按交互式处理。 */
   sessionKind?: () => CodexSessionKindProbe;
+  /** 当前进程是否是已登记 native broker 的 ChatGPT Desktop app-server。 */
+  nativeDesktop?: () => boolean;
+  /** 当前 task 与另一个同身份 task 的精确 native 路由。 */
+  nativeRoute?: () => CodexAppNativeRoute | null;
   /** 返回子进程 pid；起不来返回 null。 */
   spawn: (args: string[], cwd: string, env: NodeJS.ProcessEnv) => number | null;
   now: () => number;
@@ -999,7 +1005,13 @@ export function defaultCodexAutoWakeDeps(
         sessionId: null,
         deps: defaultCodexHookIdentityDeps(env, pid),
       });
-      if (resolved.ok) return { server: resolved.identity.server, token: resolved.identity.token };
+      if (resolved.ok) {
+        return {
+          server: resolved.identity.server,
+          token: resolved.identity.token,
+          configPath: resolved.identity.configPath,
+        };
+      }
       // #960/#971：绑给别的 harness 的身份由决策层以 skip(harness-mismatch) / skip(no-codex-binding)
       // 留痕，这里不重复记。
       if (resolved.reason !== "harness-mismatch" && resolved.reason !== "no-codex-binding") {
@@ -1013,6 +1025,15 @@ export function defaultCodexAutoWakeDeps(
     channelAt: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
     // #976：先读本会话的 rollout 头（originator / subagent 派生），读不到再看进程形态。
     sessionKind: () => probeCodexSessionKind({ hookParentPid: pid, sessionId, env }),
+    nativeDesktop: () =>
+      isClaudeSessionRegistrySessionId(sessionId) &&
+      typeof env.CODEX_APP_TOOLS_PIPE_PATH === "string" &&
+      env.CODEX_APP_TOOLS_PIPE_PATH !== "" &&
+      codexNativeBrokerMcpConfigured(env),
+    nativeRoute: () => {
+      if (!isClaudeSessionRegistrySessionId(sessionId)) return null;
+      return selectCodexAppNativeRoute(sessionId, pid, listCodexSessions(env));
+    },
     spawn: (args, cwd, childEnv) => {
       // 编译版二进制：execPath 即 party；dev（bun run）：execPath 是 bun，argv[1] 是入口脚本。
       const self = isPartyBinaryPath(process.execPath) || process.argv[1] === undefined
@@ -1066,7 +1087,14 @@ export function maybeStartCodexAutoWake(
   // #976：unknown 同样不拉起（决策层记 skip(session-kind-unknown)），身份也不必解析。
   const lookup = sessionKind !== null && sessionKind.kind !== "interactive" ? null : deps.readConfigAt(cwd);
   const refused = lookup !== null && "refused" in lookup ? lookup : null;
-  const auth = lookup === null || refused !== null ? null : codexAutoWakeAuth(lookup as { server?: unknown; token?: unknown });
+  const selected = lookup !== null && !("refused" in lookup) ? lookup : null;
+  const auth = selected === null ? null : codexAutoWakeAuth(selected);
+  const configPath = selected !== null &&
+      typeof selected.configPath === "string" && isAbsolute(selected.configPath)
+    ? selected.configPath
+    : null;
+  const nativeDesktop = auth !== null && deps.nativeDesktop?.() === true;
+  const nativeRoute = nativeDesktop ? deps.nativeRoute?.() ?? null : null;
   const now = deps.now();
   const markerPath = auth !== null && channel !== null
     ? codexAutoWakeMarkerPath(deps.home, codexAutoWakeTarget(auth, channel))
@@ -1081,6 +1109,8 @@ export function maybeStartCodexAutoWake(
       ? { reason: refused.refused, detail: refused.detail }
       : null,
     hasAgentToken: auth !== null,
+    nativeDesktop,
+    nativeRoute,
     // 已有 serve（不管是用户手挂的还是上一次自动拉的）就绝不拉第二个：一条 @ 触发两次
     // 完整 runner ＝ 双份回帖、git push 类副作用跑两遍。
     serveHolderPid: auth !== null && channel !== null ? runningServePid(auth, channel, deps.lockDir) : null,
@@ -1105,6 +1135,9 @@ export function maybeStartCodexAutoWake(
   }
   const childEnv = {
     ...deps.env,
+    // The native bridge must resolve the exact same identity selected above;
+    // never fall back to another global/cwd config in a multi-identity app-server.
+    ...(configPath === null ? {} : { AGENTPARTY_CONFIG: configPath }),
     // 二道防线：这个 serve 起的 codex runner 自己也会触发 SessionStart hook，绝不许再套娃。
     [CODEX_AUTO_WAKE_ENV]: "off",
     // #959：唤醒层退场时要把「刚被回收」写回同一份标记，供下一次 SessionStart 退避。
@@ -1113,16 +1146,18 @@ export function maybeStartCodexAutoWake(
   const pid = deps.spawn(decision.args, decision.cwd, childEnv);
   if (pid !== null && markerPath !== null) deps.recordPid(markerPath, decision.channel, pid, now);
   if (pid === null) {
-    const detail =
-      `拉 \`party serve ${decision.channel} --runner codex\` 失败（spawn 没返回 pid）；` +
-      `这台机器上没有唤醒层在跑。手动兜底：party serve ${decision.channel} --runner codex`;
+    const native = decision.args.includes("--target-thread");
+    const detail = native
+      ? `拉 ChatGPT native bridge 失败（spawn 没返回 pid）；手动重试：party bridge codex-app ${decision.channel}`
+      : `拉 \`party serve ${decision.channel} --runner codex\` 失败（spawn 没返回 pid）；` +
+        `这台机器上没有唤醒层在跑。手动兜底：party serve ${decision.channel} --runner codex`;
     deps.log(`start-failed: ${detail} ${kindTag}`);
     return { action: "start-failed", channel: decision.channel, detail };
   }
-  deps.log(
-    `started: pid=${pid} channel=#${decision.channel} cwd=${decision.cwd} —— ` +
-      `被 @ 时唤醒的是一个新的 codex runner 会话，不是你眼前这个终端会话 ${kindTag}`,
-  );
+  deps.log(decision.args.includes("--target-thread")
+    ? `started-native: pid=${pid} channel=#${decision.channel} cwd=${decision.cwd} —— AgentParty @ 会进入现有 ChatGPT task ${kindTag}`
+    : `started: pid=${pid} channel=#${decision.channel} cwd=${decision.cwd} —— ` +
+      `被 @ 时唤醒的是一个新的 codex runner 会话，不是你眼前这个终端会话 ${kindTag}`);
   return decision;
 }
 
@@ -1548,6 +1583,13 @@ export async function runCodexAutoWakeSupervise(
     terminate?: () => void;
     log?: (line: string) => void;
     serve?: (argv: string[]) => Promise<number>;
+    nativeRoute?: CodexAppNativeRoute | null;
+    nativeBridge?: (options: {
+      channel: string;
+      sourceThreadId: string;
+      targetThreadId: string;
+      env?: NodeJS.ProcessEnv;
+    }) => Promise<number>;
     budget?: CodexAutoWakeStartupBudget;
     pollMs?: number;
     graceMs?: number;
@@ -1582,6 +1624,10 @@ export async function runCodexAutoWakeSupervise(
       isTerminalServeExit: serveModule.isTerminalServeExit,
     }));
   });
+  const nativeBridge = deps.nativeBridge ?? (async (options) => {
+    const native = await import("./codex-native-bridge");
+    return native.runCodexNativeBridge(options);
+  });
   const startedAt = now();
   const timer = setInterval(() => {
     const owners = liveOwners();
@@ -1594,7 +1640,14 @@ export async function runCodexAutoWakeSupervise(
     terminate();
   }, deps.pollMs ?? CODEX_AUTO_WAKE_POLL_MS);
   try {
-    return await serve([channel, "--runner", "codex"]);
+    return deps.nativeRoute == null
+      ? await serve([channel, "--runner", "codex"])
+      : await nativeBridge({
+          channel,
+          sourceThreadId: deps.nativeRoute.sourceThreadId,
+          targetThreadId: deps.nativeRoute.targetThreadId,
+          env,
+        });
   } finally {
     clearInterval(timer);
   }
@@ -1610,16 +1663,34 @@ function runCodexAutoWakeCommand(argv: string[]): Promise<number> | number {
       console.error("hook codex-autowake --supervise 需要 --channel <channel>");
       return 1;
     }
-    return runCodexAutoWakeSupervise(channel);
+    const targetIdx = argv.indexOf("--target-thread");
+    const sourceIdx = argv.indexOf("--source-thread");
+    const targetThreadId = targetIdx >= 0 ? argv[targetIdx + 1] : undefined;
+    const sourceThreadId = sourceIdx >= 0 ? argv[sourceIdx + 1] : undefined;
+    if ((targetThreadId === undefined) !== (sourceThreadId === undefined)) {
+      console.error("native codex-autowake 必须同时给 --target-thread 与 --source-thread");
+      return 1;
+    }
+    if (targetThreadId !== undefined &&
+        (!isClaudeSessionRegistrySessionId(targetThreadId) ||
+          !isClaudeSessionRegistrySessionId(sourceThreadId) ||
+          targetThreadId.toLowerCase() === sourceThreadId.toLowerCase())) {
+      console.error("native codex-autowake 需要两个不同且有效的 ChatGPT task id");
+      return 1;
+    }
+    return runCodexAutoWakeSupervise(channel, {
+      nativeRoute: targetThreadId === undefined
+        ? null
+        : { targetThreadId, sourceThreadId: sourceThreadId! },
+    });
   }
   const sub = argv[0] ?? "status";
   if (sub === "on" || sub === "off") {
     writeCodexAutoWakeSetting(home, sub === "on" ? "serve" : "off");
     console.log(
       sub === "on"
-        ? "codex auto-wake: on（这也是默认值）—— 下次 codex 会话启动时会自动拉起 " +
-          "`party serve <channel> --runner codex`。\n" +
-          "注意：被 @ 时唤醒的是一个新的 codex runner 会话，**不是**你眼前这个终端会话（issue #879）。"
+        ? "codex auto-wake: on（这也是默认值）—— ChatGPT Desktop 优先把 @ 原生送进现有 task；" +
+          "裸 Codex CLI 回落 `party serve <channel> --runner codex`，那一档会新建 runner 会话。"
         : "codex auto-wake: off —— 已显式关闭，不再自动拉起任何后台进程" +
           "（已在跑的用 `party serve <channel> --stop` 停；想恢复默认行为：`party hook codex-autowake on`）。",
     );
@@ -1635,7 +1706,7 @@ function runCodexAutoWakeCommand(argv: string[]): Promise<number> | number {
       (resolution.source === "default" ? " —— 默认开启，装了 codex hook 就能被唤醒，不用再拨开关" : "") +
       (resolution.mode === "off" ? "；显式关闭中，`party hook codex-autowake on` 恢复默认行为" : ""),
   );
-  console.log("被 @ 时唤醒的是一个新的 codex runner 会话，不是你眼前这个终端会话（#879）");
+  console.log("ChatGPT Desktop 优先原生进入现有 task；裸 Codex CLI 回落时才会新建 runner 会话");
   console.log(`setting: ${codexAutoWakeSettingPath(home)}`);
   console.log(`log: ${codexAutoWakeLogPath(home)}`);
   const cwd = process.cwd();
