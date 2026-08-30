@@ -350,13 +350,9 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(existsSync(hooksJson)).toBe(true);
     expect(readFileSync(hooksJson, "utf8")).toContain("codex-stop");
 
-    // MCP 走 codex 二进制（不是 claude）：一个是频道工具，一个是全局唯一、零工具的签名 broker。
+    // MCP 走 codex 二进制（不是 claude）；ChatGPT native 路径直接使用 Desktop IPC，无额外 MCP。
     const codexAdds = record.filter((r) => r[0] === "codex" && r[1] === "mcp" && r[2] === "add");
-    expect(codexAdds).toHaveLength(2);
-    const nativeAdd = codexAdds.find((r) => r[3] === "agentparty_native");
-    expect(nativeAdd).toBeDefined();
-    expect(nativeAdd).toContain("/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node");
-    expect(nativeAdd).toContain("--mcp");
+    expect(codexAdds).toHaveLength(1);
     expect(record.some((r) => r[0] === "claude")).toBe(false);
 
     // 无 config.toml（老版本 codex / 无信任闸）→ hook 判 ok；唤醒层进程在（pid 4242）→ 「✅ 接入完成」。

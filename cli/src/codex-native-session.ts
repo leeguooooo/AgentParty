@@ -1,9 +1,4 @@
-/**
- * CodexAgentPartyBridge session adapter backed by ChatGPT Desktop's native
- * codex_app tools. It sends into the app-server already owned by Desktop,
- * then follows the target thread with wait_threads and positively reconciles
- * the exact delegation through read_thread before persisting a linked reply.
- */
+/** AgentParty delivery adapter backed by ChatGPT Desktop's follower IPC. */
 import { randomUUID } from "node:crypto";
 import type {
   CodexAgentPartySession,
@@ -16,32 +11,22 @@ import type {
 } from "./codex-app-server-bridge";
 import type { CodexBridgeInput, CodexDispatch } from "./codex-turn-arbiter";
 import {
-  callCodexAppNativeTool,
-  CodexAppNativeToolError,
-  CodexAppNativeUnknownOutcomeError,
-  isNativeSendThreadResult,
-  isNativeReadThreadResult,
-  isNativeWaitThreadResult,
-  nativeReadThreadMatchesDelegation,
-  nativeToolTextJson,
-  resolveCodexAppNativeRuntime,
-  type CodexAppNativeToolResult,
-} from "./codex-app-native";
-
-export type CodexNativeToolCall = (
-  tool: string,
-  args: Record<string, unknown>,
-  signal?: AbortSignal,
-) => Promise<CodexAppNativeToolResult>;
+  CodexDesktopIpcClient,
+  CodexDesktopIpcRequestError,
+  CodexDesktopIpcUnavailableError,
+  CodexDesktopIpcUnknownOutcomeError,
+  finalAgentText,
+  type CodexDesktopIpcTransport,
+  type CodexDesktopTurn,
+} from "./codex-desktop-ipc";
 
 export interface CodexNativeSessionOptions {
   sourceThreadId: string;
   targetThreadId: string;
   hostId?: string;
   env?: NodeJS.ProcessEnv;
-  callTool?: CodexNativeToolCall;
+  ipcFactory?: () => CodexDesktopIpcTransport;
   maxWaitMs?: number;
-  waitSliceMs?: number;
   log?: (line: string) => void;
 }
 
@@ -58,30 +43,14 @@ export class CodexNativeSessionController implements CodexAgentPartySession {
   private readonly completedListeners = new Set<CompletedTurnListener>();
   private readonly unresolvedUnknownListeners = new Set<UnresolvedUnknownListener>();
   private readonly turnsByClientId = new Map<string, CodexTurn>();
-  private readonly turnIdsByClientId = new Map<string, string>();
   private readonly uncertainClientIds = new Set<string>();
-  private readonly callTool: CodexNativeToolCall;
+  private readonly clients = new Set<CodexDesktopIpcTransport>();
   private readonly log: (line: string) => void;
   private lane: Promise<void> = Promise.resolve();
   private closed = false;
 
   constructor(private readonly options: CodexNativeSessionOptions) {
     this.log = options.log ?? (() => {});
-    this.callTool = options.callTool ?? (async (tool, args, signal) => {
-      const runtime = resolveCodexAppNativeRuntime(
-        options.targetThreadId,
-        options.env ?? process.env,
-      );
-      return callCodexAppNativeTool(
-        {
-          runtime,
-          sourceThreadId: options.sourceThreadId,
-          tool,
-          arguments: args,
-        },
-        { signal },
-      );
-    });
   }
 
   get activeThreadId(): string {
@@ -132,20 +101,11 @@ export class CodexNativeSessionController implements CodexAgentPartySession {
   async submit(input: CodexBridgeInput): Promise<CodexDispatch> {
     let resolve!: (value: CodexDispatch) => void;
     let reject!: (reason: unknown) => void;
-    const result = new Promise<CodexDispatch>((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
+    const result = new Promise<CodexDispatch>((res, rej) => { resolve = res; reject = rej; });
     const previous = this.lane;
-    this.lane = previous
-      .catch(() => {})
-      .then(async () => {
-        try {
-          resolve(await this.submitExclusive(input));
-        } catch (error) {
-          reject(error);
-        }
-      });
+    this.lane = previous.catch(() => {}).then(async () => {
+      try { resolve(await this.submitExclusive(input)); } catch (error) { reject(error); }
+    });
     return result;
   }
 
@@ -157,242 +117,100 @@ export class CodexNativeSessionController implements CodexAgentPartySession {
       return { kind: "uncertain", reason: "unknown_outcome" };
     }
 
-    // Capture an exact pre-send cursor before crossing the delivery WAL write
-    // boundary. A prior completed turn must never be mistaken for this send.
-    const baselineCursor = await this.captureBaselineCursor();
+    const client = this.createClient();
+    await client.connect();
+    await client.followThread(this.options.targetThreadId, this.options.hostId ?? "local");
     await input.beforeWrite?.();
     input.checkWriteAuthorized?.();
-    let sent: { threadId: string };
+
+    let accepted: { turnId: string };
     try {
-      const raw = await this.callTool(
-          "send_message_to_thread",
-          {
-            threadId: this.options.targetThreadId,
-            hostId: this.options.hostId ?? "local",
-            prompt: input.text,
-          },
-        );
-      try {
-        sent = nativeToolTextJson(raw, isNativeSendThreadResult);
-      } catch (error) {
-        if (error instanceof CodexAppNativeToolError) throw error;
-        throw new CodexAppNativeUnknownOutcomeError(
-          `ChatGPT native send returned an unprovable success result: ${errorText(error)}`,
-        );
-      }
+      accepted = await client.startDelegatedTurn({
+        targetThreadId: this.options.targetThreadId,
+        sourceThreadId: this.options.sourceThreadId,
+        prompt: input.text,
+        clientUserMessageId: input.clientUserMessageId,
+        hostId: this.options.hostId ?? "local",
+      });
     } catch (error) {
-      if (error instanceof CodexAppNativeUnknownOutcomeError) {
+      if (error instanceof CodexDesktopIpcUnknownOutcomeError) {
         this.uncertainClientIds.add(input.clientUserMessageId);
-        const syntheticTurnId = `native-${randomUUID()}`;
         const dispatch: CodexDispatch = { kind: "uncertain", reason: "unknown_outcome" };
         for (const listener of this.dispatchListeners) await listener(input, dispatch);
-        void this.followCompletion(
-          input,
-          syntheticTurnId,
-          baselineCursor,
-          true,
-        ).catch((followError) => {
-          this.log(`codex-native: unknown completion follow failed: ${errorText(followError)}`);
-          void this.emitUnresolvedUnknown(input);
+        void this.followCompletion(input, undefined, client, true).catch(async (followError) => {
+          this.log(`codex-native: unknown IPC delivery remains unresolved: ${errorText(followError)}`);
+          await this.emitUnresolvedUnknown(input);
         });
         return dispatch;
       }
+      client.close();
+      this.clients.delete(client);
       await input.onWriteRejected?.();
       throw error;
     }
-    if (sent.threadId !== this.options.targetThreadId) {
-      const error = new CodexAppNativeUnknownOutcomeError(
-        `ChatGPT native send targeted ${sent.threadId}, expected ${this.options.targetThreadId}`,
-      );
-      const syntheticTurnId = `native-${randomUUID()}`;
-      this.uncertainClientIds.add(input.clientUserMessageId);
-      const dispatch: CodexDispatch = { kind: "uncertain", reason: "unknown_outcome" };
-      for (const listener of this.dispatchListeners) await listener(input, dispatch);
-      void this.followCompletion(input, syntheticTurnId, baselineCursor, true).catch(() => {
-        this.log(`codex-native: mismatched-target send remains unknown: ${error.message}`);
-        void this.emitUnresolvedUnknown(input);
-      });
-      return dispatch;
-    }
 
-    const syntheticTurnId = `native-${randomUUID()}`;
-    const turn = this.inProgressTurn(input, syntheticTurnId);
+    const turn = inProgressTurn(input, accepted.turnId);
     this.turnsByClientId.set(input.clientUserMessageId, turn);
-    this.turnIdsByClientId.set(input.clientUserMessageId, syntheticTurnId);
-    const dispatch: CodexDispatch = { kind: "started", turnId: syntheticTurnId };
-    for (const listener of this.dispatchListeners) {
-      await listener(input, dispatch);
-    }
-    void this.followCompletion(input, syntheticTurnId, baselineCursor, false).catch((error) => {
-      this.log(`codex-native: completion follow failed; preserving late reply: ${errorText(error)}`);
-      void this.emitUnresolvedUnknown(input);
+    const dispatch: CodexDispatch = { kind: "started", turnId: accepted.turnId };
+    for (const listener of this.dispatchListeners) await listener(input, dispatch);
+    void this.followCompletion(input, accepted.turnId, client, false).catch(async (error) => {
+      this.log(`codex-native: IPC completion follow failed; preserving late reply: ${errorText(error)}`);
+      await this.emitUnresolvedUnknown(input);
     });
     return dispatch;
   }
 
-  private inProgressTurn(input: CodexBridgeInput, syntheticTurnId: string): CodexTurn {
-    return {
-      id: syntheticTurnId,
-      status: "inProgress",
-      items: [{
-        type: "userMessage",
-        clientId: input.clientUserMessageId,
-        text: input.text,
-      }],
-    };
-  }
-
-  private async captureBaselineCursor(): Promise<string> {
-    const snapshot = nativeToolTextJson(
-      await this.callTool("wait_threads", {
-        targets: [{
-          threadId: this.options.targetThreadId,
-          hostId: this.options.hostId ?? "local",
-        }],
-        timeoutMs: 0,
-      }),
-      isNativeWaitThreadResult,
-    );
-    const poll = snapshot.polls.find(
-      (entry) => entry.thread?.id === this.options.targetThreadId,
-    ) ?? snapshot.polls[0];
-    if (typeof poll?.cursor !== "string" || poll.cursor === "") {
-      throw new Error(
-        `ChatGPT native wait returned no baseline cursor for ${this.options.targetThreadId}`,
-      );
-    }
-    return poll.cursor;
-  }
-
   private async followCompletion(
     input: CodexBridgeInput,
-    syntheticTurnId: string,
-    baselineCursor: string,
+    turnId: string | undefined,
+    initialClient: CodexDesktopIpcTransport,
     uncertain: boolean,
   ): Promise<void> {
-    const maxWaitMs = this.options.maxWaitMs ?? 30 * 60_000;
-    const waitSliceMs = Math.min(120_000, this.options.waitSliceMs ?? 120_000);
-    const deadline = Date.now() + maxWaitMs;
-    let cursor = baselineCursor;
-    while (!this.closed && Date.now() < deadline) {
-      let wait;
+    const deadline = Date.now() + (this.options.maxWaitMs ?? 30 * 60_000);
+    let client = initialClient;
+    for (;;) {
+      if (this.closed) return;
       try {
-        wait = nativeToolTextJson(
-          await this.callTool("wait_threads", {
-            targets: [{
-              threadId: this.options.targetThreadId,
-              hostId: this.options.hostId ?? "local",
-              afterCursor: cursor,
-            }],
-            timeoutMs: waitSliceMs,
-          }),
-          isNativeWaitThreadResult,
-        );
-      } catch (error) {
-        this.log(`codex-native: wait_threads retry after error: ${errorText(error)}`);
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        continue;
-      }
-      const poll = wait.polls.find(
-        (entry) => entry.thread?.id === this.options.targetThreadId,
-      ) ?? wait.polls[0];
-      const nextCursor = typeof poll?.cursor === "string" && poll.cursor !== ""
-        ? poll.cursor
-        : cursor;
-      const actualTurnId = poll?.latestTurn?.id;
-      if (nextCursor === cursor || typeof actualTurnId !== "string") {
-        continue;
-      }
-      const reconciliation = await this.reconcilesExactDelegation(actualTurnId, input.text);
-      if (reconciliation !== true) {
-        // A definitive mismatch belongs to another user/bridge turn and can be
-        // skipped. A read failure is inconclusive, so retry the same cursor.
-        if (reconciliation === false) cursor = nextCursor;
-        continue;
-      }
-      cursor = nextCursor;
-      if (uncertain) {
-        this.uncertainClientIds.delete(input.clientUserMessageId);
-        const turn = this.inProgressTurn(input, syntheticTurnId);
-        this.turnsByClientId.set(input.clientUserMessageId, turn);
-        this.turnIdsByClientId.set(input.clientUserMessageId, syntheticTurnId);
-        const accepted: CodexDispatch = { kind: "started", turnId: syntheticTurnId };
-        for (const listener of this.dispatchListeners) await listener(input, accepted);
-        uncertain = false;
-      }
-      const status = poll?.latestTurn?.status;
-      if (status === "completed") {
-        const text = poll.latestAssistantMessage?.text?.trim() ?? "";
-        if (text === "") {
-          this.complete(input.clientUserMessageId, { id: syntheticTurnId, status: "failed", items: [] });
-        } else {
-          this.complete(input.clientUserMessageId, {
-            id: syntheticTurnId,
-            status: "completed",
-            items: [
-              {
-                id: `native-final-${randomUUID()}`,
-                type: "agentMessage",
-                phase: "final_answer",
-                text,
-              },
-            ],
-          });
+        const ipcTurn = await client.waitForDelegation({
+          targetThreadId: this.options.targetThreadId,
+          sourceThreadId: this.options.sourceThreadId,
+          prompt: input.text,
+          clientUserMessageId: input.clientUserMessageId,
+          ...(turnId === undefined ? {} : { turnId }),
+          timeoutMs: Math.max(1, deadline - Date.now()),
+        });
+        turnId = ipcTurn.turnId;
+        if (uncertain) {
+          this.uncertainClientIds.delete(input.clientUserMessageId);
+          this.turnsByClientId.set(input.clientUserMessageId, inProgressTurn(input, turnId));
+          const dispatch: CodexDispatch = { kind: "started", turnId };
+          for (const listener of this.dispatchListeners) await listener(input, dispatch);
+          uncertain = false;
         }
+        this.complete(input.clientUserMessageId, completedTurn(ipcTurn));
+        client.close();
+        this.clients.delete(client);
         return;
-      }
-      if (status === "failed" || status === "interrupted") {
-        this.complete(input.clientUserMessageId, {
-          id: syntheticTurnId,
-          status: status === "failed" ? "failed" : "interrupted",
-          items: [],
-        });
-        return;
-      }
-      if (!wait.timedOut && wait.wake?.reason === "needsAttention") {
-        this.complete(input.clientUserMessageId, {
-          id: syntheticTurnId,
-          status: "completed",
-          items: [
-            {
-              id: `native-attention-${randomUUID()}`,
-              type: "agentMessage",
-              phase: "final_answer",
-              text:
-                `Codex task ${this.options.targetThreadId} needs user attention before it can finish. ` +
-                `Open that task in ChatGPT to continue.`,
-            },
-          ],
-        });
-        return;
+      } catch (error) {
+        client.close();
+        this.clients.delete(client);
+        if (Date.now() >= deadline || error instanceof CodexDesktopIpcRequestError) throw error;
+        if (
+          !(error instanceof CodexDesktopIpcUnavailableError) &&
+          !(error instanceof CodexDesktopIpcUnknownOutcomeError)
+        ) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        client = this.createClient();
+        await client.connect();
+        await client.followThread(this.options.targetThreadId, this.options.hostId ?? "local");
       }
     }
-    throw new Error(
-      `Timed out waiting for native Codex thread ${this.options.targetThreadId}`,
-    );
   }
 
-  private async reconcilesExactDelegation(turnId: string, prompt: string): Promise<boolean | null> {
-    try {
-      const read = nativeToolTextJson(
-        await this.callTool("read_thread", {
-          threadId: this.options.targetThreadId,
-          hostId: this.options.hostId ?? "local",
-          includeOutputs: true,
-          maxOutputCharsPerItem: 128_000,
-          turnLimit: 4,
-        }),
-        isNativeReadThreadResult,
-      );
-      return nativeReadThreadMatchesDelegation(read, {
-        turnId,
-        sourceThreadId: this.options.sourceThreadId,
-        prompt,
-      });
-    } catch (error) {
-      this.log(`codex-native: read_thread reconciliation retry after error: ${errorText(error)}`);
-      return null;
-    }
+  private createClient(): CodexDesktopIpcTransport {
+    const client = this.options.ipcFactory?.() ?? new CodexDesktopIpcClient({ env: this.options.env });
+    this.clients.add(client);
+    return client;
   }
 
   private async emitUnresolvedUnknown(input: CodexBridgeInput): Promise<void> {
@@ -414,5 +232,33 @@ export class CodexNativeSessionController implements CodexAgentPartySession {
   close(): void {
     this.closed = true;
     this.uncertainClientIds.clear();
+    for (const client of this.clients) client.close();
+    this.clients.clear();
   }
+}
+
+function inProgressTurn(input: CodexBridgeInput, turnId: string): CodexTurn {
+  return {
+    id: turnId,
+    status: "inProgress",
+    items: [{ type: "userMessage", clientId: input.clientUserMessageId, text: input.text }],
+  };
+}
+
+function completedTurn(turn: CodexDesktopTurn): CodexTurn {
+  if (turn.status === "completed") {
+    const text = finalAgentText(turn);
+    if (text !== null) {
+      return {
+        id: turn.turnId,
+        status: "completed",
+        items: [{ id: `ipc-final-${randomUUID()}`, type: "agentMessage", phase: "final_answer", text }],
+      };
+    }
+  }
+  return {
+    id: turn.turnId,
+    status: turn.status === "interrupted" ? "interrupted" : "failed",
+    items: [],
+  };
 }

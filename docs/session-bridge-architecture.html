@@ -338,21 +338,21 @@ Current-session tools:
     <section aria-labelledby="codex">
       <h2 id="codex">Codex app-server 单写协议</h2>
       <p>
-        ChatGPT Desktop 另有一条不争抢 writer 的原生路径：AgentParty 通过由 app-server 直接托管的
-        零工具 broker 调用 <code>send_message_to_thread</code>，再用 <code>wait_threads</code>
-        收回最终回复，并用 <code>read_thread</code> 对来源 task 与完整输入做正向对账。
-        消息在目标 task 中保持 ChatGPT 自己的跨任务 UI 与来源链接。
+        ChatGPT Desktop 另有一条不争抢 writer 的原生路径：AgentParty 连接 App 自己的 0600 IPC
+        router，用 <code>thread-owner-discovery</code> 找到目标 renderer，再调用
+        <code>thread-follower-start-turn</code>。请求仍使用 ChatGPT 自己的
+        <code>codex_app/send_message_to_thread</code> toolOutput XML，因此目标 task 保留原生来源标签与链接。
       </p>
       <pre><code>party bridge codex-app &lt;channel&gt; \
   --target-thread &lt;existing-task-id&gt; \
   --source-thread &lt;another-task-id&gt;
 
-ChatGPT app-server
-  → signed zero-tool MCP broker (0600 Unix socket)
-  → codex_app.send_message_to_thread
+ChatGPT Desktop 0600 IPC router
+  → thread-owner-discovery
+  → thread-follower-start-turn
+  → codex_app/send_message_to_thread toolOutput XML
   → existing target task
-  → codex_app.wait_threads
-  → codex_app.read_thread exact reconciliation
+  → canonical snapshot / patches exact reconciliation
   → linked AgentParty reply</code></pre>
       <p>
         <code>thread/resume</code> 能让多个连接重入同一个 running thread，但“都能读状态”不等于“都能写”。

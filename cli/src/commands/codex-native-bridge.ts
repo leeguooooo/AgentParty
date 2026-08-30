@@ -28,7 +28,10 @@ import {
 import { resolveAuthDetailed } from "../oidc-cli";
 import { postMessage } from "../rest";
 import { buildRuntimeTopology } from "../runtime-topology";
-import { resolveCodexAppNativeRuntime } from "../codex-app-native";
+import {
+  CodexDesktopIpcClient,
+  validateCodexDesktopIpcRoute,
+} from "../codex-desktop-ipc";
 
 export interface CodexNativeBridgeRuntimeOptions {
   channel: string;
@@ -42,7 +45,7 @@ export interface CodexNativeBridgeRuntimeOptions {
 export interface CodexNativeBridgeRuntimeDeps {
   resolveAuth?: typeof resolveAuthDetailed;
   connectAgentParty?: typeof connect;
-  resolveRuntime?: typeof resolveCodexAppNativeRuntime;
+  probeIpc?: (options: CodexNativeBridgeRuntimeOptions) => Promise<void>;
   createSession?: (options: CodexNativeBridgeRuntimeOptions) => CodexNativeSessionController;
   log?: (line: string) => void;
   installSignalHandlers?: (
@@ -93,18 +96,22 @@ export async function runCodexNativeBridge(
       log("codex-native: no config, run party login or party init first");
       return 1;
     }
-    // Fail before claiming AgentParty delivery if Desktop cannot address this
-    // exact task. Shared app-server PID is never enough.
-    const runtime = (deps.resolveRuntime ?? resolveCodexAppNativeRuntime)(
-      options.targetThreadId,
-      env,
-    );
-    if (runtime.brokerPath === undefined) {
-      log(
-        "codex-native: ChatGPT native broker 尚未由当前 app-server 拉起；" +
-          "确认 agentparty_native 已登记后重开/刷新 ChatGPT，再重试",
-      );
-      return 1;
+    // Fail before claiming AgentParty delivery if the private Desktop IPC
+    // cannot discover the exact target renderer.
+    if (deps.probeIpc !== undefined) {
+      await deps.probeIpc(options);
+    } else {
+      validateCodexDesktopIpcRoute({
+        targetThreadId: options.targetThreadId,
+        sourceThreadId: options.sourceThreadId,
+      }, env);
+      const probe = new CodexDesktopIpcClient({ env, clientType: "agentparty-native-preflight" });
+      try {
+        await probe.connect();
+        await probe.discoverThreadOwner(options.targetThreadId, options.hostId ?? "local");
+      } finally {
+        probe.close();
+      }
     }
 
     lock = acquireInstanceLock(

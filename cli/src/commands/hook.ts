@@ -104,8 +104,11 @@ import {
   codexOwnHookCommand,
 } from "../codex-hook-trust";
 import { isPartyBinaryPath } from "../upgrade";
-import { selectCodexAppNativeRoute, type CodexAppNativeRoute } from "../codex-app-native";
-import { codexNativeBrokerMcpConfigured } from "../codex-native-broker";
+import {
+  codexDesktopIpcAvailable,
+  selectCodexDesktopIpcRoute,
+  type CodexDesktopIpcRoute,
+} from "../codex-desktop-ipc";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
 import type { ServeSupervisorOptions } from "./serve";
 
@@ -573,7 +576,7 @@ async function runInstall(argv: string[]): Promise<number> {
     scope === "codex"
       ? "codex 交互式会话现在会在 SessionStart 入册到 ~/.agentparty/codex-sessions/；" +
         "codex 无会话结束事件，出册靠进程探活。\n" +
-        "已同时启用自动唤醒层：ChatGPT Desktop 在 native broker 生效且有第二个同身份 task 时，" +
+        "已同时启用自动唤醒层：ChatGPT Desktop IPC 可用且有第二个同身份 task 时，" +
         "@ 会通过原生 cross-task 通道进入现有 task；裸 Codex CLI 才回落到新的 runner 会话。\n" +
         "没人用了自动退场——不用再手挂任何东西。\n" +
         "如需关闭：`party hook codex-autowake off`。"
@@ -972,10 +975,10 @@ export interface CodexAutoWakeSpawnDeps {
   channelAt: (cwd: string) => string | null;
   /** 触发本次 SessionStart 的 codex 是不是人在用的会话（#959）；缺省按交互式处理。 */
   sessionKind?: () => CodexSessionKindProbe;
-  /** 当前进程是否是已登记 native broker 的 ChatGPT Desktop app-server。 */
+  /** 当前进程是否处在 ChatGPT Desktop 且私有 IPC router 可用。 */
   nativeDesktop?: () => boolean;
   /** 当前 task 与另一个同身份 task 的精确 native 路由。 */
-  nativeRoute?: () => CodexAppNativeRoute | null;
+  nativeRoute?: () => CodexDesktopIpcRoute | null;
   /** 返回子进程 pid；起不来返回 null。 */
   spawn: (args: string[], cwd: string, env: NodeJS.ProcessEnv) => number | null;
   now: () => number;
@@ -1027,12 +1030,10 @@ export function defaultCodexAutoWakeDeps(
     sessionKind: () => probeCodexSessionKind({ hookParentPid: pid, sessionId, env }),
     nativeDesktop: () =>
       isClaudeSessionRegistrySessionId(sessionId) &&
-      typeof env.CODEX_APP_TOOLS_PIPE_PATH === "string" &&
-      env.CODEX_APP_TOOLS_PIPE_PATH !== "" &&
-      codexNativeBrokerMcpConfigured(env),
+      codexDesktopIpcAvailable(env),
     nativeRoute: () => {
       if (!isClaudeSessionRegistrySessionId(sessionId)) return null;
-      return selectCodexAppNativeRoute(sessionId, pid, listCodexSessions(env));
+      return selectCodexDesktopIpcRoute(sessionId, pid, listCodexSessions(env));
     },
     spawn: (args, cwd, childEnv) => {
       // 编译版二进制：execPath 即 party；dev（bun run）：execPath 是 bun，argv[1] 是入口脚本。
@@ -1583,7 +1584,7 @@ export async function runCodexAutoWakeSupervise(
     terminate?: () => void;
     log?: (line: string) => void;
     serve?: (argv: string[]) => Promise<number>;
-    nativeRoute?: CodexAppNativeRoute | null;
+    nativeRoute?: CodexDesktopIpcRoute | null;
     nativeBridge?: (options: {
       channel: string;
       sourceThreadId: string;

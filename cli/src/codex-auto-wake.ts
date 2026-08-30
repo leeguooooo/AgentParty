@@ -9,9 +9,9 @@
 //   ② 会话 idle 时主动发 `elicitation/create`，23ms 自动回 `{"action":"decline"}`，
 //      不弹用户、不拉起会话。与 Claude Code 的 #844 结论一致。
 //
-// ChatGPT Desktop 新路径：app-server 直接拉一个零工具 MCP 子进程，保留 native app-tools
-// 的受信进程链；SessionStart 再拉 AgentParty bridge，把 @ 通过 send_message_to_thread 送进
-// 已有 task。裸 Codex CLI 没有这条 host 能力，才回落 `party serve --runner codex`。
+// ChatGPT Desktop 新路径：连接 App 自己的 0600 IPC router，发现目标 task 的 renderer owner，
+// 再用 thread-follower-start-turn + codex_app toolOutput 把 @ 送进已有 task。裸 Codex CLI
+// 没有这条 host 能力，才回落 `party serve --runner codex`。
 //
 // 三条硬约束：
 //   1. **语义诚实**（#879）：native 路径进入现有 ChatGPT task；裸 CLI 回落才是一个
@@ -339,7 +339,7 @@ export interface CodexAutoWakeDecisionInput {
   serveHolderPid: number | null;
   /** config 里是否有可用的 agent 身份（server+token）。 */
   hasAgentToken: boolean;
-  /** ChatGPT Desktop 已登记 native broker；此时不应再悄悄退回新 runner。 */
+  /** ChatGPT Desktop 的私有 IPC 可用；此时不应再悄悄退回新 runner。 */
   nativeDesktop?: boolean;
   /** 同 app-server、同频道身份下的一对真实 ChatGPT task。 */
   nativeRoute?: { targetThreadId: string; sourceThreadId: string } | null;
@@ -426,7 +426,7 @@ export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAut
       action: "skip",
       reason: "native-source-missing",
       detail:
-        `ChatGPT native broker 已登记，但 #${channel} 上当前只有一个同身份 task；` +
+        `ChatGPT Desktop IPC 已可用，但 #${channel} 上当前只有一个同身份 task；` +
         `等待第二个 task 入册后再建立原生跨任务通道，不退回后台新 runner`,
     };
   }

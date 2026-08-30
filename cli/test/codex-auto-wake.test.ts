@@ -209,7 +209,7 @@ describe("拉起决策", () => {
     });
   });
 
-  test("native broker 已登记但还没有第二个 task → 等待，不退回后台新 runner", () => {
+  test("Desktop IPC 可用但还没有第二个 task → 等待，不退回后台新 runner", () => {
     expect(decideCodexAutoWake({
       mode: "serve",
       channel: "dev",

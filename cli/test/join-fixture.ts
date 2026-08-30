@@ -191,12 +191,6 @@ export function joinDeps(tmp: string, record: string[][], behavior: SpawnBehavio
     codexWakeLayerLive: async () => ({ pid: 4242, source: "serve-lock" }),
     codexAncestorPid: () => null,
     codexSessionId: () => null,
-    codexNativeBrokerMcp: () => ({
-      name: "agentparty_native",
-      command: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
-      args: [join(tmp, ".agentparty", "codex-native-broker", "broker.cjs"), "--mcp", join(tmp, ".agentparty")],
-    }),
-    installCodexNativeBroker: () => {},
     // 第 2 步（#988）：默认「没法问」（无 TTY）——按 harness 默认走；交互用例逐个覆盖。
     chooseReceiveMode: async () => null,
     // 第 3 步（#988）：本机没配 party claude 默认参数；有默认参数的用例逐个覆盖。

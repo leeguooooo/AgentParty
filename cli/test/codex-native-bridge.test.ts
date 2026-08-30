@@ -5,10 +5,9 @@ const SOURCE = "01a0499f-2ce2-76e1-8734-733f8f169c28";
 const TARGET = "01a04eb6-6349-7871-9c05-8eb15d68635f";
 
 describe("ChatGPT native AgentParty bridge preflight", () => {
-  test("fails before claiming delivery when the current app-server has not loaded the broker", async () => {
-    const lines: string[] = [];
+  test("fails before claiming delivery when Desktop IPC cannot discover the target owner", async () => {
     let connected = false;
-    const code = await runCodexNativeBridge({
+    const run = runCodexNativeBridge({
       channel: "agentparty",
       sourceThreadId: SOURCE,
       targetThreadId: TARGET,
@@ -21,22 +20,14 @@ describe("ChatGPT native AgentParty bridge preflight", () => {
         config: { kind: "explicit", path: "/tmp/agentparty.json" },
         account: { present: false, path: "/tmp/account.json" },
       }),
-      resolveRuntime: () => ({
-        appServerPid: 77305,
-        codexPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
-        nodePath: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
-        pipePath: "/tmp/codex-app-tools.sock",
-      }),
+      probeIpc: async () => { throw new Error("no ChatGPT renderer owns target"); },
       connectAgentParty: (() => {
         connected = true;
         throw new Error("must not connect");
       }) as never,
-      log: (line) => lines.push(line),
       installSignalHandlers: () => () => {},
     });
-    expect(code).toBe(1);
+    await expect(run).rejects.toThrow("no ChatGPT renderer owns target");
     expect(connected).toBe(false);
-    expect(lines.join("\n")).toContain("agentparty_native");
-    expect(lines.join("\n")).toContain("重开/刷新 ChatGPT");
   });
 });
