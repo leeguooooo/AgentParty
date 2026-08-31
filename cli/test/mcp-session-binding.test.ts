@@ -54,3 +54,40 @@ describe("mcp session binding gate (#1018)", () => {
     expect(mcpSessionBindingDenial(null)).toContain("the global config");
   });
 });
+
+// codex stop-time review 抓到 party_digest / party_wake_test 绕过了闸：它们不走 auth()，
+// 而是直接 captureCommand 进内层命令模块，各自解析身份。闸补在 captureCommand 里（结构上盖住
+// 所有这类工具），这条守卫盯住「以后不许再开第三条路」——每个工具处理函数必须落在其中一条上。
+describe("每个 MCP 工具都必须经过闸（#1018 防漂移）", () => {
+  test("没有工具能绕开 auth() / authDetailed() / captureCommand", async () => {
+    const source = await Bun.file(new URL("../src/commands/mcp.ts", import.meta.url)).text();
+    // 闸自己必须同时钉在两处入口上，否则下面的分类就没有意义。
+    expect(source).toContain("assertSessionBound(detailed.config)");
+    expect(source).toContain("assertSessionBound(readConfigWithSource().source)");
+
+    const GATE = /await auth\(\)|await authDetailed\(\)|captureCommand\(/u;
+    // 有的工具经一层模块内 helper 拿身份（party_charter → charterData → auth()）。
+    // 先收集「自己已经过闸」的 helper，再把调用它们的工具也算过闸——只放行这一层，
+    // 更深的间接调用会被判成未过闸，宁可误报也不放过真漏网。
+    const gatedHelpers = [...source.matchAll(/async function (\w+)\([^)]*\)[^{]*\{([\s\S]*?)\n\}/gu)]
+      .filter((match) => GATE.test(match[2] ?? ""))
+      .map((match) => match[1]!);
+    expect(gatedHelpers).toContain("auth");
+    expect(gatedHelpers).toContain("charterData");
+
+    const bodies = source.split(/server\.registerTool\(\s*\n?\s*"/u).slice(1);
+    const ungated = bodies
+      .map((part) => ({
+        name: part.slice(0, part.indexOf('"')),
+        // split 已经把每段切到下一个注册之前；最后一段吃到文件尾。
+        body: part,
+      }))
+      .filter(({ body }) =>
+        !GATE.test(body) && !gatedHelpers.some((helper) => new RegExp(`\\b${helper}\\(`, "u").test(body))
+      )
+      .map(({ name }) => name);
+
+    expect(bodies.length).toBeGreaterThan(15);
+    expect(ungated).toEqual([]);
+  });
+});

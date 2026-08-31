@@ -10,6 +10,7 @@ import { DEFAULT_HEADER_PREVIEW, msgHeader, stripTerminalControls } from "../for
 import pkg from "../../package.json" with { type: "json" };
 import type { ConfigSourceInfo } from "../config";
 import {
+  readConfigWithSource,
   ackWatchStuck,
   advanceCursorPastOwnMessage,
   drainWatchStuck,
@@ -283,7 +284,13 @@ async function auth(): Promise<{ server: string; token: string; me?: Identity }>
 
 let captureQueue: Promise<void> = Promise.resolve();
 
+/**
+ * #1018：走这条路的工具（party_digest / party_wake_test 等）不经过 auth()，而是直接跑内层
+ * 命令模块——那里各自解析身份，会绕开会话绑定闸（codex stop-time review 抓到）。闸落在这里
+ * 而不是逐个补调用点：新加的工具只要用了 captureCommand 就自动被盖住。
+ */
 async function captureCommand(run: () => Promise<number>): Promise<{ code: number; stdout: string; stderr: string }> {
+  assertSessionBound(readConfigWithSource().source);
   let release!: () => void;
   const previous = captureQueue;
   captureQueue = new Promise<void>((resolve) => {
