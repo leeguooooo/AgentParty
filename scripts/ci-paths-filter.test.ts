@@ -19,6 +19,15 @@ function hasDep(block: string, dep: string): boolean {
   return new RegExp(`^\\s*- ${dep}\\s*$`, "m").test(block);
 }
 
+/** 截出一个 job 的片段（到下一个顶层 job 为止）——别用全局 yml 断言，别的 job 会让断言假通过。 */
+function jobSlice(name: string): string {
+  const start = yml.indexOf(`\n  ${name}:\n`);
+  if (start < 0) throw new Error(`job ${name} not found in release.yml`);
+  const rest = yml.slice(start + 1);
+  const next = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/u);
+  return next < 0 ? rest : rest.slice(0, next + 1);
+}
+
 describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
   test('required 门禁 job 名字仍是 "full check"（改名会让分支保护的 required check 消失）', () => {
     expect(yml).toContain("name: full check");
@@ -62,7 +71,9 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
     expect(pluginJob).toContain("bun scripts/sync-agentparty-plugin.ts --check");
     expect(pluginJob).toContain("plugin validate --strict plugins/agentparty");
     expect(pluginJob).toContain("verify-agentparty-plugin-install.ts --claude-package-version ${{ matrix.claude }}");
-    expect(pluginJob).not.toMatch(/^\s+if:/m);
+    // 只禁**job 级** if:（缩进 4 空格）——那才是「被 cli_only 拦住」的形态。
+    // step 级 if: 是另一回事（prior-green 跳过重复 check），下面单独钉住它只能是那一个条件。
+    expect(pluginJob).not.toMatch(/^ {4}if:/m);
   });
 
   test("check-cli 分片无条件跑 + tsc 单列（cli 在快路径与全量下都要测）", () => {
@@ -75,9 +86,9 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
     expect(cliJob).toContain("working-directory: cli");
     expect(cliTypesJob).toContain("name: check cli (types)");
     expect(cliTypesJob).toContain("bunx tsc --noEmit");
-    // 无条件跑：cli 在 cli_only 快路径下也要测，故两个 job 都不带 if: 门。
-    expect(cliJob).not.toMatch(/^\s+if:/m);
-    expect(cliTypesJob).not.toMatch(/^\s+if:/m);
+    // 无条件跑：cli 在 cli_only 快路径下也要测，故两个 job 都不带**job 级** if: 门。
+    expect(cliJob).not.toMatch(/^ {4}if:/m);
+    expect(cliTypesJob).not.toMatch(/^ {4}if:/m);
   });
 
   test('聚合 "full check" needs 全部 workspace job（含 worker 分片与 types + desktop），且 if: always()', () => {
@@ -123,5 +134,51 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
     // publish（release）仍 needs build + desktop —— 传递闭包 = 全部 check，"全绿才发布"不变。
     expect(hasDep(releaseJob, "build")).toBe(true);
     expect(hasDep(releaseJob, "desktop")).toBe(true);
+  });
+
+  // ── 发版时跳过「同一 commit 已在 main 跑绿」的重复 check ──────────────
+  // 这里钉住的是这套跳过**不会变成「没跑测试也发版」**：证据必须是同 SHA 的 full check success，
+  // 跳过只发生在步骤层（job 结论与 needs 图不变），且校验 tag 本身的 version-contract 从不跳过。
+  test("prior-green 只认同 SHA 的 full check success，且 fail-safe 默认全跑", () => {
+    const job = yml.slice(yml.indexOf("  prior-green:\n"), yml.indexOf("  # ── #9 pre-merge"));
+    expect(job).toContain("head_sha=$GITHUB_SHA");
+    expect(job).toContain('select(.name == "full check")');
+    expect(job).toContain("*success*) skip=true");
+    // 不能把本次运行自己当证据
+    expect(job).toContain('[ "$run_id" = "$GITHUB_RUN_ID" ] && continue');
+    // 只认 main 上的 push：PR 运行的 head_sha 就是 PR 头 commit，而 PR 上的 full check
+    // 可能走 cli_only 快路径（worker/web/shared/scripts 全 skip 也算绿）。拿那种绿当
+    // 「跑过完整门禁」的证据，等于没测就发版。
+    expect(job).toContain('[ "$meta" = "push main" ] || continue');
+    expect(job).toContain("head_branch");
+    // 只在 tag 上才可能跳过；默认值必须是 false（任何异常都退回全跑）
+    expect(job).toContain('if [ "${GITHUB_REF_TYPE:-}" = "tag" ]');
+    expect(job).toMatch(/skip=false\n/);
+    // 读 run id 不靠变量分词（非 bash 下会把整串当一个元素），并显式 shell: bash
+    expect(job).toContain("while IFS= read -r run_id");
+    expect(job).toContain("shell: bash");
+  });
+
+  test("跳过只发生在步骤层：check job 的结论与 needs 图不变，version-contract 从不跳过", () => {
+    const COND = "if: ${{ needs.prior-green.outputs.skip != 'true' }}";
+    for (const name of [
+      "check-cli", "check-cli-types", "check-rest", "check-plugin",
+      "check-worker", "check-worker-types", "check-desktop",
+    ]) {
+      const job = jobSlice(name);
+      expect(job).toContain("needs: [changes, prior-green]");
+      expect(job).toContain(COND);
+      // 每一条 step 级 if: 都只能是这个条件——别的条件混进来会悄悄改变门禁语义
+      for (const line of job.split("\n").filter((l) => /^ {8}if:/.test(l))) {
+        expect(line.trim()).toBe(COND);
+      }
+    }
+    // tag 自身的校验（版本一致、不比 latest 旧）是 main 那次跑不出来的新信息，绝不能跳
+    const versionContract = jobSlice("version-contract");
+    expect(versionContract).toContain("needs: changes");
+    expect(versionContract).not.toContain("prior-green");
+    // 发布链的门禁不受影响：build/desktop 不认识 prior-green
+    expect(jobSlice("build")).not.toContain("prior-green");
+    expect(jobSlice("desktop")).not.toContain("prior-green");
   });
 });
