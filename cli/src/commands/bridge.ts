@@ -39,6 +39,7 @@ import {
 } from "../claude-cross-session-gate";
 import { isPartyBinaryPath, RUNNING_VERSION } from "../upgrade";
 import { isName, isSlug } from "../validation";
+import { MCP_OPT_IN_ENV } from "../mcp-session-binding";
 import {
   CLAUDE_CHANNEL_OPT_IN_ENV,
   CLAUDE_LIFECYCLE_OPT_IN_ENV,
@@ -2033,6 +2034,9 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
   // a separate opt-in and are armed only for the final Claude child below.
   delete env[CLAUDE_CHANNEL_OPT_IN_ENV];
   delete env[CLAUDE_LIFECYCLE_OPT_IN_ENV];
+  // #1018：频道 MCP 要避开（bridge 自带一份），但**工具面**是 bridge 亲手起的这个会话该有的。
+  // 两件事分开用两个 env，正是为了在这里能只放行其中一件。
+  env[MCP_OPT_IN_ENV] = "1";
   let rawVersion: string;
   try {
     rawVersion = await (deps.probeClaudeVersion ?? defaultProbeClaudeVersion)({ cwd, env });

@@ -11,6 +11,7 @@ import {
 } from "../claude-default-args";
 import { agentpartyHome, readConfig, refreshConfigInPlace } from "../config";
 import { normalizeWakeLang } from "../wake-note-i18n";
+import { MCP_OPT_IN_ENV } from "../mcp-session-binding";
 import {
   CLAUDE_PLUGIN_UPDATE_COMMAND,
   syncClaudePluginToCli,
@@ -53,6 +54,7 @@ export function claudeChannelLoadArgs(entry: string): string[] {
   return [CLAUDE_DEV_CHANNELS_FLAG, entry];
 }
 export const CLAUDE_CHANNEL_OPT_IN_ENV = "AGENTPARTY_CLAUDE_CHANNEL_OPT_IN";
+
 /**
  * Authorizes the Marketplace lifecycle hooks to publish activity and guard a
  * delivered execution. Kept separate from the Channel opt-in because
@@ -217,6 +219,8 @@ export function claudeLaunchPlan(
     env: {
       ...env,
       [CLAUDE_CHANNEL_OPT_IN_ENV]: "1",
+      // #1018：这是 owner 亲手起的会话，工具面照常放行（进程树内继承，别的会话拿不到）。
+      [MCP_OPT_IN_ENV]: "1",
       [CLAUDE_LIFECYCLE_OPT_IN_ENV]: "1",
       ...(channel === undefined ? {} : { AGENTPARTY_CHANNEL: channel }),
     },
