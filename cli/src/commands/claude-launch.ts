@@ -357,6 +357,7 @@ export async function run(
   // #1013：插件旧于 CLI 是 `party claude` 自己修得掉的一条——它起的是**新**进程，更新后的插件
   // 本来就会被新会话加载，没有「重启当前会话」这回事。修完必须**重跑一次 preflight**：自愈只
   // 处理版本这一条，identity/listener 等 blocker 一个都不许因此被跳过。
+  let staleFixAfterSelfHeal = false;
   if (autoPluginUpdate && shouldSelfHealPluginVersion(readiness)) {
     const target = readiness.runtime_version ?? RUNNING_VERSION;
     console.log(
@@ -376,13 +377,18 @@ export async function run(
     } else {
       console.error(notice);
       // 失败也要重跑 preflight：update 可能把状态换成了另一种不匹配（例如插件反而新于 CLI），
-      // 沿用第一次的 fix_lines 就会给出过时的 `claude plugin update`，而正确修法已经变成
-      // `party upgrade`——又是「陈旧结论盖过当前事实」（coderabbit on #1014）。
-      // 重跑失败就保留原来的 readiness，至少不比现在差。
+      // 沿用第一次的 fix_lines 就会给出过时的 `claude plugin update`（coderabbit on #1014）。
+      //
+      // 「这次尝试有没有可能真的动过插件」决定了重跑失败时该怎么说：
+      //   update_failed / still_mismatched ⇒ update 命令**真的跑过**，状态可能已变；重跑又没成功，
+      //     那我们就是不知道现在该怎么修——绝不能把更新前的修法当成当前修法端出去
+      //     （codex stop-time review on a21d986）。
+      //   claude_unavailable / unreadable / not_installed ⇒ 一个字节都没动，原修法仍然准确。
+      const mutated = sync.kind === "update_failed" || sync.kind === "still_mismatched";
       try {
         readiness = await deps.preflight(channel);
       } catch {
-        // 保持原 readiness：这一步只为让修法更准，读不到就照旧说。
+        if (mutated) staleFixAfterSelfHeal = true;
       }
     }
   }
@@ -395,7 +401,14 @@ export async function run(
       ? launchBlockers.join(", ")
       : `listener_${readiness.listener}`;
     console.error(`AgentParty Channel is not launch-ready (${detail})`);
-    for (const line of readiness.fix_lines ?? []) console.error(line);
+    if (staleFixAfterSelfHeal) {
+      // 刚动过插件、又没能重新检查：手里这几行修法是更新**之前**的状态算出来的，可能已经不对。
+      // 与其端出一条可能反向的命令，不如说清楚「现在不知道」，把人指向权威判据。
+      console.error("  注意: 刚尝试过更新插件，但重新检查没成功——更新前算出的修法可能已经不适用，这里不再给它。");
+      console.error("  以当前状态为准: party doctor claude-plugin --json");
+    } else {
+      for (const line of readiness.fix_lines ?? []) console.error(line);
+    }
     if (launchBlockers.includes("plugin_state_unavailable")) {
       // 读不到插件状态 ≠ 插件坏了：`claude plugin list --json` 没在 10s 内返回（Claude 慢、正在自更新、
       // 登录过期都会这样）。别让人去改插件，先重试。

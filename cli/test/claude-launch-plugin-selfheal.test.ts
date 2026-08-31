@@ -302,13 +302,12 @@ describe("自愈失败后的修法要反映当前状态（#1014 review）", () =
     expect(err).not.toContain(MISMATCH_FIX.trim());
   });
 
-  test("重跑 preflight 抛异常 ⇒ 保留原来的修法，不比现在差", async () => {
-    const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], {
-      kind: "update_failed",
-      before: OLD_PLUGIN,
-      after: OLD_PLUGIN,
-      fix: "claude plugin update agentparty@agentparty",
-    });
+  // codex stop-time review on a21d986：我上一轮写的是「重跑失败就保留原修法」，而那恰恰是把
+  // **更新前**算出的修法当成当前修法端出去。分两种情况：
+  //   update 真跑过（update_failed / still_mismatched）+ 重新检查又失败 ⇒ 现在到底该怎么修是**未知**，
+  //     绝不能给可能反向的命令，只能说清楚并指向权威判据；
+  //   一个字节都没动（claude_unavailable 等）⇒ 原修法仍然准确，照常给。
+  function throwOnSecondPreflight(h: Harness): void {
     let calls = 0;
     const first = h.deps.preflight;
     h.deps.preflight = async (channel) => {
@@ -316,8 +315,35 @@ describe("自愈失败后的修法要反映当前状态（#1014 review）", () =
       if (calls > 1) throw new Error("boom");
       return first(channel);
     };
+  }
+
+  test("update 跑过 + 重新检查失败 ⇒ 不给更新前的修法，改说「现在不知道」并指向 doctor", async () => {
+    const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], {
+      kind: "update_failed",
+      before: OLD_PLUGIN,
+      after: OLD_PLUGIN,
+      fix: "claude plugin update agentparty@agentparty",
+    });
+    throwOnSecondPreflight(h);
     expect(await capture(h, () => run(["dev"], h.deps))).toBe(1);
-    expect(h.err.join("\n")).toContain(MISMATCH_FIX.trim());
+    const err = h.err.join("\n");
+    expect(err).not.toContain(MISMATCH_FIX.trim());
+    expect(err).toContain("重新检查没成功");
+    expect(err).toContain("party doctor claude-plugin --json");
+    expect(h.launches).toHaveLength(0);
+  });
+
+  test("插件一个字节没动（claude 不在 PATH）+ 重新检查失败 ⇒ 原修法仍准确，照常给", async () => {
+    const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], {
+      kind: "claude_unavailable",
+      before: undefined,
+      after: undefined,
+    });
+    throwOnSecondPreflight(h);
+    expect(await capture(h, () => run(["dev"], h.deps))).toBe(1);
+    const err = h.err.join("\n");
+    expect(err).toContain(MISMATCH_FIX.trim());
+    expect(err).not.toContain("重新检查没成功");
   });
 
   test("预发行版本号 ⇒ 不自愈（版本关系判不准就别动插件）", () => {
