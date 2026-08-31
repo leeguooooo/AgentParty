@@ -4,10 +4,11 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { resolveChannel } from "../config";
+import { localAgentConfigsForChannel, resolveChannel } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, fetchPresence, fetchRuntimePeers, RestError, type Identity } from "../rest";
 import { stripTerminalControls } from "../format";
+import { shellQuote } from "../codex-trust-gate";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { INSTALL_LINE, OWNER_REPO, RUNNING_VERSION, compareVersions, pendingUpgrade } from "../upgrade";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis } from "../wake-diagnosis";
@@ -69,6 +70,86 @@ export type ClaudePluginDoctorBlocker =
  * 分不出来的才落 `unknown`——它是兜底，不是默认。
  */
 export type ClaudeIdentityErrorKind = "timeout" | "unauthorized" | "network" | "unknown";
+
+/**
+ * 本机同频道、**已验活**的另一份身份（#1015）。
+ *
+ * token 被服务端拒了不等于这台机器没得用：`~/.agentparty/agents/` 里常有同频道的好几份 config
+ * （换过名字、重发过 token、project-agent 与自建各一份）。真机上三份 ludo 身份里两份 401、
+ * 一份 200——只报「有候选」会把人推向那两份死的，所以这里只收**真打过 `/api/me` 且回 200** 的。
+ */
+export interface ClaudeAlternateIdentity {
+  /** /api/me 回的名字（权威），不是 config 里缓存的那个。 */
+  name: string;
+  /** config 路径，直接拼进 AGENTPARTY_CONFIG=… 用。 */
+  path: string;
+  server: string;
+}
+
+/** 至多探几份、每份多久——诊断不该把终端卡住。 */
+const ALTERNATE_IDENTITY_PROBE_LIMIT = 5;
+const ALTERNATE_IDENTITY_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * config 文件里读 token 只发生在这里：`localAgentConfigsForChannel` 按设计不返 token，
+ * 读出来的 token 只进 fetch 的 Authorization 头，绝不进 argv / 日志 / 报告字段。
+ *
+ * server 与 token **一次读出**：分两次读会在文件正被改写时把旧 server 配上新 token，
+ * 等于把新凭据发给上一个地址。
+ */
+function credentialsAt(path: string): { server: string; token: string } | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { server?: unknown; token?: unknown };
+    if (typeof parsed.server !== "string" || parsed.server === "") return null;
+    if (typeof parsed.token !== "string" || parsed.token === "") return null;
+    return { server: parsed.server.replace(/\/+$/, ""), token: parsed.token };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 探活会把**别的 config 的 token** 主动发出去——这是本机诊断顺手扩大的凭据面，所以只发给 https。
+ * 明文 http 只放行 loopback（本地起 worker 调试的常规姿势）。
+ */
+export function safeProbeTarget(server: string): boolean {
+  try {
+    const url = new URL(server);
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1");
+  } catch {
+    return false;
+  }
+}
+
+/** 默认实现：同频道兄弟 config 逐个真问 `/api/me`，只留答 200 的。任何异常都当「这份不活」。 */
+export async function probeLiveAlternateIdentities(
+  channel: string,
+  currentConfigPath: string | null,
+  fetchIdentity: (server: string, token: string, signal: AbortSignal) => Promise<Identity> = fetchMe,
+  home?: string,
+): Promise<ClaudeAlternateIdentity[]> {
+  const hints = (home === undefined
+    ? localAgentConfigsForChannel(channel, currentConfigPath)
+    : localAgentConfigsForChannel(channel, currentConfigPath, home)
+  ).slice(0, ALTERNATE_IDENTITY_PROBE_LIMIT);
+  const probed = await Promise.all(hints.map(async (hint): Promise<ClaudeAlternateIdentity[]> => {
+    const credentials = credentialsAt(hint.path);
+    if (credentials === null || !safeProbeTarget(credentials.server)) return [];
+    try {
+      const identity = await fetchIdentity(
+        credentials.server,
+        credentials.token,
+        AbortSignal.timeout(ALTERNATE_IDENTITY_PROBE_TIMEOUT_MS),
+      );
+      if (identity.kind !== "agent") return [];
+      return [{ name: identity.name, path: hint.path, server: credentials.server }];
+    } catch {
+      return [];
+    }
+  }));
+  return probed.flat();
+}
 
 /** 网络层失败的指纹：fetch 自己只抛一句 "fetch failed"，真正的原因在 cause.code 里。 */
 const NETWORK_ERROR_CODES = [
@@ -186,6 +267,11 @@ export interface ClaudePluginDoctorReport {
     identity_error?: ClaudeIdentityErrorKind;
     /** 同上，一句已清洗（stripTerminalControls + 截断）的短说明。 */
     identity_error_message?: string;
+    /**
+     * #1015：token 被拒时，本机同频道**验活过**的其它身份。只在 identity_error==="unauthorized"
+     * 时出现；一份都没验活就是空数组（与「没查」区分不开也无所谓——两种情况修法相同）。
+     */
+    live_alternate_identities?: ClaudeAlternateIdentity[];
   };
   channel: {
     slug?: string;
@@ -205,6 +291,11 @@ export interface ClaudePluginDoctorDependencies {
   resolveAuth(): ReturnType<typeof resolveAuthDetailed>;
   channel(explicit?: string): string | null;
   identity(server: string, token: string, signal: AbortSignal): Promise<Identity>;
+  /**
+   * #1015：token 被拒时找本机同频道还活着的身份。可选——省略即「不查」（返回空），
+   * 这样既有的测试 deps 不必联网，也不会去碰用户真实的 ~/.agentparty。
+   */
+  liveAlternateIdentities?(channel: string, currentConfigPath: string | null): Promise<ClaudeAlternateIdentity[]>;
   presence(server: string, token: string, channel: string, signal: AbortSignal): Promise<PresenceEntry[]>;
   runtimeTopology(server: string): RuntimeTopology | undefined;
   runtimePeers(
@@ -311,6 +402,8 @@ export const defaultClaudePluginDoctorDependencies: ClaudePluginDoctorDependenci
   resolveAuth: resolveAuthDetailed,
   channel: resolveChannel,
   identity: fetchMe,
+  liveAlternateIdentities: (channel, currentConfigPath) =>
+    probeLiveAlternateIdentities(channel, currentConfigPath),
   presence: fetchPresence,
   // `doctor` remains read-only. A live party claude listener has already
   // created the private installation secret; absence is reported, not repaired.
@@ -391,6 +484,7 @@ export async function inspectClaudePluginReadiness(
 
   let identity: Identity | null = null;
   let identityError: { kind: ClaudeIdentityErrorKind; message: string } | null = null;
+  let liveAlternates: ClaudeAlternateIdentity[] = [];
   let access: ClaudePluginDoctorReport["channel"]["access"] = "not_checked";
   let listener: ClaudePluginDoctorReport["channel"]["listener"] = "not_checked";
   let activityVisibility: ClaudePluginDoctorReport["channel"]["activity_visibility"] = "not_checked";
@@ -404,6 +498,15 @@ export async function inspectClaudePluginReadiness(
     } catch (err) {
       identityError = classifyIdentityError(err);
       blockers.push("identity_unavailable");
+    }
+  }
+  // #1015：token 被拒时，先看这台机器上同频道有没有还活着的身份——有的话修法是「切过去」，
+  // 而不是让人去要一个新 token。只收真打过 /api/me 的，未验证的候选一律不报。
+  if (identityError?.kind === "unauthorized" && channel !== null && deps.liveAlternateIdentities !== undefined) {
+    try {
+      liveAlternates = await deps.liveAlternateIdentities(channel, auth.config.path ?? null);
+    } catch {
+      liveAlternates = [];
     }
   }
   if (auth.server && auth.token && identity?.kind === "agent" && channel !== null) {
@@ -479,6 +582,7 @@ export async function inspectClaudePluginReadiness(
       ...(identityError === null
         ? {}
         : { identity_error: identityError.kind, identity_error_message: identityError.message }),
+      ...(liveAlternates.length === 0 ? {} : { live_alternate_identities: liveAlternates }),
     },
     channel: {
       ...(channel === null ? {} : { slug: channel }),
@@ -536,6 +640,8 @@ export function claudePluginDoctorFixLines(
   report: Pick<ClaudePluginDoctorReport, "blockers" | "plugin" | "runtime_version"> & {
     /** #1013：identity_unavailable 的分档；旧调用方不传也照旧工作（落 unknown 那条兜底文案）。 */
     auth?: Partial<ClaudePluginDoctorReport["auth"]>;
+    /** #1015：切身份的修法要把频道名写进命令里；旧调用方不传就退回 `<channel>` 占位。 */
+    channel?: Partial<ClaudePluginDoctorReport["channel"]>;
   },
 ): string[] {
   const lines: string[] = [];
@@ -568,11 +674,28 @@ export function claudePluginDoctorFixLines(
       case "timeout":
         lines.push(`  fix: /api/me did not answer within 5s${suffix}; retry, then check the server with party doctor`);
         break;
-      case "unauthorized":
-        lines.push(
-          `  fix: the server rejected this token${suffix}; re-bind an agent token with party init --token <agent-token> --channel <channel> (or party join <invite>)`,
-        );
+      case "unauthorized": {
+        const alternates = report.auth?.live_alternate_identities ?? [];
+        if (alternates.length === 0) {
+          lines.push(
+            `  fix: the server rejected this token${suffix}; re-bind an agent token with party init --token <agent-token> --channel <channel> (or party join <invite>)`,
+          );
+          break;
+        }
+        // 这台机器上已经有验活的同频道身份：先给「切过去」，那是零等待的修法。
+        const channelSlug = report.channel?.slug ?? "<channel>";
+        lines.push(`  fix: the server rejected this token${suffix}`);
+        for (const alternate of alternates) {
+          // name 是服务端给的字符串、path 来自 readdir：进终端前一律清洗，进命令一律 shell 引用，
+          // 否则一条「可以直接粘」的修法就成了注入面。
+          lines.push(
+            `  fix: this machine still has a working #${channelSlug} identity ${stripTerminalControls(alternate.name)} — ` +
+              `AGENTPARTY_CONFIG=${shellQuote(alternate.path)} party claude ${shellQuote(channelSlug)}`,
+          );
+        }
+        lines.push("  fix: or re-bind a fresh token with party join <invite>");
         break;
+      }
       case "network":
         lines.push(
           `  fix: could not reach the AgentParty server${suffix}; check network/VPN/proxy and the server URL (party whoami shows which server this config points at)`,
