@@ -243,12 +243,25 @@ describe(`${NO_AUTO_PLUGIN_UPDATE_FLAG} 的位置（#1014 review）`, () => {
     expect(h.syncCalls).toEqual([]);
   });
 
-  test("与 --lang 混用不打架", async () => {
+  // codex stop-time review on a1b5d78：这条原来只断言「没有 usage:」+「没调 update」，
+  // 而 run() 在 --lang 落盘失败时会**在 preflight 之前**就 return 1 —— 两条断言照样成立，
+  // 等于因为提前报错而假绿；而且没注入 storeLang 时它会调真的 storeWakeLang()，
+  // 有可能把 lang=zh 写进本机真实的 agent config。两个毛病一起修：注入 storeLang，
+  // 并把判据改成「真的走到了 preflight」这种只有解析成功才可能出现的事实。
+  test("与 --lang 混用不打架：lang 照常落盘、频道照常解析、自愈仍被关掉", async () => {
     const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], { kind: "updated", before: OLD_PLUGIN, after: CLI });
-    await capture(h, () => run(["--lang", "zh", NO_AUTO_PLUGIN_UPDATE_FLAG, "dev"], h.deps));
-    const err = h.err.join("\n");
-    expect(err).not.toContain("usage:");
-    expect(h.syncCalls).toEqual([]);
+    const stored: string[] = [];
+    h.deps.storeLang = (lang: string) => {
+      stored.push(lang);
+      return true; // 绝不碰真实 config
+    };
+    const code = await capture(h, () => run(["--lang", "zh", NO_AUTO_PLUGIN_UPDATE_FLAG, "dev"], h.deps));
+    expect(stored).toEqual(["zh"]);
+    // 解析成功的硬证据：真的走到了 preflight（flag 没被当成位置参数、也没在 --lang 那步早退）。
+    expect(h.preflights).toBe(1);
+    expect(code).toBe(1); // 版本不一致仍是 blocker，只是不自愈
+    expect(h.syncCalls).toEqual([]); // 开关生效
+    expect(h.err.join("\n")).not.toContain("usage:");
   });
 
   test("放在 `--` 之后属于 claude 的参数：不当开关，自愈照常发生", async () => {
