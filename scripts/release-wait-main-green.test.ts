@@ -17,11 +17,19 @@ const RELEASE_SH = join(import.meta.dir, "..", "scripts", "release.sh");
 function runWait(input: {
   runId: string;
   conclusion: string;
+  /** 桩掉 `git remote get-url origin`；缺省是一个 GitHub 远端。 */
+  remote?: string;
   env?: Record<string, string>;
 }): { code: number; out: string } {
   const script = `
     set -uo pipefail
     eval "$(awk '/^wait_for_main_full_check\\(\\) \\{/,/^\\}/' "${RELEASE_SH}")"
+    git() {
+      case "$*" in
+        "remote get-url origin") printf '%s\\n' '${input.remote ?? "https://github.com/leeguooooo/AgentParty.git"}' ;;
+        *) command git "$@" ;;
+      esac
+    }
     gh() {
       case "$*" in
         *"/runs?head_sha="*) printf '%s\\n' '${input.runId}' ;;
@@ -63,6 +71,18 @@ describe("release.sh 打 tag 前等 main 的 full check", () => {
     expect(code).toBe(0);
     expect(out).toContain("超时");
     expect(out).toContain("tag 那次会自己把 check 跑一遍");
+  });
+
+  test("origin 不是 GitHub ⇒ 直接放行（release.sh 自己的测试推的是本地 bare 仓库）", () => {
+    // 不判这一条，就会去问 GitHub 一个它没见过的 SHA 然后等满超时——
+    // CI 上实测把 check scripts 挂死 25 分钟。这个等待在非 GitHub 远端上本来就无意义。
+    const { code, out } = runWait({
+      runId: "12345",
+      conclusion: "failure",
+      remote: "/tmp/some/bare/origin.git",
+    });
+    expect(code).toBe(0);
+    expect(out).toContain("origin 不是 GitHub");
   });
 
   test("RELEASE_SKIP_MAIN_WAIT=1 ⇒ 直接放行", () => {

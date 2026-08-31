@@ -320,6 +320,18 @@ wait_for_main_full_check() {
     echo "== 跳过等待 main full check（RELEASE_SKIP_MAIN_WAIT=1）；tag 那次会自己跑全部 check"
     return 0
   fi
+  # origin 不是 GitHub 就没有 Actions verdict 可等（release.sh 的测试推的是本地 bare 仓库）。
+  # 这里不判会去问 GitHub 一个它没见过的 SHA，然后原地等满超时——CI 上实测把 check scripts
+  # 挂死 25 分钟。这不是"为了让测试过"，而是这个等待在非 GitHub 远端上本来就无意义。
+  local origin_url
+  origin_url=$(git remote get-url origin 2>/dev/null || true)
+  case "$origin_url" in
+    *github.com*) ;;
+    *)
+      echo "== origin 不是 GitHub（${origin_url:-无}），无 Actions verdict 可等，直接打 tag"
+      return 0
+      ;;
+  esac
 
   echo "== 等 main 上 ${sha:0:7} 的 full check（超时 ${timeout}s 则照常打 tag，由 tag 那次自己跑）"
   while (( SECONDS < deadline )); do
