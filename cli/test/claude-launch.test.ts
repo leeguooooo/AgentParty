@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MCP_OPT_IN_ENV } from "../src/mcp-session-binding";
 import {
   CLAUDE_CHANNEL_OPT_IN_ENV,
   CLAUDE_CHANNEL_PLUGIN,
@@ -44,6 +45,8 @@ describe("party claude launcher", () => {
     expect(calls[0]!.args).not.toContain("--channels");
     expect(calls[0]!.env[CLAUDE_CHANNEL_OPT_IN_ENV]).toBe("1");
     expect(calls[0]!.env[CLAUDE_LIFECYCLE_OPT_IN_ENV]).toBe("1");
+    // #1018：owner 亲手起的会话必须带上工具面授权，否则这条路会被自己的闸挡死。
+    expect(calls[0]!.env[MCP_OPT_IN_ENV]).toBe("1");
     expect(calls[0]!.env.AGENTPARTY_CHANNEL).toBe("dev");
   });
 

@@ -5,6 +5,7 @@ import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMP
 import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { createHash, randomUUID } from "node:crypto";
+import { MCP_OPT_IN_ENV } from "../mcp-session-binding";
 import { spawnSync } from "node:child_process";
 import {
   downloadPartyUpgrade,
@@ -3187,6 +3188,9 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
     env: definedEnv({
       ...process.env,
       AGENTPARTY_CHANNEL: opts.channel,
+      // #1018：serve 是 owner 亲手起的、绑定到某个频道的常驻监听，它的 runner 会话该有工具面。
+      // （isolate / 显式 config 两条路本来就是 explicit 来源，这里只为「回落全局 config」的那条兜住。）
+      [MCP_OPT_IN_ENV]: "1",
       ...(opts.isolateModelPartyAccess
         ? isolatedModelPartyEnv(opts.workdir, opts.server)
         : opts.agentpartyConfigPath
@@ -3632,6 +3636,9 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     const env = {
       ...baseEnv,
       AGENTPARTY_CHANNEL: opts.channel,
+      // #1018：serve 是 owner 亲手起的、绑定到某个频道的常驻监听，它的 runner 会话该有工具面。
+      // （isolate / 显式 config 两条路本来就是 explicit 来源，这里只为「回落全局 config」的那条兜住。）
+      [MCP_OPT_IN_ENV]: "1",
       ...(opts.isolateModelPartyAccess
         ? isolatedModelPartyEnv(opts.workdir, opts.server)
         : opts.agentpartyConfigPath

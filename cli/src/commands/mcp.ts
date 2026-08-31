@@ -8,7 +8,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { DEFAULT_HEADER_PREVIEW, msgHeader, stripTerminalControls } from "../format";
 import pkg from "../../package.json" with { type: "json" };
+import type { ConfigSourceInfo } from "../config";
 import {
+  readConfigWithSource,
   ackWatchStuck,
   advanceCursorPastOwnMessage,
   drainWatchStuck,
@@ -26,6 +28,7 @@ import { applyMcpProcessTitle, parseMcpServerArgv } from "../mcp-registry";
 import { watchParentLiveness } from "../parent-liveness";
 import { reportWakeSelfCheck } from "../wake-reachability";
 import { resolveAuth, resolveAuthDetailed } from "../oidc-cli";
+import { inspectMcpSessionBinding, mcpSessionBindingDenial } from "../mcp-session-binding";
 import {
   ackDelivery,
   createTask,
@@ -254,7 +257,26 @@ function titleFromMessage(msg: MsgFrame): string {
   return label.length > 120 ? `${label.slice(0, 117)}...` : label;
 }
 
+/**
+ * #1018：MCP 是**自动**加载进每个 Claude 会话的通道，所以身份不能来自「全局兜底」——
+ * 那份 config 是全机器共享的，等于没授权的会话也能以某个 agent 的名义说话。
+ * 抛错而不是隐藏工具：工具凭空消失看起来像插件坏了，这里给一条能照做的修法。
+ */
+function assertSessionBound(source: ConfigSourceInfo): void {
+  const binding = inspectMcpSessionBinding({ configSourceKind: source.kind, env: process.env });
+  if (!binding.bound) throw new Error(mcpSessionBindingDenial(source.path));
+}
+
+async function authDetailed(): Promise<Awaited<ReturnType<typeof resolveAuthDetailed>>> {
+  const detailed = await resolveAuthDetailed();
+  // source.kind === "none" 交给各调用点既有的 "no config" 文案：那是「没接入过」，
+  // 与「继承了别人的身份」是两件事，修法也不同。
+  if (detailed.server !== null && detailed.token !== null) assertSessionBound(detailed.config);
+  return detailed;
+}
+
 async function auth(): Promise<{ server: string; token: string; me?: Identity }> {
+  await authDetailed();
   const cfg = await resolveAuth();
   if (!cfg) throw new Error("no config, run: party login or party init --server URL --token T");
   return cfg;
@@ -262,7 +284,13 @@ async function auth(): Promise<{ server: string; token: string; me?: Identity }>
 
 let captureQueue: Promise<void> = Promise.resolve();
 
+/**
+ * #1018：走这条路的工具（party_digest / party_wake_test 等）不经过 auth()，而是直接跑内层
+ * 命令模块——那里各自解析身份，会绕开会话绑定闸（codex stop-time review 抓到）。闸落在这里
+ * 而不是逐个补调用点：新加的工具只要用了 captureCommand 就自动被盖住。
+ */
 async function captureCommand(run: () => Promise<number>): Promise<{ code: number; stdout: string; stderr: string }> {
+  assertSessionBound(readConfigWithSource().source);
   let release!: () => void;
   const previous = captureQueue;
   captureQueue = new Promise<void>((resolve) => {
@@ -696,7 +724,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     },
     async ({ channel, state, note, mentions, scope, summary_seq, task_id }) => {
       try {
-        const authInfo = await resolveAuthDetailed();
+        const authInfo = await authDetailed();
         if (!authInfo.server || !authInfo.token) throw new Error("no config, run: party login or party init --server URL --token T");
         const resolved = normalizeChannel(channel, defaultChannel);
         const normalizedMentions = normalizeMentions(mentions);
