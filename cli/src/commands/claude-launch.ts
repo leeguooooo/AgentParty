@@ -117,6 +117,14 @@ export type ClaudeLaunchPreflight = {
  * 三个条件缺一不可：命中 `plugin_version_mismatch`、两边版本都读得出、且插件**严格旧于** CLI。
  * 插件比 CLI 新时跑 update 等于降级（#1011），这里必须返回 false，让 fix_lines 去说 `party upgrade`。
  */
+/**
+ * 这一行修法是不是在讲插件本身（`claude plugin install/enable/update`、`party upgrade`）。
+ * 只有这些会随「刚跑过的那次 update」而失效；其余 blocker 的修法与插件无关。
+ */
+export function isPluginFixLine(line: string): boolean {
+  return /claude plugin (install|enable|update)|party upgrade/.test(line);
+}
+
 /** 版本号带预发行/构建后缀（-beta.1、+build）——数字段比较对它不成立。 */
 export function hasPrerelease(version: string): boolean {
   return /[-+]/.test(version.trim());
@@ -401,13 +409,16 @@ export async function run(
       ? launchBlockers.join(", ")
       : `listener_${readiness.listener}`;
     console.error(`AgentParty Channel is not launch-ready (${detail})`);
+    // 刚动过插件、又没能重新检查时，**只有插件那条**修法可能已经过时（它是按更新前的版本算的）；
+    // auth / channel_unbound / identity 那些跟插件无关的修法照样准确，不该被连坐抹掉
+    // （codex stop-time review on 916778f）。
+    for (const line of readiness.fix_lines ?? []) {
+      if (staleFixAfterSelfHeal && isPluginFixLine(line)) continue;
+      console.error(line);
+    }
     if (staleFixAfterSelfHeal) {
-      // 刚动过插件、又没能重新检查：手里这几行修法是更新**之前**的状态算出来的，可能已经不对。
-      // 与其端出一条可能反向的命令，不如说清楚「现在不知道」，把人指向权威判据。
-      console.error("  注意: 刚尝试过更新插件，但重新检查没成功——更新前算出的修法可能已经不适用，这里不再给它。");
-      console.error("  以当前状态为准: party doctor claude-plugin --json");
-    } else {
-      for (const line of readiness.fix_lines ?? []) console.error(line);
+      console.error("  注意: 刚尝试过更新插件，但重新检查没成功——插件那条修法是更新前算出的，可能已经不适用，这里不给它。");
+      console.error("  插件当前状态以此为准: party doctor claude-plugin --json");
     }
     if (launchBlockers.includes("plugin_state_unavailable")) {
       // 读不到插件状态 ≠ 插件坏了：`claude plugin list --json` 没在 10s 内返回（Claude 慢、正在自更新、

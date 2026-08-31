@@ -317,6 +317,26 @@ describe("自愈失败后的修法要反映当前状态（#1014 review）", () =
     };
   }
 
+  // codex stop-time review on 916778f：抹修法要**只抹插件那条**。auth / channel_unbound 之类
+  // 与插件无关的修法照样准确，被连坐抹掉等于把「插件状态未知」升级成「什么都不告诉你」。
+  test("只抹插件那条修法：channel_unbound 等无关修法照常给", async () => {
+    const INIT_FIX = "  fix: party init --channel <channel>";
+    const both: ClaudeLaunchPreflight = {
+      blockers: ["plugin_version_mismatch", "channel_unbound", "listener_not_observed"],
+      listener: "not_observed",
+      fix_lines: [MISMATCH_FIX, INIT_FIX],
+      plugin_version: OLD_PLUGIN,
+      runtime_version: CLI,
+    };
+    const h = harness([both], { kind: "update_failed", before: OLD_PLUGIN, after: OLD_PLUGIN });
+    throwOnSecondPreflight(h);
+    expect(await capture(h, () => run(["dev"], h.deps))).toBe(1);
+    const err = h.err.join("\n");
+    expect(err).not.toContain(MISMATCH_FIX.trim()); // 插件那条：可能已过时，抹掉
+    expect(err).toContain(INIT_FIX.trim()); // 与插件无关：照常给
+    expect(err).toContain("party doctor claude-plugin --json");
+  });
+
   test("update 跑过 + 重新检查失败 ⇒ 不给更新前的修法，改说「现在不知道」并指向 doctor", async () => {
     const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], {
       kind: "update_failed",
