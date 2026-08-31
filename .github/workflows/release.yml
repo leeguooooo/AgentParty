@@ -45,7 +45,8 @@ jobs:
   #
   # 证据要求（任何一条不满足就照常全跑，fail-safe 只会多跑绝不漏测）：
   #   - 同一个 workflow（release.yml）、**同一个 commit SHA**；
-  #   - 那次运行不是本次运行；
+  #   - 那次运行不是本次运行，且是 **main 上的 push**（PR 运行可能走 cli_only 快路径，
+  #     那种绿不代表跑过完整门禁）；
   #   - 那次运行里名为 "full check" 的 job 结论是 success —— 它是唯一的聚合门禁，
   #     覆盖 cli/worker/web/shared/scripts/desktop/plugin 全部区域。
   # 注意：跳过的是**步骤**不是 job。job 本身照常成功结束，needs 图与各 job 结论一字不变——
@@ -72,6 +73,12 @@ jobs:
             while IFS= read -r run_id; do
               [ -z "$run_id" ] && continue
               [ "$run_id" = "$GITHUB_RUN_ID" ] && continue
+              # 只认 main 上的 push 运行。PR 运行的 head_sha 就是 PR 头 commit，而 PR 上的
+              # full check 可能走了 cli_only 快路径（worker/web/shared/scripts 全 skip 也算绿）——
+              # 拿它当"跑过完整门禁"的证据，等于没测就发版。main push 上 cli_only 恒 false。
+              meta="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" \
+                --jq '"\(.event) \(.head_branch)"' 2>/dev/null || true)"
+              [ "$meta" = "push main" ] || continue
               concl="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
                 --jq '.jobs[] | select(.name == "full check") | .conclusion' 2>/dev/null || true)"
               case "$concl" in

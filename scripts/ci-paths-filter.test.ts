@@ -146,6 +146,11 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
     expect(job).toContain("*success*) skip=true");
     // 不能把本次运行自己当证据
     expect(job).toContain('[ "$run_id" = "$GITHUB_RUN_ID" ] && continue');
+    // 只认 main 上的 push：PR 运行的 head_sha 就是 PR 头 commit，而 PR 上的 full check
+    // 可能走 cli_only 快路径（worker/web/shared/scripts 全 skip 也算绿）。拿那种绿当
+    // 「跑过完整门禁」的证据，等于没测就发版。
+    expect(job).toContain('[ "$meta" = "push main" ] || continue');
+    expect(job).toContain("head_branch");
     // 只在 tag 上才可能跳过；默认值必须是 false（任何异常都退回全跑）
     expect(job).toContain('if [ "${GITHUB_REF_TYPE:-}" = "tag" ]');
     expect(job).toMatch(/skip=false\n/);
