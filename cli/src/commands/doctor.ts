@@ -143,6 +143,13 @@ export async function probeLiveAlternateIdentities(
         AbortSignal.timeout(ALTERNATE_IDENTITY_PROBE_TIMEOUT_MS),
       );
       if (identity.kind !== "agent") return [];
+      // 频道以 /api/me 的权威答复为准，不认本地 config 里那份缓存（#997 同一教训）：token 还活着
+      // 不代表它还属于这个频道——被改过 scope / 重新绑到别的频道，缓存都不会变。报错频道的身份
+      // 等于给一条注定失败的命令，比不报更坏。
+      //
+      // scope 为 null（不限频道的 agent）也不收：/api/me 证明不了它是这个频道的成员，
+      // 而这里的断言正是「这是一份能用在 #<channel> 的身份」。漏报只损失一条提示，退回今天的行为。
+      if (identity.channel_scope !== channel) return [];
       return [{ name: identity.name, path: hint.path, server: credentials.server }];
     } catch {
       return [];
