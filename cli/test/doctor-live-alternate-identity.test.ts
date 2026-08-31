@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { PresenceEntry } from "@agentparty/shared";
 import {
   claudePluginDoctorFixLines,
+  safeProbeTarget,
   inspectClaudePluginReadiness,
   probeLiveAlternateIdentities,
   type ClaudeAlternateIdentity,
@@ -19,14 +20,14 @@ import { RestError, type Identity } from "../src/rest";
 const agent = (name: string): Identity => ({ name, email: null, kind: "agent", role: "agent", owner: null });
 
 /** 一个只在临时目录里的 ~/.agentparty——绝不碰用户真实 config。 */
-function fakeHome(configs: { file: string; name: string; channel: string; token: string }[]): string {
+function fakeHome(configs: { file: string; name: string; channel: string; token: string; server?: string }[]): string {
   const home = mkdtempSync(join(tmpdir(), "agentparty-1015-"));
   mkdirSync(join(home, "agents"));
   for (const config of configs) {
     writeFileSync(
       join(home, "agents", config.file),
       JSON.stringify({
-        server: "https://agentparty.example.com",
+        server: config.server ?? "https://agentparty.example.com",
         token: config.token,
         identity: { name: config.name, kind: "agent", role: "agent", channel_scope: config.channel },
       }),
@@ -155,12 +156,12 @@ describe("live alternate identity probe (#1015)", () => {
         identity_error: "unauthorized",
         identity_error_message: "invalid or revoked token",
         live_alternate_identities: [
-          { name: "server", path: `${process.env.HOME}/.agentparty/agents/live.json`, server: "https://x" },
+          { name: "server", path: "/home/leo/.agentparty/agents/live.json", server: "https://x" },
         ],
       },
     }).join("\n");
     expect(withAlternate).toContain("server");
-    expect(withAlternate).toContain("AGENTPARTY_CONFIG=~/.agentparty/agents/live.json party claude ludo");
+    expect(withAlternate).toContain("AGENTPARTY_CONFIG=/home/leo/.agentparty/agents/live.json party claude ludo");
     expect(withAlternate).toContain("party join <invite>");
 
     const withoutAlternate = claudePluginDoctorFixLines({
@@ -170,5 +171,49 @@ describe("live alternate identity probe (#1015)", () => {
     // 一份都没验活时逐字不动——今天的行为是基线。
     expect(withoutAlternate).toContain("party init --token <agent-token> --channel <channel>");
     expect(withoutAlternate).not.toContain("AGENTPARTY_CONFIG=");
+  });
+
+  test("a plaintext-http sibling never receives its token (loopback excepted)", async () => {
+    const home = fakeHome([
+      { file: "plain.json", name: "plain", channel: "ludo", token: "plain-1", server: "http://agentparty.example.com" },
+      { file: "loopback.json", name: "loopback", channel: "ludo", token: "loopback-1", server: "http://localhost:8787" },
+    ]);
+    const asked: string[] = [];
+    const alternates = await probeLiveAlternateIdentities(
+      "ludo",
+      null,
+      async (server, token) => {
+        asked.push(token);
+        return agent(server.includes("localhost") ? "loopback" : "plain");
+      },
+      home,
+    );
+    // 探活是本机诊断顺手把**别的 config 的 token** 发出去，明文 http 一律不发。
+    expect(asked).not.toContain("plain-1");
+    expect(asked).toEqual(["loopback-1"]);
+    expect(alternates.map((entry) => entry.name)).toEqual(["loopback"]);
+
+    expect(safeProbeTarget("https://agentparty.example.com")).toBe(true);
+    expect(safeProbeTarget("http://agentparty.example.com")).toBe(false);
+    expect(safeProbeTarget("http://127.0.0.1:8787")).toBe(true);
+    expect(safeProbeTarget("not a url")).toBe(false);
+  });
+
+  test("a hostile config path cannot break out of the copy-pasteable command", () => {
+    const lines = claudePluginDoctorFixLines({
+      blockers: ["identity_unavailable"],
+      plugin: { installed: true, enabled: true, bundle_valid: true, launcher_executable: true },
+      runtime_version: "0.2.224",
+      channel: { slug: "ludo" },
+      auth: {
+        identity_error: "unauthorized",
+        live_alternate_identities: [
+          { name: "srv\u001b[31mred", path: "/home/leo/x'; rm -rf ~; echo '.json", server: "https://x" },
+        ],
+      },
+    }).join("\n");
+    // 注入片段必须整段落在引号里，且服务端给的名字不带控制字符进终端。
+    expect(lines).toContain("AGENTPARTY_CONFIG='/home/leo/x'\\''; rm -rf ~; echo '\\''.json'");
+    expect(lines).not.toContain("\u001b");
   });
 });

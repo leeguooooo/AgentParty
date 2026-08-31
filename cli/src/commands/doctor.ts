@@ -2,14 +2,13 @@
 import type { PresenceEntry, RuntimePeerDiscovery, RuntimeTopology } from "@agentparty/shared";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { homedir } from "node:os";
-import { sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { localAgentConfigsForChannel, resolveChannel } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, fetchPresence, fetchRuntimePeers, RestError, type Identity } from "../rest";
 import { stripTerminalControls } from "../format";
+import { shellQuote } from "../codex-trust-gate";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { INSTALL_LINE, OWNER_REPO, RUNNING_VERSION, compareVersions, pendingUpgrade } from "../upgrade";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis } from "../wake-diagnosis";
@@ -91,19 +90,35 @@ export interface ClaudeAlternateIdentity {
 const ALTERNATE_IDENTITY_PROBE_LIMIT = 5;
 const ALTERNATE_IDENTITY_PROBE_TIMEOUT_MS = 5_000;
 
-function homeRelativePath(path: string): string {
-  const home = homedir();
-  return path === home ? "~" : path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
-}
-
-/** config 文件里读 token 只发生在这里：`localAgentConfigsForChannel` 按设计不返 token，
- *  读出来的 token 只进 fetch 的 Authorization 头，绝不进 argv / 日志 / 报告字段。 */
-function tokenAt(path: string): string | null {
+/**
+ * config 文件里读 token 只发生在这里：`localAgentConfigsForChannel` 按设计不返 token，
+ * 读出来的 token 只进 fetch 的 Authorization 头，绝不进 argv / 日志 / 报告字段。
+ *
+ * server 与 token **一次读出**：分两次读会在文件正被改写时把旧 server 配上新 token，
+ * 等于把新凭据发给上一个地址。
+ */
+function credentialsAt(path: string): { server: string; token: string } | null {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { token?: unknown };
-    return typeof parsed.token === "string" && parsed.token !== "" ? parsed.token : null;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { server?: unknown; token?: unknown };
+    if (typeof parsed.server !== "string" || parsed.server === "") return null;
+    if (typeof parsed.token !== "string" || parsed.token === "") return null;
+    return { server: parsed.server.replace(/\/+$/, ""), token: parsed.token };
   } catch {
     return null;
+  }
+}
+
+/**
+ * 探活会把**别的 config 的 token** 主动发出去——这是本机诊断顺手扩大的凭据面，所以只发给 https。
+ * 明文 http 只放行 loopback（本地起 worker 调试的常规姿势）。
+ */
+export function safeProbeTarget(server: string): boolean {
+  try {
+    const url = new URL(server);
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1");
+  } catch {
+    return false;
   }
 }
 
@@ -119,16 +134,16 @@ export async function probeLiveAlternateIdentities(
     : localAgentConfigsForChannel(channel, currentConfigPath, home)
   ).slice(0, ALTERNATE_IDENTITY_PROBE_LIMIT);
   const probed = await Promise.all(hints.map(async (hint): Promise<ClaudeAlternateIdentity[]> => {
-    const token = tokenAt(hint.path);
-    if (token === null) return [];
+    const credentials = credentialsAt(hint.path);
+    if (credentials === null || !safeProbeTarget(credentials.server)) return [];
     try {
       const identity = await fetchIdentity(
-        hint.server,
-        token,
+        credentials.server,
+        credentials.token,
         AbortSignal.timeout(ALTERNATE_IDENTITY_PROBE_TIMEOUT_MS),
       );
       if (identity.kind !== "agent") return [];
-      return [{ name: identity.name, path: hint.path, server: hint.server }];
+      return [{ name: identity.name, path: hint.path, server: credentials.server }];
     } catch {
       return [];
     }
@@ -671,9 +686,11 @@ export function claudePluginDoctorFixLines(
         const channelSlug = report.channel?.slug ?? "<channel>";
         lines.push(`  fix: the server rejected this token${suffix}`);
         for (const alternate of alternates) {
+          // name 是服务端给的字符串、path 来自 readdir：进终端前一律清洗，进命令一律 shell 引用，
+          // 否则一条「可以直接粘」的修法就成了注入面。
           lines.push(
-            `  fix: this machine still has a working #${channelSlug} identity ${alternate.name} — ` +
-              `AGENTPARTY_CONFIG=${homeRelativePath(alternate.path)} party claude ${channelSlug}`,
+            `  fix: this machine still has a working #${channelSlug} identity ${stripTerminalControls(alternate.name)} — ` +
+              `AGENTPARTY_CONFIG=${shellQuote(alternate.path)} party claude ${shellQuote(channelSlug)}`,
           );
         }
         lines.push("  fix: or re-bind a fresh token with party join <invite>");
