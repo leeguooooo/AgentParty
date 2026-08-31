@@ -298,6 +298,55 @@ remote_main_sha() {
 #
 # 所以先用 ls-remote 把「未知」尽量变成「已知」：确认已落地就别回滚（只差补 tag），
 # 确认没落地才允许回滚，仍然拿不准就一个字节都不改。
+# 等 main 上这条发布提交的 full check 出结论，然后再打 tag（#1020 后续）。
+#
+# 为什么要等：release.yml 的 prior-green 会在「同一 commit 已在 main 跑绿」时跳过 tag 那次的
+# 重复 check。但原来推 commit 与推 tag 只差 10 秒，而 main 的 full check 要 3 分半——证据在
+# 探针下结论之后才存在，优化恒不生效（v0.2.227 实测：探针 09:48:41 判 false，证据 09:51:17 才到）。
+#
+# 三种出路：
+#   success  → 打 tag。tag 那次直接跳过全部 check，构建立刻开始，且不再有第二次抖红的机会。
+#   failure  → **不打 tag**。版本提交已在 main（与今天一样），但绝不发布一个门禁红的版本。
+#   查不到 / 超时 / API 挂 → 照常打 tag（fail-open）。tag 那次找不到证据，会自己把 check 全跑一遍，
+#              验证强度与今天完全相同，只是没省到时间。这里 fail-open 不会削弱任何检查。
+wait_for_main_full_check() {
+  local sha="$1"
+  local timeout="${RELEASE_MAIN_CHECK_TIMEOUT:-1200}"
+  local interval="${RELEASE_MAIN_CHECK_INTERVAL:-15}"
+  local deadline=$(( SECONDS + timeout ))
+  local run_id="" concl=""
+
+  if [[ "${RELEASE_SKIP_MAIN_WAIT:-}" == "1" ]]; then
+    echo "== 跳过等待 main full check（RELEASE_SKIP_MAIN_WAIT=1）；tag 那次会自己跑全部 check"
+    return 0
+  fi
+
+  echo "== 等 main 上 ${sha:0:7} 的 full check（超时 ${timeout}s 则照常打 tag，由 tag 那次自己跑）"
+  while (( SECONDS < deadline )); do
+    run_id=$(gh api "repos/${GITHUB_REPOSITORY:-leeguooooo/AgentParty}/actions/workflows/release.yml/runs?head_sha=${sha}&per_page=20" \
+      --jq '[.workflow_runs[] | select(.event == "push" and .head_branch == "main")][0].id' 2>/dev/null || true)
+    if [[ -n "$run_id" && "$run_id" != "null" ]]; then
+      concl=$(gh api "repos/${GITHUB_REPOSITORY:-leeguooooo/AgentParty}/actions/runs/${run_id}/jobs?per_page=100" \
+        --jq '.jobs[] | select(.name == "full check") | .conclusion' 2>/dev/null || true)
+      case "$concl" in
+        success)
+          echo "   main full check 已绿（run ${run_id}）；tag 那次将跳过重复 check"
+          return 0
+          ;;
+        failure|cancelled|timed_out)
+          echo "!! main 上 ${sha:0:7} 的 full check = ${concl}（run ${run_id}）。**不打 tag**。" >&2
+          echo "   版本提交已在 main。修好后： git tag v${2} ${sha} && git push origin v${2}" >&2
+          echo "   查看： gh run view ${run_id} --log-failed" >&2
+          return 1
+          ;;
+      esac
+    fi
+    sleep "$interval"
+  done
+  echo "!! 等 main full check 超时（${timeout}s）。照常打 tag——tag 那次会自己把 check 跑一遍。" >&2
+  return 0
+}
+
 settle_unlanded_release() {
   local base_sha="$1" release_sha="$2" version="$3"
   case "$(release_landing_state "$base_sha" "$release_sha")" in
@@ -511,6 +560,10 @@ main() {
     abort_unpushed_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
     return 1
   }
+  # 先等 main 的 full check 出结论，再打 tag：让 tag 那次能跳过重复 check（详见函数注释）。
+  if ! wait_for_main_full_check "$RELEASE_SHA" "$VER"; then
+    return 1
+  fi
   # tag 放在 main 落地之后：main 没推成就绝不留下一个指向本地提交的 tag。
   git tag "$TAG"
   if ! git push origin "$TAG"; then
