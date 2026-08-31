@@ -218,3 +218,44 @@ describe("party claude plugin self-heal (#1013)", () => {
     ).toBe(false);
   });
 });
+
+// codex stop-time review on #1014 怀疑「`--no-auto-plugin-update` 放在 `--` 之前会被当成频道位置参数」。
+// 实测三种位置都正确（flag 被摘掉、频道照常解析），但当时**一条用例都没钉住位置**——补上，
+// 免得以后有人改参数解析时把它摔回去。
+describe(`${NO_AUTO_PLUGIN_UPDATE_FLAG} 的位置（#1014 review）`, () => {
+  test("跟在频道后面：频道仍是 dev，自愈被关掉", async () => {
+    const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], { kind: "updated", before: OLD_PLUGIN, after: CLI });
+    expect(await capture(h, () => run(["dev", NO_AUTO_PLUGIN_UPDATE_FLAG], h.deps))).toBe(1);
+    // 关键：没有「channel must match」「usage:」这类解析错——它没被当成位置参数。
+    const err = h.err.join("\n");
+    expect(err).not.toContain("channel must match");
+    expect(err).not.toContain("usage:");
+    expect(h.syncCalls).toEqual([]); // 开关生效：一次 update 都不调
+    expect(h.preflights).toBe(1);
+  });
+
+  test("排在频道前面：一样解析得出频道、一样关掉自愈", async () => {
+    const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], { kind: "updated", before: OLD_PLUGIN, after: CLI });
+    expect(await capture(h, () => run([NO_AUTO_PLUGIN_UPDATE_FLAG, "dev"], h.deps))).toBe(1);
+    const err = h.err.join("\n");
+    expect(err).not.toContain("channel must match");
+    expect(err).not.toContain("usage:");
+    expect(h.syncCalls).toEqual([]);
+  });
+
+  test("与 --lang 混用不打架", async () => {
+    const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], { kind: "updated", before: OLD_PLUGIN, after: CLI });
+    await capture(h, () => run(["--lang", "zh", NO_AUTO_PLUGIN_UPDATE_FLAG, "dev"], h.deps));
+    const err = h.err.join("\n");
+    expect(err).not.toContain("usage:");
+    expect(h.syncCalls).toEqual([]);
+  });
+
+  test("放在 `--` 之后属于 claude 的参数：不当开关，自愈照常发生", async () => {
+    const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX), ready], { kind: "updated", before: OLD_PLUGIN, after: CLI });
+    expect(await capture(h, () => run(["dev", "--", NO_AUTO_PLUGIN_UPDATE_FLAG], h.deps))).toBe(0);
+    expect(h.syncCalls).toEqual([CLI]); // 开关没被误触发
+    expect(h.launches).toHaveLength(1);
+    expect(h.launches[0]).toContain(NO_AUTO_PLUGIN_UPDATE_FLAG); // 原样传给 claude
+  });
+});
