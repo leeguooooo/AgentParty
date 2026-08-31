@@ -1,7 +1,7 @@
 // #1013：`party claude` 撞到「插件旧于 CLI」应该自己 update 完直接启动，而不是让人手敲命令。
 // 这里钉住四档：旧+成功⇒启动；旧+失败⇒不启动 + 手动命令；新于 CLI⇒绝不 update；开关关掉⇒回到今天。
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -38,6 +38,17 @@ const ready: ClaudeLaunchPreflight = {
   plugin_version: CLI,
   runtime_version: CLI,
 };
+
+// TMPDIR 是持久路径：每个 harness 建的临时目录都要收回去，别让 agentparty-selfheal-* 越积越多
+// （coderabbit on #1014）。
+const tempDirs: string[] = [];
+function trackTemp(dir: string): string {
+  tempDirs.push(dir);
+  return dir;
+}
+afterEach(() => {
+  while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
+});
 
 interface Harness {
   deps: ClaudeLaunchDependencies;
@@ -78,7 +89,7 @@ function harness(
       state.launches.push(args);
       return { status: 0 };
     },
-    home: mkdtempSync(join(tmpdir(), "agentparty-selfheal-")),
+    home: trackTemp(mkdtempSync(join(tmpdir(), "agentparty-selfheal-"))),
     env: {},
   };
   return state;
@@ -270,5 +281,46 @@ describe(`${NO_AUTO_PLUGIN_UPDATE_FLAG} 的位置（#1014 review）`, () => {
     expect(h.syncCalls).toEqual([CLI]); // 开关没被误触发
     expect(h.launches).toHaveLength(1);
     expect(h.launches[0]).toContain(NO_AUTO_PLUGIN_UPDATE_FLAG); // 原样传给 claude
+  });
+});
+
+// coderabbit on #1014：自愈失败后仍打第一次 preflight 的 fix_lines —— 如果这次 update 把状态
+// 换成了另一种不匹配（插件反而新于 CLI），用户会拿到过时的 `claude plugin update`，
+// 而正确修法已经是 `party upgrade`。失败也要重跑 preflight，按当前事实给修法。
+describe("自愈失败后的修法要反映当前状态（#1014 review）", () => {
+  test("update 后状态翻成「插件新于 CLI」⇒ 打的是 party upgrade，不是过时的 plugin update", async () => {
+    const h = harness(
+      [mismatched(OLD_PLUGIN, MISMATCH_FIX), mismatched(NEW_PLUGIN, UPGRADE_FIX)],
+      { kind: "still_mismatched", before: OLD_PLUGIN, after: NEW_PLUGIN },
+    );
+    expect(await capture(h, () => run(["dev"], h.deps))).toBe(1);
+    expect(h.syncCalls).toEqual([CLI]);
+    expect(h.preflights).toBe(2); // 失败也重跑了
+    expect(h.launches).toHaveLength(0);
+    const err = h.err.join("\n");
+    expect(err).toContain(UPGRADE_FIX.trim());
+    expect(err).not.toContain(MISMATCH_FIX.trim());
+  });
+
+  test("重跑 preflight 抛异常 ⇒ 保留原来的修法，不比现在差", async () => {
+    const h = harness([mismatched(OLD_PLUGIN, MISMATCH_FIX)], {
+      kind: "update_failed",
+      before: OLD_PLUGIN,
+      after: OLD_PLUGIN,
+      fix: "claude plugin update agentparty@agentparty",
+    });
+    let calls = 0;
+    const first = h.deps.preflight;
+    h.deps.preflight = async (channel) => {
+      calls += 1;
+      if (calls > 1) throw new Error("boom");
+      return first(channel);
+    };
+    expect(await capture(h, () => run(["dev"], h.deps))).toBe(1);
+    expect(h.err.join("\n")).toContain(MISMATCH_FIX.trim());
+  });
+
+  test("预发行版本号 ⇒ 不自愈（版本关系判不准就别动插件）", () => {
+    expect(shouldSelfHealPluginVersion(mismatched("0.2.223-beta.1", MISMATCH_FIX))).toBe(false);
   });
 });

@@ -117,10 +117,19 @@ export type ClaudeLaunchPreflight = {
  * 三个条件缺一不可：命中 `plugin_version_mismatch`、两边版本都读得出、且插件**严格旧于** CLI。
  * 插件比 CLI 新时跑 update 等于降级（#1011），这里必须返回 false，让 fix_lines 去说 `party upgrade`。
  */
+/** 版本号带预发行/构建后缀（-beta.1、+build）——数字段比较对它不成立。 */
+export function hasPrerelease(version: string): boolean {
+  return /[-+]/.test(version.trim());
+}
+
 export function shouldSelfHealPluginVersion(readiness: ClaudeLaunchPreflight): boolean {
   if (!readiness.blockers.includes("plugin_version_mismatch")) return false;
   const { plugin_version: plugin, runtime_version: runtime } = readiness;
   if (plugin === undefined || runtime === undefined) return false;
+  // 预发行号（0.2.223-beta.1）在 compareVersions 里会被 parseInt 截成 0.2.223，比出来「相等」，
+  // 于是既不自愈也不解释。本仓 release.sh 只发严格 X.Y.Z，但真撞上时要**显式**不自愈：
+  // 版本关系都判不准，就别去动插件（coderabbit on #1014）。
+  if (hasPrerelease(plugin) || hasPrerelease(runtime)) return false;
   return compareVersions(plugin, runtime) < 0;
 }
 
@@ -366,6 +375,15 @@ export async function run(
       }
     } else {
       console.error(notice);
+      // 失败也要重跑 preflight：update 可能把状态换成了另一种不匹配（例如插件反而新于 CLI），
+      // 沿用第一次的 fix_lines 就会给出过时的 `claude plugin update`，而正确修法已经变成
+      // `party upgrade`——又是「陈旧结论盖过当前事实」（coderabbit on #1014）。
+      // 重跑失败就保留原来的 readiness，至少不比现在差。
+      try {
+        readiness = await deps.preflight(channel);
+      } catch {
+        // 保持原 readiness：这一步只为让修法更准，读不到就照旧说。
+      }
     }
   }
   // Before launch, no durable listener is the one expected doctor blocker.
