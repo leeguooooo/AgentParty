@@ -6,7 +6,8 @@ import { spawnSync } from "node:child_process";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
-import { fetchMe, fetchPresence, fetchRuntimePeers, type Identity } from "../rest";
+import { fetchMe, fetchPresence, fetchRuntimePeers, RestError, type Identity } from "../rest";
+import { stripTerminalControls } from "../format";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { INSTALL_LINE, OWNER_REPO, RUNNING_VERSION, compareVersions, pendingUpgrade } from "../upgrade";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis } from "../wake-diagnosis";
@@ -62,6 +63,64 @@ export type ClaudePluginDoctorBlocker =
   | "listener_not_observed"
   | "listener_suspect"
   | "listener_deaf";
+/**
+ * `identity_unavailable` 的分档（#1013）。以前 `deps.identity(...)` 抛任何异常都只记一个词，
+ * 而这三种的处置完全相反：超时该重试、401 该重新 join、网络不通该查 server / 代理。
+ * 分不出来的才落 `unknown`——它是兜底，不是默认。
+ */
+export type ClaudeIdentityErrorKind = "timeout" | "unauthorized" | "network" | "unknown";
+
+/** 网络层失败的指纹：fetch 自己只抛一句 "fetch failed"，真正的原因在 cause.code 里。 */
+const NETWORK_ERROR_CODES = [
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EPIPE",
+  "ETIMEDOUT",
+  "CERT_HAS_EXPIRED",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+];
+
+function errorCode(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * 把 `/api/me` 的异常分档，并给出一句可进终端的短说明。
+ *
+ * 服务端返回的文字**绝不**原样进终端：先 stripTerminalControls（它可能含 ANSI / 控制字符），
+ * 再截断——诊断要的是「哪一类」，不是把响应体倒出来。
+ */
+export function classifyIdentityError(err: unknown): { kind: ClaudeIdentityErrorKind; message: string } {
+  const kind = ((): ClaudeIdentityErrorKind => {
+    if (err instanceof RestError) {
+      if (err.status === 401 || err.status === 403) return "unauthorized";
+      // 5xx / 502 之类不是「你的 token 不对」，也不是本机的事：按可达性问题处置（重试 + 查 server）。
+      if (err.status >= 500) return "network";
+      return "unknown";
+    }
+    const name = typeof err === "object" && err !== null ? String((err as { name?: unknown }).name ?? "") : "";
+    // AbortSignal.timeout() 抛 DOMException("TimeoutError")；老运行时 / 手动 abort 是 AbortError。
+    if (name === "TimeoutError" || name === "AbortError") return "timeout";
+    const code = errorCode(err);
+    if (code !== undefined && NETWORK_ERROR_CODES.includes(code)) return code === "ETIMEDOUT" ? "timeout" : "network";
+    const causeCode = errorCode(typeof err === "object" && err !== null ? (err as { cause?: unknown }).cause : undefined);
+    if (causeCode !== undefined && NETWORK_ERROR_CODES.includes(causeCode)) {
+      return causeCode === "ETIMEDOUT" ? "timeout" : "network";
+    }
+    if (err instanceof TypeError && /fetch failed|network/i.test(err.message)) return "network";
+    return "unknown";
+  })();
+  const raw = err instanceof Error ? err.message : String(err);
+  const message = stripTerminalControls(raw).replace(/\s+/g, " ").trim().slice(0, 200);
+  return { kind, message: message === "" ? kind : message };
+}
+
 export type ClaudePluginDoctorWarning =
   | "activity_not_observed"
   | "topology_not_observed"
@@ -123,6 +182,10 @@ export interface ClaudePluginDoctorReport {
     configured: boolean;
     source: "runtime_config" | "account_session" | "none";
     identity?: string;
+    /** #1013：identity_unavailable 的分档；没有该 blocker 时缺席（旧字段语义不动，只新增）。 */
+    identity_error?: ClaudeIdentityErrorKind;
+    /** 同上，一句已清洗（stripTerminalControls + 截断）的短说明。 */
+    identity_error_message?: string;
   };
   channel: {
     slug?: string;
@@ -327,6 +390,7 @@ export async function inspectClaudePluginReadiness(
   if (channel === null) blockers.push("channel_unbound");
 
   let identity: Identity | null = null;
+  let identityError: { kind: ClaudeIdentityErrorKind; message: string } | null = null;
   let access: ClaudePluginDoctorReport["channel"]["access"] = "not_checked";
   let listener: ClaudePluginDoctorReport["channel"]["listener"] = "not_checked";
   let activityVisibility: ClaudePluginDoctorReport["channel"]["activity_visibility"] = "not_checked";
@@ -337,7 +401,8 @@ export async function inspectClaudePluginReadiness(
     try {
       identity = await deps.identity(auth.server, auth.token, AbortSignal.timeout(5_000));
       if (identity.kind !== "agent") blockers.push("identity_not_agent");
-    } catch {
+    } catch (err) {
+      identityError = classifyIdentityError(err);
       blockers.push("identity_unavailable");
     }
   }
@@ -411,6 +476,9 @@ export async function inspectClaudePluginReadiness(
       configured: auth.server !== null && auth.token !== null,
       source: auth.auth_source,
       ...(identity === null ? {} : { identity: identity.name }),
+      ...(identityError === null
+        ? {}
+        : { identity_error: identityError.kind, identity_error_message: identityError.message }),
     },
     channel: {
       ...(channel === null ? {} : { slug: channel }),
@@ -465,7 +533,10 @@ async function runClaudePluginDoctor(
  * user to install again leaves them exactly where they are.
  */
 export function claudePluginDoctorFixLines(
-  report: Pick<ClaudePluginDoctorReport, "blockers" | "plugin" | "runtime_version">,
+  report: Pick<ClaudePluginDoctorReport, "blockers" | "plugin" | "runtime_version"> & {
+    /** #1013：identity_unavailable 的分档；旧调用方不传也照旧工作（落 unknown 那条兜底文案）。 */
+    auth?: Partial<ClaudePluginDoctorReport["auth"]>;
+  },
 ): string[] {
   const lines: string[] = [];
   if (report.blockers.includes("plugin_missing")) {
@@ -489,6 +560,30 @@ export function claudePluginDoctorFixLines(
     lines.push(`  fix: update Claude Code to >= ${CLAUDE_PLUGIN_MIN_VERSION.join(".")}`);
   }
   if (report.blockers.includes("channel_unbound")) lines.push("  fix: party init --channel <channel>");
+  if (report.blockers.includes("identity_unavailable")) {
+    // #1013：三种失败的处置完全不同，别再挤成一句「身份读不出来」。
+    const detail = report.auth?.identity_error_message;
+    const suffix = detail === undefined || detail === "" ? "" : ` (${detail})`;
+    switch (report.auth?.identity_error) {
+      case "timeout":
+        lines.push(`  fix: /api/me did not answer within 5s${suffix}; retry, then check the server with party doctor`);
+        break;
+      case "unauthorized":
+        lines.push(
+          `  fix: the server rejected this token${suffix}; re-bind an agent token with party init --token <agent-token> --channel <channel> (or party join <invite>)`,
+        );
+        break;
+      case "network":
+        lines.push(
+          `  fix: could not reach the AgentParty server${suffix}; check network/VPN/proxy and the server URL (party whoami shows which server this config points at)`,
+        );
+        break;
+      default:
+        lines.push(
+          `  fix: could not read this agent identity${suffix}; details: party doctor claude-plugin --json (auth.identity_error)`,
+        );
+    }
+  }
   if (report.blockers.includes("identity_not_agent")) {
     lines.push("  fix: bind an agent token with party init --token <agent-token> --channel <channel>");
   }

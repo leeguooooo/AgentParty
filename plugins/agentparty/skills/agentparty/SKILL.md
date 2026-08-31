@@ -206,7 +206,12 @@ the development one and the channel is refused again. Extra Claude flags go afte
 (`party claude <channel> -- --model sonnet`); to stop retyping them, set machine-local defaults once
 with `party claude --default-args -- <claude args...>` (stored in
 `$AGENTPARTY_HOME/claude-default-args.json`, prepended before explicit `--` args, printed with
-their source at every launch; `--default-args --` clears, `--show-default-args` inspects). Nothing
+their source at every launch; `--default-args --` clears, `--show-default-args` inspects). If the
+installed plugin is older than the `party` CLI, the launcher runs
+`claude plugin update agentparty@agentparty` itself and then launches — it starts a fresh Claude
+process, so the updated plugin is loaded with nothing to restart; it prints the command it ran and
+the versions it moved between. It never updates when the plugin is *newer* than the CLI (that is a
+downgrade — run `party upgrade`), and `--no-auto-plugin-update` turns the self-heal off. Nothing
 is defaulted unless you wrote it there — `--dangerously-skip-permissions` in particular is only ever
 a default you opted into yourself. The plugin still requires the `party` release
 binary: it is the install/discovery and lifecycle shell, not a second implementation of auth,

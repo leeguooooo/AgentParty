@@ -11,6 +11,12 @@ import {
 } from "../claude-default-args";
 import { agentpartyHome, readConfig, refreshConfigInPlace } from "../config";
 import { normalizeWakeLang } from "../wake-note-i18n";
+import {
+  CLAUDE_PLUGIN_UPDATE_COMMAND,
+  syncClaudePluginToCli,
+  type ClaudePluginSyncResult,
+} from "../claude-plugin-sync";
+import { RUNNING_VERSION, compareVersions } from "../upgrade";
 import { isSlug } from "../validation";
 import {
   claudePluginDoctorFixLines,
@@ -55,9 +61,9 @@ export const CLAUDE_CHANNEL_OPT_IN_ENV = "AGENTPARTY_CLAUDE_CHANNEL_OPT_IN";
  */
 export const CLAUDE_LIFECYCLE_OPT_IN_ENV = "AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN";
 
-const USAGE = "usage: party claude [channel] [-- <claude args...>] | --default-args -- [<claude args...>] | --show-default-args";
+const USAGE = "usage: party claude [channel] [--lang zh|en] [--no-auto-plugin-update] [-- <claude args...>] | --default-args -- [<claude args...>] | --show-default-args";
 
-const HELP = `usage: party claude [channel] [--lang zh|en] [-- <claude args...>]
+const HELP = `usage: party claude [channel] [--lang zh|en] [--no-auto-plugin-update] [-- <claude args...>]
        party claude --default-args -- <claude args...>   # 设为本机默认启动参数（配一次）
        party claude --default-args --                    # 清空本机默认
        party claude --show-default-args                  # 查看本机默认及其来源
@@ -78,10 +84,83 @@ one and the channel is refused again.
 agent config (#1003) and then launches as usual; omit it to auto-detect from the agent's
 own recent channel messages (fallback: the mentioning message, then LANG, then en).
 
+If the installed Marketplace plugin is older than this CLI, the launcher runs
+\`claude plugin update agentparty@agentparty\` itself and then launches (the new
+Claude process loads the updated plugin; nothing to restart). It prints which
+command it ran and the version it moved the plugin from and to. It never runs
+update when the plugin is *newer* than the CLI — that would be a downgrade;
+upgrade the CLI with \`party upgrade\` instead. --no-auto-plugin-update turns the
+self-heal off and falls back to printing the manual command.
+
 Default launch args are opt-in per machine and never hard-coded: only what you
 wrote with --default-args (file: $AGENTPARTY_HOME/claude-default-args.json;
 fallback env ${CLAUDE_DEFAULT_ARGS_ENV}, lower priority) is prepended before your
 explicit -- args. The launcher prints the defaults and their source every time.`;
+
+/** #1013：自愈只碰「插件版本」这一条 blocker，且只在插件**旧于** CLI 时动手。 */
+export const NO_AUTO_PLUGIN_UPDATE_FLAG = "--no-auto-plugin-update";
+
+export type ClaudeLaunchPreflight = {
+  blockers: ClaudePluginDoctorBlocker[];
+  listener: ClaudePluginDoctorReport["channel"]["listener"];
+  /** doctor 的逐项修法（#984：拒绝启动时直接印出来，不再只丢一句「去跑 doctor」）。 */
+  fix_lines?: string[];
+  /** 本机已装的插件版本（#1013 判「旧于 CLI」用；读不出来时缺席）。 */
+  plugin_version?: string;
+  /** 这个 party 二进制的版本，即插件该对齐到的目标。 */
+  runtime_version?: string;
+};
+
+/**
+ * 插件版本落后是否该由 `party claude` 自己修（#1013）。
+ *
+ * 三个条件缺一不可：命中 `plugin_version_mismatch`、两边版本都读得出、且插件**严格旧于** CLI。
+ * 插件比 CLI 新时跑 update 等于降级（#1011），这里必须返回 false，让 fix_lines 去说 `party upgrade`。
+ */
+/**
+ * 这一行修法是不是在讲插件本身（`claude plugin install/enable/update`、`party upgrade`）。
+ * 只有这些会随「刚跑过的那次 update」而失效；其余 blocker 的修法与插件无关。
+ */
+export function isPluginFixLine(line: string): boolean {
+  return /claude plugin (install|enable|update)|party upgrade/.test(line);
+}
+
+/** 版本号带预发行/构建后缀（-beta.1、+build）——数字段比较对它不成立。 */
+export function hasPrerelease(version: string): boolean {
+  return /[-+]/.test(version.trim());
+}
+
+export function shouldSelfHealPluginVersion(readiness: ClaudeLaunchPreflight): boolean {
+  if (!readiness.blockers.includes("plugin_version_mismatch")) return false;
+  const { plugin_version: plugin, runtime_version: runtime } = readiness;
+  if (plugin === undefined || runtime === undefined) return false;
+  // 预发行号（0.2.223-beta.1）在 compareVersions 里会被 parseInt 截成 0.2.223，比出来「相等」，
+  // 于是既不自愈也不解释。本仓 release.sh 只发严格 X.Y.Z，但真撞上时要**显式**不自愈：
+  // 版本关系都判不准，就别去动插件（coderabbit on #1014）。
+  if (hasPrerelease(plugin) || hasPrerelease(runtime)) return false;
+  return compareVersions(plugin, runtime) < 0;
+}
+
+/** 自愈结果的说明文案（纯函数，可测）。第一句永远说明「动了什么」。 */
+export function pluginSelfHealNotice(result: ClaudePluginSyncResult, runtimeVersion: string): string {
+  const from = typeof result.before === "string" ? result.before : "?";
+  switch (result.kind) {
+    case "updated":
+      return `已自动运行 \`${CLAUDE_PLUGIN_UPDATE_COMMAND}\`：插件 ${from} → ${result.after}（与 CLI ${runtimeVersion} 对齐）；这就用新版本启动新的 Claude 会话。`;
+    case "update_failed":
+      return `自动运行 \`${CLAUDE_PLUGIN_UPDATE_COMMAND}\` 失败（命令退出非 0，插件仍是 ${result.after ?? from}）。`;
+    case "still_mismatched":
+      return `自动运行 \`${CLAUDE_PLUGIN_UPDATE_COMMAND}\` 后插件仍是 ${result.after ?? from}，没到 CLI 的 ${runtimeVersion}（marketplace 还没拿到这个 tag，或本机缓存未刷新）。`;
+    case "claude_unavailable":
+      return "无法自动更新插件：`claude` 不在 PATH 上，跑不了 `claude plugin update`。";
+    case "unreadable":
+      return "无法自动更新插件：`claude plugin list --json` 读不出插件清单，不确定动了会变成什么，没有动。";
+    case "not_installed":
+      return "无法自动更新插件：本机没装 agentparty 插件（装插件是 `party join` 的事，启动器不替你做主）。";
+    case "current":
+      return `插件已与 CLI ${runtimeVersion} 同版，无需更新。`;
+  }
+}
 
 export interface ClaudeLaunchResult {
   status: number | null;
@@ -89,12 +168,9 @@ export interface ClaudeLaunchResult {
 }
 
 export interface ClaudeLaunchDependencies {
-  preflight(channel: string | undefined): Promise<{
-    blockers: ClaudePluginDoctorBlocker[];
-    listener: ClaudePluginDoctorReport["channel"]["listener"];
-    /** doctor 的逐项修法（#984：拒绝启动时直接印出来，不再只丢一句「去跑 doctor」）。 */
-    fix_lines?: string[];
-  }>;
+  preflight(channel: string | undefined): Promise<ClaudeLaunchPreflight>;
+  /** #1013：把本机插件对齐到 `cliVersion`（默认 syncClaudePluginToCli）；测试注入。 */
+  syncPlugin?: (cliVersion: string) => ClaudePluginSyncResult;
   launch(args: string[], env: NodeJS.ProcessEnv): ClaudeLaunchResult;
   /** 本机偏好根（默认 `agentpartyHome(env)`）；测试用临时目录注入。 */
   home?: string;
@@ -118,8 +194,11 @@ const defaultDependencies: ClaudeLaunchDependencies = {
       blockers: report.blockers,
       listener: report.channel.listener,
       fix_lines: claudePluginDoctorFixLines(report),
+      ...(report.plugin.version === undefined ? {} : { plugin_version: report.plugin.version }),
+      runtime_version: report.runtime_version,
     };
   },
+  syncPlugin: (cliVersion) => syncClaudePluginToCli(spawnSync, cliVersion),
   launch: (args, env) => spawnSync("claude", args, { stdio: "inherit", env }),
 };
 
@@ -225,7 +304,10 @@ export async function run(
   const env = deps.env ?? process.env;
   const home = deps.home ?? agentpartyHome(env);
   const separator = argv.indexOf("--");
-  const rawOwnArgs = separator === -1 ? argv : argv.slice(0, separator);
+  const rawArgsBeforeSeparator = separator === -1 ? argv : argv.slice(0, separator);
+  // #1013：`--no-auto-plugin-update` 先摘掉（它只关自愈，不进 claude 的参数、也不参与位置参数校验）。
+  const autoPluginUpdate = !rawArgsBeforeSeparator.includes(NO_AUTO_PLUGIN_UPDATE_FLAG);
+  const rawOwnArgs = rawArgsBeforeSeparator.filter((arg) => arg !== NO_AUTO_PLUGIN_UPDATE_FLAG);
   const claudeArgs = separator === -1 ? [] : argv.slice(separator + 1);
   // #1003：`--lang zh|en` 先从自有参数里摘出来（写进 config 后照常启动），其余参数的校验不变。
   const langIndex = rawOwnArgs.findIndex((arg) => arg === "--lang" || arg.startsWith("--lang="));
@@ -273,12 +355,50 @@ export async function run(
     }
     console.log(`唤醒文案语言已写入 config：lang=${lang}`);
   }
-  let readiness: Awaited<ReturnType<ClaudeLaunchDependencies["preflight"]>>;
+  let readiness: ClaudeLaunchPreflight;
   try {
     readiness = await deps.preflight(channel);
   } catch {
     console.error("AgentParty Channel preflight failed; run: party doctor claude-plugin --json");
     return 1;
+  }
+  // #1013：插件旧于 CLI 是 `party claude` 自己修得掉的一条——它起的是**新**进程，更新后的插件
+  // 本来就会被新会话加载，没有「重启当前会话」这回事。修完必须**重跑一次 preflight**：自愈只
+  // 处理版本这一条，identity/listener 等 blocker 一个都不许因此被跳过。
+  let staleFixAfterSelfHeal = false;
+  if (autoPluginUpdate && shouldSelfHealPluginVersion(readiness)) {
+    const target = readiness.runtime_version ?? RUNNING_VERSION;
+    console.log(
+      `插件 ${readiness.plugin_version} 落后于 CLI ${target}，正在运行 \`${CLAUDE_PLUGIN_UPDATE_COMMAND}\`` +
+        `（不想让启动器动插件：加 ${NO_AUTO_PLUGIN_UPDATE_FLAG}）……`,
+    );
+    const sync = (deps.syncPlugin ?? ((cliVersion: string) => syncClaudePluginToCli(spawnSync, cliVersion)))(target);
+    const notice = pluginSelfHealNotice(sync, target);
+    if (sync.kind === "updated" || sync.kind === "current") {
+      console.log(notice);
+      try {
+        readiness = await deps.preflight(channel);
+      } catch {
+        console.error("AgentParty Channel preflight failed; run: party doctor claude-plugin --json");
+        return 1;
+      }
+    } else {
+      console.error(notice);
+      // 失败也要重跑 preflight：update 可能把状态换成了另一种不匹配（例如插件反而新于 CLI），
+      // 沿用第一次的 fix_lines 就会给出过时的 `claude plugin update`（coderabbit on #1014）。
+      //
+      // 「这次尝试有没有可能真的动过插件」决定了重跑失败时该怎么说：
+      //   update_failed / still_mismatched ⇒ update 命令**真的跑过**，状态可能已变；重跑又没成功，
+      //     那我们就是不知道现在该怎么修——绝不能把更新前的修法当成当前修法端出去
+      //     （codex stop-time review on a21d986）。
+      //   claude_unavailable / unreadable / not_installed ⇒ 一个字节都没动，原修法仍然准确。
+      const mutated = sync.kind === "update_failed" || sync.kind === "still_mismatched";
+      try {
+        readiness = await deps.preflight(channel);
+      } catch {
+        if (mutated) staleFixAfterSelfHeal = true;
+      }
+    }
   }
   // Before launch, no durable listener is the one expected doctor blocker.
   // Everything else means Claude would open without the promised Channel, or
@@ -289,7 +409,17 @@ export async function run(
       ? launchBlockers.join(", ")
       : `listener_${readiness.listener}`;
     console.error(`AgentParty Channel is not launch-ready (${detail})`);
-    for (const line of readiness.fix_lines ?? []) console.error(line);
+    // 刚动过插件、又没能重新检查时，**只有插件那条**修法可能已经过时（它是按更新前的版本算的）；
+    // auth / channel_unbound / identity 那些跟插件无关的修法照样准确，不该被连坐抹掉
+    // （codex stop-time review on 916778f）。
+    for (const line of readiness.fix_lines ?? []) {
+      if (staleFixAfterSelfHeal && isPluginFixLine(line)) continue;
+      console.error(line);
+    }
+    if (staleFixAfterSelfHeal) {
+      console.error("  注意: 刚尝试过更新插件，但重新检查没成功——插件那条修法是更新前算出的，可能已经不适用，这里不给它。");
+      console.error("  插件当前状态以此为准: party doctor claude-plugin --json");
+    }
     if (launchBlockers.includes("plugin_state_unavailable")) {
       // 读不到插件状态 ≠ 插件坏了：`claude plugin list --json` 没在 10s 内返回（Claude 慢、正在自更新、
       // 登录过期都会这样）。别让人去改插件，先重试。
