@@ -17,7 +17,14 @@ import {
 } from "../src/commands/doctor";
 import { RestError, type Identity } from "../src/rest";
 
-const agent = (name: string): Identity => ({ name, email: null, kind: "agent", role: "agent", owner: null });
+const agent = (name: string, channelScope: string | null = "ludo"): Identity => ({
+  name,
+  email: null,
+  kind: "agent",
+  role: "agent",
+  owner: null,
+  channel_scope: channelScope,
+});
 
 /** 一个只在临时目录里的 ~/.agentparty——绝不碰用户真实 config。 */
 function fakeHome(configs: { file: string; name: string; channel: string; token: string; server?: string }[]): string {
@@ -97,7 +104,7 @@ describe("live alternate identity probe (#1015)", () => {
     const alternates = await probeLiveAlternateIdentities(
       "ludo",
       null,
-      async () => ({ name: "leo", email: null, kind: "human", role: "member", owner: null }),
+      async () => ({ name: "leo", email: null, kind: "human", role: "member", owner: null, channel_scope: "ludo" }),
       home,
     );
     expect(alternates).toEqual([]);
@@ -171,6 +178,27 @@ describe("live alternate identity probe (#1015)", () => {
     // 一份都没验活时逐字不动——今天的行为是基线。
     expect(withoutAlternate).toContain("party init --token <agent-token> --channel <channel>");
     expect(withoutAlternate).not.toContain("AGENTPARTY_CONFIG=");
+  });
+
+  test("a token that is alive but no longer scoped to this channel is not offered", async () => {
+    const home = fakeHome([
+      { file: "moved.json", name: "server", channel: "ludo", token: "moved-1" },
+      { file: "unscoped.json", name: "roamer", channel: "ludo", token: "unscoped-1" },
+      { file: "still-here.json", name: "keeper", channel: "ludo", token: "keeper-1" },
+    ]);
+    const alternates = await probeLiveAlternateIdentities(
+      "ludo",
+      null,
+      // 三个 token 都活着，但服务端说的 scope 各不相同——本地 config 里那份 scope 是缓存，不算数。
+      async (_server, token) =>
+        token === "moved-1"
+          ? agent("server", "piggygo")
+          : token === "unscoped-1"
+            ? agent("roamer", null)
+            : agent("keeper", "ludo"),
+      home,
+    );
+    expect(alternates.map((entry) => entry.name)).toEqual(["keeper"]);
   });
 
   test("a plaintext-http sibling never receives its token (loopback excepted)", async () => {
