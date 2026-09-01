@@ -50,6 +50,8 @@ export interface CliBinaryAcceptanceReport {
     claude_cross_session_hook_fail_closed: true;
     plugin_runtime_hook_exec_form: true;
     plugin_activity_unarmed_isolated: true;
+    /** #1025：未武装的会话连 runtime 都不该启动（不只是不写共享 presence）。 */
+    plugin_hook_unarmed_does_not_spawn: true;
     plugin_activity_failed_push_rearms: true;
     plugin_activity_busy_phase: true;
     plugin_activity_waiting_phase: true;
@@ -274,9 +276,16 @@ export function verifyCliBinary(
     }
 
     // Enabled Marketplace hooks are initialized in ordinary Claude sessions
-    // too. Prove that an unarmed session records only its private local
-    // snapshot and does not even create the optimistic REST-push marker that
-    // could overwrite a real listener's shared presence row.
+    // too. The guarantee has always been "an unarmed session must not touch a
+    // real listener's shared presence"; since #1025 it is strictly stronger:
+    // such a session does no work at all. The plugin wrapper returns before it
+    // ever execs the runtime, because loading the CLI costs ~130ms of CPU per
+    // event no matter what the event is, and an unarmed session cannot use
+    // AgentParty anyway (#1018 gates its tools).
+    //
+    // This probe runs against the real release binary through the real cached
+    // wrapper — the unit tests use a stub, so this is the only place the shipped
+    // artifact's per-event cost contract is actually enforced.
     const ordinarySessionId = "release-plugin-hook-ordinary";
     const ordinaryActivityFile = join(
       isolatedHome,
@@ -292,34 +301,71 @@ export function verifyCliBinary(
       AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: undefined,
       AP_ACTIVITY_FILE: undefined,
     };
+    // 覆盖每一类事件，而不是只挑 SessionStart：Stop 在 hooks.json 里映射到的是
+    // `hook stop-guard`（另一个子命令），只验一个事件证明不了整条早退。
+    for (const event of ["SessionStart", "PreToolUse", "Stop"] as const) {
+      const unarmed = runExpected(
+        runner,
+        pluginRuntime,
+        ordinaryHookEnv,
+        pluginHookArguments(requestedPluginRoot, event),
+        0,
+        [],
+        [],
+        JSON.stringify({
+          session_id: ordinarySessionId,
+          hook_event_name: event,
+          cwd: process.cwd(),
+          ...(event === "PreToolUse" ? { tool_name: "Bash" } : {}),
+          ...(event === "Stop" ? { stop_hook_active: false } : {}),
+        }),
+      );
+      // #602 铁律：hook 的 stdout 会被灌进模型上下文，必须逐字为空——
+      // "包含某些内容" 不够，任何多余输出都是违约。
+      if (unarmed.stdout !== "") {
+        throw new Error(`unarmed plugin ${event} hook wrote to stdout`);
+      }
+    }
+    // No local snapshot: nothing ran. (The previous contract accepted a private
+    // snapshot here; nothing ever read it except that same session's next hook,
+    // which now also does not run.)
+    if (existsSync(ordinaryActivityFile)) {
+      throw new Error("unarmed plugin lifecycle hook still wrote a local activity snapshot");
+    }
+    // The original guarantee, unchanged: never the shared-presence push marker.
+    if (existsSync(`${ordinaryActivityFile}.push.json`)) {
+      throw new Error("unarmed plugin lifecycle hook attempted to publish shared presence activity");
+    }
+    // And the armed session must still work — otherwise "does nothing" would be
+    // trivially satisfied by a hook that is simply broken.
+    const armedSessionId = "release-plugin-hook-armed";
+    const armedActivityFile = join(isolatedHome, "state", "activity", `${armedSessionId}.json`);
     runExpected(
       runner,
       pluginRuntime,
-      ordinaryHookEnv,
+      { ...ordinaryHookEnv, AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1" },
       pluginHookArguments(requestedPluginRoot, "SessionStart"),
       0,
       [],
       [],
       JSON.stringify({
-        session_id: ordinarySessionId,
+        session_id: armedSessionId,
         hook_event_name: "SessionStart",
         cwd: process.cwd(),
       }),
     );
-    let ordinaryActivity: unknown;
+    let armedActivity: unknown;
     try {
-      ordinaryActivity = JSON.parse(readFileSync(ordinaryActivityFile, "utf8")) as unknown;
+      armedActivity = JSON.parse(readFileSync(armedActivityFile, "utf8")) as unknown;
     } catch {
-      throw new Error("unarmed plugin lifecycle hook did not retain its local activity snapshot");
+      throw new Error("armed plugin lifecycle hook did not write its local activity snapshot");
     }
     if (
-      typeof ordinaryActivity !== "object" || ordinaryActivity === null ||
-      (ordinaryActivity as { phase?: unknown }).phase !== "starting"
+      typeof armedActivity !== "object" || armedActivity === null ||
+      (armedActivity as { phase?: unknown }).phase !== "starting" ||
+      typeof (armedActivity as { ts?: unknown }).ts !== "number"
     ) {
-      throw new Error("unarmed plugin lifecycle hook wrote the wrong local activity snapshot");
-    }
-    if (existsSync(`${ordinaryActivityFile}.push.json`)) {
-      throw new Error("unarmed plugin lifecycle hook attempted to publish shared presence activity");
+      throw new Error("armed plugin lifecycle hook wrote the wrong local activity snapshot");
     }
 
     // This is the exact exec-form composition Claude uses for plugin hooks:
@@ -531,6 +577,7 @@ export function verifyCliBinary(
         claude_cross_session_hook_fail_closed: true,
         plugin_runtime_hook_exec_form: true,
         plugin_activity_unarmed_isolated: true,
+        plugin_hook_unarmed_does_not_spawn: true,
         plugin_activity_failed_push_rearms: true,
         plugin_activity_busy_phase: true,
         plugin_activity_waiting_phase: true,
