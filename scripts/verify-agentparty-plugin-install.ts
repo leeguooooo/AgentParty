@@ -221,6 +221,10 @@ export function inspectAgentPartyPluginInstall(
       HOME: configDirectory,
       PATH: "/usr/bin:/bin",
       AGENTPARTY_RUNTIME_BIN: runtimeProbe,
+      // #1025 起，未被 AgentParty 启动器武装过的会话里 hook 会在 spawn 之前退出。
+      // 这里要验的是「缓存副本里的 launcher 能解析到配置的 party」，所以必须走到 exec，
+      // 带上 launcher 自己会设的 opt-in。
+      AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1",
     },
     encoding: "utf8",
     timeout: 5_000,

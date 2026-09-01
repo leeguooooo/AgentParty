@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -133,8 +133,10 @@ describe("AgentParty marketplace plugin", () => {
     writeFileSync(installed, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n");
     chmodSync(installed, 0o755);
     try {
+      // #1025 起 hook 在未接入的会话里会在 spawn 之前退出，所以这条「不靠 PATH 也能找到
+      // party」的用例带上 launcher 武装过的 opt-in，才真的会走到 exec。
       const result = spawnSync(runtimeLauncher, ["hook", "report"], {
-        env: { HOME: home, PATH: "/usr/bin:/bin" },
+        env: { HOME: home, PATH: "/usr/bin:/bin", AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1" },
         encoding: "utf8",
       });
       expect(result.status).toBe(0);
@@ -143,6 +145,92 @@ describe("AgentParty marketplace plugin", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  // #1025：插件一旦启用就被加载进**每一个** Claude 会话，于是每个生命周期事件都要启动一次
+  // 完整的 party——实测每次恒定 ~130ms CPU（与它接下来干什么无关，`party --version` 同样如此）。
+  // 而这些会话在 #1018 之后连 MCP 工具面都用不了。这里钉住：没被 AgentParty 启动器武装过的
+  // 会话，hook 必须在 spawn 之前就结束，且仍然遵守 #602 铁律（stdout 空、exit 0）。
+  describe("hook fast exit for sessions that never joined (#1025)", () => {
+    /** 一个会「留下痕迹」的假 party：被 exec 到就写文件，用来证明到底有没有 spawn。 */
+    function stubHome(): { home: string; marker: string } {
+      const home = mkdtempSync(join(tmpdir(), "agentparty-hook-fastexit-"));
+      const marker = join(home, "spawned.txt");
+      const installed = resolve(home, ".local/bin/party");
+      mkdirSync(resolve(home, ".local/bin"), { recursive: true });
+      writeFileSync(installed, `#!/bin/sh\nprintf '%s' spawned > ${marker}\nprintf '%s\\n' "$*"\n`);
+      chmodSync(installed, 0o755);
+      return { home, marker };
+    }
+
+    test("未接入的会话：不启动 party，stdout 为空，exit 0", () => {
+      const { home, marker } = stubHome();
+      try {
+        const result = spawnSync(runtimeLauncher, ["hook", "report"], {
+          env: { HOME: home, PATH: "/usr/bin:/bin" },
+          input: '{"hook_event_name":"PreToolUse","tool_name":"Bash"}',
+          encoding: "utf8",
+        });
+        expect(existsSync(marker)).toBe(false);   // 真正要证的：进程根本没起
+        expect(result.status).toBe(0);            // #602：永远 exit 0
+        expect(result.stdout).toBe("");           // #602：stdout 会进模型上下文，必须为空
+        expect(result.stderr).toBe("");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("launcher 武装过的会话（AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN=1）：照常启动", () => {
+      const { home, marker } = stubHome();
+      try {
+        const result = spawnSync(runtimeLauncher, ["hook", "report"], {
+          env: { HOME: home, PATH: "/usr/bin:/bin", AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1" },
+          encoding: "utf8",
+        });
+        expect(existsSync(marker)).toBe(true);
+        expect(result.stdout).toBe("hook report\n");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("serve 托管 lane（AP_ACTIVITY_FILE）：照常启动", () => {
+      const { home, marker } = stubHome();
+      try {
+        spawnSync(runtimeLauncher, ["hook", "report"], {
+          env: { HOME: home, PATH: "/usr/bin:/bin", AP_ACTIVITY_FILE: join(home, "activity.json") },
+          encoding: "utf8",
+        });
+        expect(existsSync(marker)).toBe(true);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("opt-in 只认 \"1\"，且早退只作用于 hook——别的子命令一律照常", () => {
+      for (const env of [{ AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "0" }, { AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "" }]) {
+        const { home, marker } = stubHome();
+        try {
+          spawnSync(runtimeLauncher, ["hook", "report"], {
+            env: { HOME: home, PATH: "/usr/bin:/bin", ...env },
+            encoding: "utf8",
+          });
+          expect(existsSync(marker)).toBe(false);
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
+      }
+      // mcp / claude-channel 这些常驻入口不受影响：它们本来就只在被显式启动时才跑。
+      for (const argv of [["mcp"], ["claude-channel", "--require-launch-opt-in"], ["--version"]]) {
+        const { home, marker } = stubHome();
+        try {
+          spawnSync(runtimeLauncher, argv, { env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8" });
+          expect(existsSync(marker)).toBe(true);
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
+      }
+    });
   });
 
   test("fails explicitly instead of downloading when a configured runtime is missing", () => {

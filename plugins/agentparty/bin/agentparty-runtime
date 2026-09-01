@@ -6,6 +6,30 @@ fail() {
   exit 127
 }
 
+# #1025：没接入 AgentParty 的会话必须完全无感。
+#
+# 插件一旦启用就会被加载进**每一个** Claude 会话，于是每个 PreToolUse/PostToolUse/Stop…
+# 都要启动一次完整的 party。实测（macOS，Apple Silicon）：那个二进制每次启动恒定烧掉
+# ~130ms CPU，与它接下来干什么无关——`party --version` 同样是 130ms。原因不是二进制有
+# 68MB（同样 63MB 的最小 `bun --compile` 产物 20ms 就起来了），而是打进单文件产物的
+# ~5MB JS 每次启动都要被处理一遍：实测 4MB「从不导入、从不执行」的代码就值 280ms。
+# 多会话并发时这些短进程互相抢 CPU、触发 page-in，墙钟被放大到秒级（#602 的预算是 50ms）。
+#
+# 而这些会话在 #1018 之后连 MCP 工具面都用不了——被挡在功能之外，却照样付全额代价。
+# 所以在 spawn 之前就退出：只有 AgentParty 启动器亲手武装过的会话（party claude /
+# party bridge claude 设 AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN=1），或 serve 托管 lane
+# （AP_ACTIVITY_FILE 有值），才真的有一个在听的 listener 需要上报活动。
+#
+# 铁律照旧（#602）：stdout 永远为空、永远 exit 0——hook 的 stdout 会被灌进模型上下文，
+# 非零退出会阻断模型的工具调用。这条早退路径只用 sh 内建命令，不碰磁盘、不启动任何进程。
+case "${1:-}" in
+  hook)
+    if [ "${AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN:-}" != "1" ] && [ -z "${AP_ACTIVITY_FILE:-}" ]; then
+      exit 0
+    fi
+    ;;
+esac
+
 if [ -n "${AGENTPARTY_RUNTIME_BIN:-}" ]; then
   case "$AGENTPARTY_RUNTIME_BIN" in
     /*) : ;;
