@@ -173,6 +173,8 @@ export interface ClaudeLaunchDependencies {
   preflight(channel: string | undefined): Promise<ClaudeLaunchPreflight>;
   /** #1029：AGENTPARTY_TOKEN 有值时先重绑身份；缺省走 `party init`。 */
   rebindToken?(channel: string | undefined): Promise<number>;
+  /** #1031：重绑前用来判「凭据能不能发往这个地址」的 server；缺省读本地 config。 */
+  configServer?(): string | null;
   /** #1013：把本机插件对齐到 `cliVersion`（默认 syncClaudePluginToCli）；测试注入。 */
   syncPlugin?: (cliVersion: string) => ClaudePluginSyncResult;
   launch(args: string[], env: NodeJS.ProcessEnv): ClaudeLaunchResult;
@@ -309,7 +311,37 @@ function runShowDefaultArgs(env: NodeJS.ProcessEnv, home: string): number {
  */
 async function defaultRebindToken(channel: string | undefined): Promise<number> {
   const init = await import("./init");
-  return init.run(channel === undefined ? [] : ["--channel", channel]);
+  // `--harness claude` 必须显式给：init 缺省从进程祖先链探 harness，而 `party claude` 是人
+  // 在终端里敲的、祖先里没有 claude，探出来会是 other —— 于是 @mention 唤醒绑错 harness
+  // （CodeRabbit on #1031）。这里我们**明确知道**下一步要起的就是 claude。
+  return init.run(rebindInitArgs(channel));
+}
+
+/**
+ * 重绑时交给 `party init` 的参数。抽成纯函数是为了能被直接钉住——注入 `rebindToken` 的用例
+ * 会绕过默认实现，`--harness claude` 漏了也发现不了（做变异自检时实测：改掉它，测试全绿）。
+ */
+export function rebindInitArgs(channel: string | undefined): string[] {
+  return ["--harness", "claude", ...(channel === undefined ? [] : ["--channel", channel])];
+}
+
+/** 当前 config 指向的 server；读不到就返回 null（交给 init 自己报错）。 */
+function defaultConfigServer(): string | null {
+  return readConfig()?.server ?? null;
+}
+
+/**
+ * 凭据只发给 https，loopback 上的 http 例外。与 #1015 的兄弟身份探活同一条判据。
+ */
+export function safeTokenTarget(server: string): boolean {
+  try {
+    const url = new URL(server);
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" &&
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1");
+  } catch {
+    return false;
+  }
 }
 
 export async function run(
@@ -382,12 +414,24 @@ export async function run(
   // token 只走环境变量、绝不进 argv：`ps -axww` 同机任何用户可见，shell history 也留底（#111）。
   const envToken = env.AGENTPARTY_TOKEN;
   if (envToken !== undefined && envToken !== "") {
+    // 明文 http 一律不发凭据（loopback 例外，本地起 worker 调试的常规姿势）。判据与 #1015
+    // 的兄弟身份探活同一条：token 一旦上路就收不回来。
+    const target = (deps.configServer ?? defaultConfigServer)();
+    if (target !== null && !safeTokenTarget(target)) {
+      console.error(`拒绝把 AGENTPARTY_TOKEN 发往明文地址：${target}（只允许 https，或 loopback 上的 http）`);
+      return 1;
+    }
     const rebind = deps.rebindToken ?? defaultRebindToken;
     const code = await rebind(channel);
     if (code !== 0) {
       console.error("AGENTPARTY_TOKEN 重绑失败；单独跑一次看详情：party init --channel <channel>");
       return code;
     }
+    // 重绑成功后 token 已经写进 config，环境里这一份就该消失：后面还要 spawn
+    // `claude plugin list/update`（插件自愈）与 claude 本身，它们全都继承 process.env
+    // ——凭据没有理由流进任何一个（CodeRabbit on #1031）。
+    delete process.env.AGENTPARTY_TOKEN;
+    if (deps.env !== undefined) delete (deps.env as Record<string, string | undefined>).AGENTPARTY_TOKEN;
     console.log(`已用 AGENTPARTY_TOKEN 重绑${channel === undefined ? "" : ` #${channel}`}的身份，继续启动……`);
   }
   let readiness: ClaudeLaunchPreflight;

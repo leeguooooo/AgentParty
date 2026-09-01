@@ -495,13 +495,17 @@ export function AgentJoin({
   const presence = presenceProp ?? polled.presence;
   // #1028：打开引导时若 presence 还没有这一行，基线是空的。把第一次看到的读数收作基线——
   // 那条可能是三天前的旧行，只当起点，不算「刚刚重新接上」。
+  //
+  // 判据读的是 `session.baseline`（见下面的 checkin useMemo），不是 baselineRef——所以这里
+  // **必须写回 session**，只更新 ref 的话这个修复在真实弹窗里完全不生效（CodeRabbit on #1031）。
+  // ref 同步更新，供「继续接入」回到引导时复用同一基线。
   useEffect(() => {
-    const name = phase.kind === "stepper" ? phase.session.name : null;
-    if (name === null) return;
-    const current = baselineRef.current.get(name);
-    if (current === undefined) return;
-    const adopted = adoptBaselineSeen(current, presence, name);
-    if (adopted !== null) baselineRef.current.set(name, adopted);
+    if (phase.kind !== "stepper") return;
+    const session = phase.session;
+    const adopted = adoptBaselineSeen(session.baseline, presence, session.name);
+    if (adopted === null) return;
+    baselineRef.current.set(session.name, adopted);
+    setPhase({ kind: "stepper", session: { ...session, baseline: adopted } });
   }, [phase, presence]);
   const messages = messagesProp ?? polled.messages;
 

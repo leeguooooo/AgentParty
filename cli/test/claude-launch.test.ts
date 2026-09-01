@@ -11,6 +11,8 @@ import {
   claudeChannelLaunchNotices,
   claudeChannelLoadArgs,
   claudeLaunchPlan,
+  rebindInitArgs,
+  safeTokenTarget,
   run,
   type ClaudeLaunchDependencies,
 } from "../src/commands/claude-launch";
@@ -315,4 +317,70 @@ describe("AGENTPARTY_TOKEN 重绑后再启动（#1029）", () => {
     expect(launch.env.AGENTPARTY_TOKEN).toBeUndefined();
     expect(JSON.stringify(launch.env)).not.toContain("ap_secret");
   });
+});
+
+// CodeRabbit on #1031：三条都成立——凭据可能被发往明文地址、可能顺着 env 流进 claude 子进程、
+// 以及 harness 绑定会被探成 other。
+describe("AGENTPARTY_TOKEN 重绑的安全边界（#1031 review）", () => {
+  function deps(server: string | null, calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }>, rebinds: string[]) {
+    return {
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch(args: string[], childEnv: NodeJS.ProcessEnv) {
+        calls.push({ args, env: childEnv });
+        return { status: 0 };
+      },
+      home: mkdtempSync(join(tmpdir(), "agentparty-claude-token-safety-")),
+      env: { AGENTPARTY_TOKEN: "ap_secret" } as NodeJS.ProcessEnv,
+      configServer: () => server,
+      rebindToken: async () => {
+        rebinds.push("rebound");
+        return 0;
+      },
+    } as unknown as ClaudeLaunchDependencies;
+  }
+
+  test("明文 http 远端 ⇒ 拒发凭据，不重绑也不启动", async () => {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const rebinds: string[] = [];
+    expect(await run(["dev"], deps("http://agentparty.example.com", calls, rebinds))).toBe(1);
+    expect(rebinds).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("https 与 loopback http ⇒ 放行", async () => {
+    for (const server of ["https://agentparty.example.com", "http://localhost:8787", "http://127.0.0.1:8787"]) {
+      const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+      const rebinds: string[] = [];
+      expect(await run(["dev"], deps(server, calls, rebinds))).toBe(0);
+      expect(rebinds).toEqual(["rebound"]);
+    }
+  });
+
+  test("safeTokenTarget 的判据本身", () => {
+    expect(safeTokenTarget("https://x.example.com")).toBe(true);
+    expect(safeTokenTarget("http://localhost:1")).toBe(true);
+    expect(safeTokenTarget("http://x.example.com")).toBe(false);
+    expect(safeTokenTarget("not a url")).toBe(false);
+  });
+
+  test("重绑成功后 token 从进程环境里消失（后续 spawn 的 claude / plugin 子进程都不该继承）", async () => {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const rebinds: string[] = [];
+    const d = deps("https://agentparty.example.com", calls, rebinds);
+    process.env.AGENTPARTY_TOKEN = "ap_secret";
+    try {
+      await run(["dev"], d);
+      expect(process.env.AGENTPARTY_TOKEN).toBeUndefined();
+      expect((d as { env?: NodeJS.ProcessEnv }).env?.AGENTPARTY_TOKEN).toBeUndefined();
+    } finally {
+      delete process.env.AGENTPARTY_TOKEN;
+    }
+  });
+});
+
+test("重绑交给 init 的参数必须显式带 --harness claude（#1031 review）", () => {
+  // init 缺省从进程祖先链探 harness，而 `party claude` 是人在终端敲的、祖先里没有 claude，
+  // 探出来会是 other —— @mention 唤醒就会绑错 harness。这里我们明确知道下一步起的是 claude。
+  expect(rebindInitArgs("ludo")).toEqual(["--harness", "claude", "--channel", "ludo"]);
+  expect(rebindInitArgs(undefined)).toEqual(["--harness", "claude"]);
 });
