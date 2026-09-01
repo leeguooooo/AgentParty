@@ -313,6 +313,43 @@ describe("AgentParty marketplace plugin", () => {
       }
     });
 
+    test("payload 结尾的换行原样保留（`$(cat)` 会吃掉它）", () => {
+      const home = mkdtempSync(join(tmpdir(), "agentparty-coalesce-nl-"));
+      const installed = resolve(home, ".local/bin/party");
+      mkdirSync(resolve(home, ".local/bin"), { recursive: true });
+      writeFileSync(installed, "#!/bin/sh\ncat\n");
+      chmodSync(installed, 0o755);
+      try {
+        const payload = `${JSON.stringify({ hook_event_name: "PreToolUse", session_id: "sess-nl" })}\n`;
+        const result = spawnSync(runtimeLauncher, ["hook", "report"], {
+          env: { HOME: home, AGENTPARTY_HOME: join(home, ".agentparty"), PATH: "/usr/bin:/bin", AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1" },
+          input: payload,
+          encoding: "utf8",
+        });
+        expect(result.stdout).toBe(payload);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("party 的退出码要带出来，别吞成 0", () => {
+      const home = mkdtempSync(join(tmpdir(), "agentparty-coalesce-exit-"));
+      const installed = resolve(home, ".local/bin/party");
+      mkdirSync(resolve(home, ".local/bin"), { recursive: true });
+      writeFileSync(installed, "#!/bin/sh\ncat > /dev/null\nexit 3\n");
+      chmodSync(installed, 0o755);
+      try {
+        const result = spawnSync(runtimeLauncher, ["hook", "report"], {
+          env: { HOME: home, AGENTPARTY_HOME: join(home, ".agentparty"), PATH: "/usr/bin:/bin", AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1" },
+          input: JSON.stringify({ hook_event_name: "PreToolUse", session_id: "sess-exit" }),
+          encoding: "utf8",
+        });
+        expect(result.status).toBe(3);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
     test("恶意 session_id 既不参与合并、也绝不拼进路径", () => {
       const { home, marker, env } = stubHome();
       try {

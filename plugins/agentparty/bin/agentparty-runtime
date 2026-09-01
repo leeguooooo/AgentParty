@@ -120,12 +120,16 @@ maybe_coalesce_report() {
 party_bin="$(resolve_party)"
 
 if [ "${1:-}" = "hook" ] && [ "${2:-}" = "report" ]; then
-  payload="$(cat)"
+  # `$(cat)` 会吃掉结尾的换行——补一个哨兵再摘掉，原样保留字节（CodeRabbit on #1034）。
+  payload="$(cat; printf x)"
+  payload="${payload%x}"
   if maybe_coalesce_report "$payload"; then
     exit 0
   fi
+  # 显式透传 party 的退出码。注：脚本开头的 `set -e` 本来就会在管道失败时以该状态退出——
+  # 变异自检实测（把这行改成 `exit 0`，行为不变）证明了这一点。写出来只为让意图不依赖 set -e。
   printf '%s' "$payload" | "$party_bin" "$@"
-  exit 0
+  exit $?
 fi
 
 exec "$party_bin" "$@"
