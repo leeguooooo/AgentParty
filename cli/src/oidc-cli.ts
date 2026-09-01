@@ -418,7 +418,10 @@ export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
   // 治不了就明确报出来，别让它流进 fetch 变成不可诊断的 "fetch() URL is invalid"
   const server = rawServer ? healServerUrl(rawServer) : undefined;
   if (rawServer && !server) {
-    console.error(`config server url invalid: "${rawServer}" — expected like https://agentparty.example.com`);
+    // server 来自 config **文件**，不是我们写的常量：ANSI / 控制字符能伪造终端输出（#1036 review）。
+    console.error(
+      `config server url invalid: "${stripTerminalControls(String(rawServer))}" — expected like https://agentparty.example.com`,
+    );
   }
   if (!server) {
     return { server: null, token: null, auth_source: "none", config: source, account: accountInfo(sess) };

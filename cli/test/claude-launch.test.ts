@@ -447,3 +447,53 @@ test("明文地址报错时清洗 server 字符串（它来自 config 文件，�
   expect(joined).toContain("拒绝把 AGENTPARTY_TOKEN 发往明文地址");
   expect(joined).not.toContain(String.fromCharCode(27));
 });
+
+// #1030 接线：party claude 必须真的调用自动升级，而且 --no-auto-upgrade 能一路传到它。
+describe("party claude 接上自动升级（#1030）", () => {
+  function harness(over: Record<string, unknown> = {}) {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const seen: Array<{ flagDisabled: boolean; argv: readonly string[] }> = [];
+    return {
+      calls,
+      seen,
+      deps: {
+        preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+        launch(args: string[], env: NodeJS.ProcessEnv) {
+          calls.push({ args, env });
+          return { status: 0 };
+        },
+        home: mkdtempSync(join(tmpdir(), "agentparty-autoupgrade-")),
+        env: {} as NodeJS.ProcessEnv,
+        autoUpgrade: async (_env: NodeJS.ProcessEnv, flagDisabled: boolean, argv: readonly string[]) => {
+          seen.push({ flagDisabled, argv });
+          return { kind: "current" } as const;
+        },
+        ...over,
+      } as unknown as ClaudeLaunchDependencies,
+    };
+  }
+
+  test("启动前先问一次自动升级", async () => {
+    const h = harness();
+    expect(await run(["dev"], h.deps)).toBe(0);
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.flagDisabled).toBe(false);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  test("--no-auto-upgrade 传下去，且不流进 claude 的参数", async () => {
+    const h = harness();
+    expect(await run(["dev", "--no-auto-upgrade"], h.deps)).toBe(0);
+    expect(h.seen[0]!.flagDisabled).toBe(true);
+    expect(h.seen[0]!.argv).toEqual(["dev"]);
+    expect(h.calls[0]!.args.join(" ")).not.toContain("--no-auto-upgrade");
+  });
+
+  test("真升级并重跑了 ⇒ 本进程不再启动 claude，直接带出重跑的退出码", async () => {
+    const h = harness({
+      autoUpgrade: async () => ({ kind: "upgraded", from: "0.1.0", to: "9.9.9", reexecCode: 5 }),
+    });
+    expect(await run(["dev"], h.deps)).toBe(5);
+    expect(h.calls).toHaveLength(0);
+  });
+});
