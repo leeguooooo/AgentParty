@@ -365,6 +365,7 @@ async function defaultAutoUpgrade(
   env: NodeJS.ProcessEnv,
   flagDisabled: boolean,
   argv: readonly string[],
+  envToken?: string,
 ): Promise<AutoUpgradeOutcome> {
   return maybeAutoUpgrade(
     {
@@ -382,7 +383,12 @@ async function defaultAutoUpgrade(
       upgrade: async () => (await import("./upgrade")).run([]),
       reexec: () => {
         // 升级已经把新二进制原子替换到同一路径，用它重跑同一条命令。
-        const result = spawnSync(process.execPath, ["claude", ...argv], { stdio: "inherit" });
+        // 重跑的新进程自己还要用这个 token 去重绑，所以**只**在这一个子进程里交回去
+        // ——升级过程中那些 `claude plugin ...` 子进程一个都拿不到。
+        const result = spawnSync(process.execPath, ["claude", ...argv], {
+          stdio: "inherit",
+          env: envToken === undefined ? process.env : { ...process.env, AGENTPARTY_TOKEN: envToken },
+        });
         return result.error === undefined ? (result.status ?? 0) : null;
       },
       now: () => Date.now(),
@@ -404,12 +410,27 @@ export async function run(
   }
   const env = deps.env ?? process.env;
   const home = deps.home ?? agentpartyHome(env);
+  // 凭据在**任何 spawn 之前**就离开环境（codex stop-time review on #1036）。
+  //
+  // 自动升级排在重绑之前，而 `party upgrade` 会 spawn `claude plugin update` —— 那一刻
+  // AGENTPARTY_TOKEN 还在 process.env 里，直接被 Claude 插件子进程继承。同一条路径上
+  // 还有 join / doctor / mcp-prune 好几处 spawn("claude")，逐个去补一定会漏下一个。
+  // 所以在这里一次性摘走：token 只活在这个函数的局部变量里，需要谁再精确交给谁。
+  const envToken = env.AGENTPARTY_TOKEN;
+  if (envToken !== undefined && envToken !== "") {
+    delete process.env.AGENTPARTY_TOKEN;
+    delete (env as Record<string, string | undefined>).AGENTPARTY_TOKEN;
+  }
   // #1030：有新版就先把自己升上去，再跑本次命令。只在这类交互式入口做——
   // hook / mcp / claude-channel 的入口里没有这次调用，它们一次网络都不打（#602 / #1025）。
   {
     const stripped = stripNoAutoUpgradeFlag(argv);
     if (stripped.argv.length !== argv.length) argv = stripped.argv;
-    const outcome = await (deps.autoUpgrade ?? defaultAutoUpgrade)(env, stripped.disabled, argv);
+    const outcome = await (deps.autoUpgrade ?? ((e, d, a) => defaultAutoUpgrade(e, d, a, envToken)))(
+      env,
+      stripped.disabled,
+      argv,
+    );
     if (outcome.kind === "upgraded" && outcome.reexecCode !== null) return outcome.reexecCode;
   }
   const separator = argv.indexOf("--");
@@ -470,7 +491,6 @@ export async function run(
   // （owner 实测：照着引导跑，撞的正是 identity_unavailable / invalid or revoked token）。
   //
   // token 只走环境变量、绝不进 argv：`ps -axww` 同机任何用户可见，shell history 也留底（#111）。
-  const envToken = env.AGENTPARTY_TOKEN;
   if (envToken !== undefined && envToken !== "") {
     // 明文 http 一律不发凭据（loopback 例外，本地起 worker 调试的常规姿势）。判据与 #1015
     // 的兄弟身份探活同一条：token 一旦上路就收不回来。
@@ -499,7 +519,15 @@ export async function run(
       }
     }
     const rebind = deps.rebindToken ?? defaultRebindToken;
-    const code = await rebind(channel);
+    // `party init` 从 process.env 读 token。只在这一次调用期间放回去，finally 立刻摘走——
+    // 窗口越窄，能顺着环境跑掉的子进程越少。
+    process.env.AGENTPARTY_TOKEN = envToken;
+    let code: number;
+    try {
+      code = await rebind(channel);
+    } finally {
+      delete process.env.AGENTPARTY_TOKEN;
+    }
     if (code !== 0) {
       console.error("AGENTPARTY_TOKEN 重绑失败；单独跑一次看详情：party init --channel <channel>");
       return code;
