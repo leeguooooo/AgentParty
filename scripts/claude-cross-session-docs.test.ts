@@ -63,7 +63,11 @@ describe("Claude Cross-session discovery docs", () => {
       // README 涨到 626 行的那条压力。
       const internals = read(zh ? "docs/cross-session-internals.zh.md" : "docs/cross-session-internals.md");
       const documented = `${source}\n${plugin}\n${release}\n${internals}`;
-      expect(source).toContain(path === "README.md" ? "docs/claude-plugin.md" : "docs/claude-plugin.zh.md");
+      // README 必须链到它们每一份：入口一旦消失，细节就成了没人找得到的孤儿文档
+      // （CodeRabbit 在 #1024 上指出的正是这个缺口）。
+      for (const page of ["claude-plugin", "release-pipeline", "cross-session-internals"]) {
+        expect(source).toContain(zh ? `docs/${page}.zh.md` : `docs/${page}.md`);
+      }
       expect(source).toContain("claude plugin marketplace add leeguooooo/AgentParty");
       expect(source).toContain("claude plugin install agentparty@agentparty");
       expect(source).toContain("claude plugin enable agentparty@agentparty");
@@ -187,9 +191,9 @@ describe("Claude Cross-session discovery docs", () => {
           : "docs/cross-session-internals.zh.md",
       );
       // README 必须能把人带到内部文档
-      expect(source).toContain(
-        path === "README.md" ? "docs/cross-session-internals.md" : "docs/cross-session-internals.zh.md",
-      );
+      for (const page of ["claude-plugin", "release-pipeline", "cross-session-internals"]) {
+        expect(source).toContain(path === "README.md" ? `docs/${page}.md` : `docs/${page}.zh.md`);
+      }
       expect(source).toContain("party bridge claude design-review");
       expect(source).toContain("--cross-session required");
       expect(source).toContain("--cross-session-inbound accept");
