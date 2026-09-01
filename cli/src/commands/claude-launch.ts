@@ -10,6 +10,8 @@ import {
   writeClaudeDefaultArgs,
 } from "../claude-default-args";
 import { agentpartyHome, readConfig, refreshConfigInPlace } from "../config";
+import { stripTerminalControls } from "../format";
+import { fetchMe } from "../rest";
 import { normalizeWakeLang } from "../wake-note-i18n";
 import { MCP_OPT_IN_ENV } from "../mcp-session-binding";
 import {
@@ -171,6 +173,12 @@ export interface ClaudeLaunchResult {
 
 export interface ClaudeLaunchDependencies {
   preflight(channel: string | undefined): Promise<ClaudeLaunchPreflight>;
+  /** #1029：AGENTPARTY_TOKEN 有值时先重绑身份；缺省走 `party init`。 */
+  rebindToken?(channel: string | undefined): Promise<number>;
+  /** #1031：重绑前用来判「凭据能不能发往这个地址」的 server；缺省读本地 config。 */
+  configServer?(): string | null;
+  /** #1031：先验后写——用这个 token 问一次 /api/me；缺省真打网络。 */
+  verifyToken?(server: string, token: string): Promise<{ kind: string } | null>;
   /** #1013：把本机插件对齐到 `cliVersion`（默认 syncClaudePluginToCli）；测试注入。 */
   syncPlugin?: (cliVersion: string) => ClaudePluginSyncResult;
   launch(args: string[], env: NodeJS.ProcessEnv): ClaudeLaunchResult;
@@ -222,6 +230,10 @@ export function claudeLaunchPlan(
       // #1018：这是 owner 亲手起的会话，工具面照常放行（进程树内继承，别的会话拿不到）。
       [MCP_OPT_IN_ENV]: "1",
       [CLAUDE_LIFECYCLE_OPT_IN_ENV]: "1",
+      // #1029：重绑用的 token 到此为止，绝不传进模型会话。它已经写进 config 了，而环境变量
+      // 会被 Claude 的每一个 Bash 子进程继承——模型一句 `echo $AGENTPARTY_TOKEN` 就能读到、
+      // 也就可能被它写进消息或文件。凭据的暴露面到启动器为止。
+      AGENTPARTY_TOKEN: undefined,
       ...(channel === undefined ? {} : { AGENTPARTY_CHANNEL: channel }),
     },
   };
@@ -297,6 +309,54 @@ function runShowDefaultArgs(env: NodeJS.ProcessEnv, home: string): number {
   return 0;
 }
 
+/**
+ * 默认重绑实现：复用 `party init`——它本来就认 AGENTPARTY_TOKEN，server 沿用已有 config，
+ * 顺带把 harness 绑定与规则文件一并写好。绝不在这里自己拼一份平行的写 config 逻辑。
+ */
+async function defaultRebindToken(channel: string | undefined): Promise<number> {
+  const init = await import("./init");
+  // `--harness claude` 必须显式给：init 缺省从进程祖先链探 harness，而 `party claude` 是人
+  // 在终端里敲的、祖先里没有 claude，探出来会是 other —— 于是 @mention 唤醒绑错 harness
+  // （CodeRabbit on #1031）。这里我们**明确知道**下一步要起的就是 claude。
+  return init.run(rebindInitArgs(channel));
+}
+
+/**
+ * 重绑时交给 `party init` 的参数。抽成纯函数是为了能被直接钉住——注入 `rebindToken` 的用例
+ * 会绕过默认实现，`--harness claude` 漏了也发现不了（做变异自检时实测：改掉它，测试全绿）。
+ */
+export function rebindInitArgs(channel: string | undefined): string[] {
+  return ["--harness", "claude", ...(channel === undefined ? [] : ["--channel", channel])];
+}
+
+/** 先验后写用的探针：拿这个 token 问一次 /api/me，任何失败都返回 null。 */
+async function defaultVerifyToken(server: string, token: string): Promise<{ kind: string } | null> {
+  try {
+    return await fetchMe(server, token, AbortSignal.timeout(5_000));
+  } catch {
+    return null;
+  }
+}
+
+/** 当前 config 指向的 server；读不到就返回 null（交给 init 自己报错）。 */
+function defaultConfigServer(): string | null {
+  return readConfig()?.server ?? null;
+}
+
+/**
+ * 凭据只发给 https，loopback 上的 http 例外。与 #1015 的兄弟身份探活同一条判据。
+ */
+export function safeTokenTarget(server: string): boolean {
+  try {
+    const url = new URL(server);
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" &&
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1");
+  } catch {
+    return false;
+  }
+}
+
 export async function run(
   argv: string[],
   deps: ClaudeLaunchDependencies = defaultDependencies,
@@ -358,6 +418,53 @@ export async function run(
       return 1;
     }
     console.log(`唤醒文案语言已写入 config：lang=${lang}`);
+  }
+  // #1029：唤醒/重连命令要能带 token。web 的重连引导发的就是
+  //   AGENTPARTY_TOKEN='<T>' party claude <channel>
+  // 一条命令既换掉被撤销的 token 又起会话——否则引导给出的命令，在它要解决的那个故障下必然失败
+  // （owner 实测：照着引导跑，撞的正是 identity_unavailable / invalid or revoked token）。
+  //
+  // token 只走环境变量、绝不进 argv：`ps -axww` 同机任何用户可见，shell history 也留底（#111）。
+  const envToken = env.AGENTPARTY_TOKEN;
+  if (envToken !== undefined && envToken !== "") {
+    // 明文 http 一律不发凭据（loopback 例外，本地起 worker 调试的常规姿势）。判据与 #1015
+    // 的兄弟身份探活同一条：token 一旦上路就收不回来。
+    const target = (deps.configServer ?? defaultConfigServer)();
+    if (target !== null && !safeTokenTarget(target)) {
+      // server 来自本地 config，是文件内容不是我们写的常量：进终端前必须清洗
+      // （ANSI / 控制字符能伪造输出，CodeRabbit on #1031）。
+      console.error(
+        `拒绝把 AGENTPARTY_TOKEN 发往明文地址：${stripTerminalControls(target)}（只允许 https，或 loopback 上的 http）`,
+      );
+      return 1;
+    }
+    // 先验后写：`party init` 会**覆盖**已有 config，而这条命令是启动器——一个手滑设错的
+    // AGENTPARTY_TOKEN 不该把原本还能用的身份毁掉（CodeRabbit on #1031）。先拿它问一次
+    // /api/me，确认是个 agent 再落盘。
+    if (target !== null) {
+      const verify = deps.verifyToken ?? defaultVerifyToken;
+      const verified = await verify(target, envToken);
+      if (verified === null) {
+        console.error("AGENTPARTY_TOKEN 没能通过服务端校验，已保留原有身份不动；换一个有效 token 再试");
+        return 1;
+      }
+      if (verified.kind !== "agent") {
+        console.error(`AGENTPARTY_TOKEN 不是 agent 身份（kind=${stripTerminalControls(verified.kind)}），已保留原有身份不动`);
+        return 1;
+      }
+    }
+    const rebind = deps.rebindToken ?? defaultRebindToken;
+    const code = await rebind(channel);
+    if (code !== 0) {
+      console.error("AGENTPARTY_TOKEN 重绑失败；单独跑一次看详情：party init --channel <channel>");
+      return code;
+    }
+    // 重绑成功后 token 已经写进 config，环境里这一份就该消失：后面还要 spawn
+    // `claude plugin list/update`（插件自愈）与 claude 本身，它们全都继承 process.env
+    // ——凭据没有理由流进任何一个（CodeRabbit on #1031）。
+    delete process.env.AGENTPARTY_TOKEN;
+    if (deps.env !== undefined) delete (deps.env as Record<string, string | undefined>).AGENTPARTY_TOKEN;
+    console.log(`已用 AGENTPARTY_TOKEN 重绑${channel === undefined ? "" : ` #${channel}`}的身份，继续启动……`);
   }
   let readiness: ClaudeLaunchPreflight;
   try {

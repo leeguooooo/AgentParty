@@ -30,6 +30,7 @@ import {
   type JoinPackMode,
 } from "../lib/joinPack";
 import {
+  adoptBaselineSeen,
   checkinEvidence,
   joinBaseline,
   selfVerifiedEvidence,
@@ -157,11 +158,33 @@ type Phase =
 
 export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_SH_RAW_URL} | sh`;
 
-/** 第 ③ 步「起一个可唤醒的会话」的命令：与 CLI `party join` 第 3 步印的修法同一条（#979 / #989）。 */
-export function wakeableSessionCommand(slug: string, harness: JoinPackHarness): string {
-  if (harness === "claude") return `party claude ${slug}`;
+/**
+ * 第 ③ 步「起一个可唤醒的会话」的命令：与 CLI `party join` 第 3 步印的修法同一条（#979 / #989）。
+ *
+ * #1029：手上有明文 token 时给 claude 那条加 `AGENTPARTY_TOKEN=…` 前缀——重连引导要解决的
+ * 正是「本地那份 token 已被撤销」，不带凭据的 `party claude <chan>` 在这个场景下必然失败
+ * （owner 实测撞的就是 identity_unavailable）。`party claude` 见到它会先重绑再启动。
+ *
+ * 只给 claude 加：`party serve` 不认这个环境变量，给它加前缀等于给一条骗人的命令。
+ * token 走环境变量而非 flag——argv 会进 `ps` 与 shell history（#111）。
+ */
+export function wakeableSessionCommand(
+  slug: string,
+  harness: JoinPackHarness,
+  token?: string | null,
+): string {
+  if (harness === "claude") {
+    // 只接受安全字符集：真 token 是 [A-Za-z0-9_-]，含引号的东西一律不拼进 shell 命令。
+    const safe = typeof token === "string" && /^[A-Za-z0-9_-]+$/.test(token) ? token : null;
+    return safe === null ? `party claude ${slug}` : `AGENTPARTY_TOKEN='${safe}' party claude ${slug}`;
+  }
   if (harness === "codex") return `party serve ${slug} --runner codex`;
   return `party serve ${slug}`;
+}
+
+/** 第 ③ 步这条命令里是否带了明文 token（决定要不要挂安全警告）。 */
+export function wakeableCommandCarriesToken(harness: JoinPackHarness, token?: string | null): boolean {
+  return harness === "claude" && typeof token === "string" && /^[A-Za-z0-9_-]+$/.test(token);
 }
 
 function relativeAge(t: TFunc, ts: number, now: number): string {
@@ -337,6 +360,7 @@ export function AgentJoin({
     if (active === false && phase.kind !== "idle") reset();
   }, [active, phase.kind, reset]);
 
+
   const openStepper = useCallback(
     (session: StepperSession) => {
       startedAtRef.current.set(session.name, session.sinceTs);
@@ -469,6 +493,20 @@ export function AgentJoin({
   }, [needMessagesPoll, needPresencePoll, pollIntervalMs, slug, token]);
 
   const presence = presenceProp ?? polled.presence;
+  // #1028：打开引导时若 presence 还没有这一行，基线是空的。把第一次看到的读数收作基线——
+  // 那条可能是三天前的旧行，只当起点，不算「刚刚重新接上」。
+  //
+  // 判据读的是 `session.baseline`（见下面的 checkin useMemo），不是 baselineRef——所以这里
+  // **必须写回 session**，只更新 ref 的话这个修复在真实弹窗里完全不生效（CodeRabbit on #1031）。
+  // ref 同步更新，供「继续接入」回到引导时复用同一基线。
+  useEffect(() => {
+    if (phase.kind !== "stepper") return;
+    const session = phase.session;
+    const adopted = adoptBaselineSeen(session.baseline, presence, session.name);
+    if (adopted === null) return;
+    baselineRef.current.set(session.name, adopted);
+    setPhase({ kind: "stepper", session: { ...session, baseline: adopted } });
+  }, [phase, presence]);
   const messages = messagesProp ?? polled.messages;
 
   const mint = useCallback(async () => {
@@ -1057,11 +1095,19 @@ export function AgentJoin({
                             : "AgentJoin.step3.hintOther",
                       )}
                     </p>
+                    {/* #1029：这条命令现在可能带明文 token，安全警告必须与第 ② 步同形、
+                        且排在命令块**之前**（理由见第 ② 步那处注释）。 */}
+                    {wakeableCommandCarriesToken(session.harness, session.token) && (
+                      <div className="banner banner--yellow agent-join-tokenbanner">
+                        <p className="agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
+                        <p className="agent-join-warn">{t("AgentJoin.tokenWarn")}</p>
+                      </div>
+                    )}
                     <CommandBlock
                       id="session"
-                      command={wakeableSessionCommand(slug, session.harness)}
+                      command={wakeableSessionCommand(slug, session.harness, session.token)}
                       copied={copiedKey === "session"}
-                      onCopy={() => void copy("session", wakeableSessionCommand(slug, session.harness))}
+                      onCopy={() => void copy("session", wakeableSessionCommand(slug, session.harness, session.token))}
                       t={t}
                     />
                   </>

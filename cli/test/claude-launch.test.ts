@@ -11,6 +11,8 @@ import {
   claudeChannelLaunchNotices,
   claudeChannelLoadArgs,
   claudeLaunchPlan,
+  rebindInitArgs,
+  safeTokenTarget,
   run,
   type ClaudeLaunchDependencies,
 } from "../src/commands/claude-launch";
@@ -240,4 +242,208 @@ describe("party claude --lang（#1003）", () => {
     expect(await run(["dev", "--lang", "zh"], noConfig)).toBe(1);
     expect(noConfig.calls).toHaveLength(0);
   });
+});
+
+// #1029：owner「唤醒会话应该是带 token 的」。web 重连引导发的是
+// `AGENTPARTY_TOKEN='<T>' party claude <channel>`——一条命令既换掉被撤销的 token 又起会话。
+describe("AGENTPARTY_TOKEN 重绑后再启动（#1029）", () => {
+  function base(calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }>, env: Record<string, string | undefined>) {
+    // 隔离本机 `party claude --default-args` 偏好（#978）
+    const home = mkdtempSync(join(tmpdir(), "agentparty-claude-token-"));
+    return {
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch(args: string[], childEnv: NodeJS.ProcessEnv) {
+        calls.push({ args, env: childEnv });
+        return { status: 0 };
+      },
+      home,
+      env: { ...env } as NodeJS.ProcessEnv,
+      // 必须注入：不给的话默认实现会去读**本机真实 config**、并真打一次 /api/me。
+      configServer: () => "https://agentparty.example.com",
+      verifyToken: async () => ({ kind: "agent" }),
+    } as unknown as ClaudeLaunchDependencies;
+  }
+
+  function harness(env: Record<string, string | undefined>) {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const rebinds: (string | undefined)[] = [];
+    return {
+      calls,
+      rebinds,
+      deps: {
+        ...base(calls, env),
+        rebindToken: async (channel: string | undefined) => {
+          rebinds.push(channel);
+          return 0;
+        },
+      } as ClaudeLaunchDependencies,
+    };
+  }
+
+  test("有 AGENTPARTY_TOKEN ⇒ 先重绑该频道，再照常启动", async () => {
+    const h = harness({ AGENTPARTY_TOKEN: "ap_secret" });
+    expect(await run(["dev"], h.deps)).toBe(0);
+    expect(h.rebinds).toEqual(["dev"]);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  test("没有 AGENTPARTY_TOKEN ⇒ 一次重绑都不做（行为与今天一字不差）", async () => {
+    const h = harness({});
+    expect(await run(["dev"], h.deps)).toBe(0);
+    expect(h.rebinds).toEqual([]);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  test("空字符串不算「给了 token」", async () => {
+    const h = harness({ AGENTPARTY_TOKEN: "" });
+    expect(await run(["dev"], h.deps)).toBe(0);
+    expect(h.rebinds).toEqual([]);
+  });
+
+  test("重绑失败 ⇒ 不启动会话，把退出码原样带出", async () => {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const deps = {
+      ...base(calls, { AGENTPARTY_TOKEN: "ap_secret" }),
+      rebindToken: async () => 7,
+    } as ClaudeLaunchDependencies;
+    expect(await run(["dev"], deps)).toBe(7);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("token 绝不进 argv，也绝不传给子进程 Claude", async () => {
+    const h = harness({ AGENTPARTY_TOKEN: "ap_secret" });
+    await run(["dev"], h.deps);
+    const launch = h.calls[0]!;
+    // argv：ps -axww 同机任何用户都看得见
+    expect(launch.args.join(" ")).not.toContain("ap_secret");
+    // 子进程环境：Claude 的每个 Bash 调用都继承它，模型一句 echo 就能读到
+    expect(launch.env.AGENTPARTY_TOKEN).toBeUndefined();
+    expect(JSON.stringify(launch.env)).not.toContain("ap_secret");
+  });
+});
+
+// CodeRabbit on #1031：三条都成立——凭据可能被发往明文地址、可能顺着 env 流进 claude 子进程、
+// 以及 harness 绑定会被探成 other。
+describe("AGENTPARTY_TOKEN 重绑的安全边界（#1031 review）", () => {
+  function deps(server: string | null, calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }>, rebinds: string[]) {
+    return {
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch(args: string[], childEnv: NodeJS.ProcessEnv) {
+        calls.push({ args, env: childEnv });
+        return { status: 0 };
+      },
+      home: mkdtempSync(join(tmpdir(), "agentparty-claude-token-safety-")),
+      env: { AGENTPARTY_TOKEN: "ap_secret" } as NodeJS.ProcessEnv,
+      configServer: () => server,
+      verifyToken: async () => ({ kind: "agent" }),
+      rebindToken: async () => {
+        rebinds.push("rebound");
+        return 0;
+      },
+    } as unknown as ClaudeLaunchDependencies;
+  }
+
+  test("明文 http 远端 ⇒ 拒发凭据，不重绑也不启动", async () => {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const rebinds: string[] = [];
+    expect(await run(["dev"], deps("http://agentparty.example.com", calls, rebinds))).toBe(1);
+    expect(rebinds).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("https 与 loopback http ⇒ 放行", async () => {
+    for (const server of ["https://agentparty.example.com", "http://localhost:8787", "http://127.0.0.1:8787"]) {
+      const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+      const rebinds: string[] = [];
+      expect(await run(["dev"], deps(server, calls, rebinds))).toBe(0);
+      expect(rebinds).toEqual(["rebound"]);
+    }
+  });
+
+  test("safeTokenTarget 的判据本身", () => {
+    expect(safeTokenTarget("https://x.example.com")).toBe(true);
+    expect(safeTokenTarget("http://localhost:1")).toBe(true);
+    expect(safeTokenTarget("http://x.example.com")).toBe(false);
+    expect(safeTokenTarget("not a url")).toBe(false);
+  });
+
+  test("重绑成功后 token 从进程环境里消失（后续 spawn 的 claude / plugin 子进程都不该继承）", async () => {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const rebinds: string[] = [];
+    const d = deps("https://agentparty.example.com", calls, rebinds);
+    process.env.AGENTPARTY_TOKEN = "ap_secret";
+    try {
+      await run(["dev"], d);
+      expect(process.env.AGENTPARTY_TOKEN).toBeUndefined();
+      expect((d as { env?: NodeJS.ProcessEnv }).env?.AGENTPARTY_TOKEN).toBeUndefined();
+    } finally {
+      delete process.env.AGENTPARTY_TOKEN;
+    }
+  });
+});
+
+test("重绑交给 init 的参数必须显式带 --harness claude（#1031 review）", () => {
+  // init 缺省从进程祖先链探 harness，而 `party claude` 是人在终端敲的、祖先里没有 claude，
+  // 探出来会是 other —— @mention 唤醒就会绑错 harness。这里我们明确知道下一步起的是 claude。
+  expect(rebindInitArgs("ludo")).toEqual(["--harness", "claude", "--channel", "ludo"]);
+  expect(rebindInitArgs(undefined)).toEqual(["--harness", "claude"]);
+});
+
+// CodeRabbit on #1031（第二轮）：`party init` 会覆盖已有 config，而这条命令是启动器——
+// 一个手滑设错的 AGENTPARTY_TOKEN 不该把原本还能用的身份毁掉。
+describe("先验后写：坏 token 不许覆盖能用的身份（#1031 review 2）", () => {
+  function deps(verify: () => Promise<{ kind: string } | null>, rebinds: string[]) {
+    return {
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch: () => ({ status: 0 }),
+      home: mkdtempSync(join(tmpdir(), "agentparty-verify-first-")),
+      env: { AGENTPARTY_TOKEN: "ap_bad" } as NodeJS.ProcessEnv,
+      configServer: () => "https://agentparty.example.com",
+      verifyToken: verify,
+      rebindToken: async () => {
+        rebinds.push("rebound");
+        return 0;
+      },
+    } as unknown as ClaudeLaunchDependencies;
+  }
+
+  test("token 校验不通过 ⇒ 一次都不重绑（原有 config 原样保留）", async () => {
+    const rebinds: string[] = [];
+    expect(await run(["dev"], deps(async () => null, rebinds))).toBe(1);
+    expect(rebinds).toEqual([]);
+  });
+
+  test("token 有效但不是 agent ⇒ 同样不重绑", async () => {
+    const rebinds: string[] = [];
+    expect(await run(["dev"], deps(async () => ({ kind: "human" }), rebinds))).toBe(1);
+    expect(rebinds).toEqual([]);
+  });
+
+  test("校验通过 ⇒ 才重绑", async () => {
+    const rebinds: string[] = [];
+    expect(await run(["dev"], deps(async () => ({ kind: "agent" }), rebinds))).toBe(0);
+    expect(rebinds).toEqual(["rebound"]);
+  });
+});
+
+test("明文地址报错时清洗 server 字符串（它来自 config 文件，不是我们写的常量）", async () => {
+  const errs: string[] = [];
+  const original = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.map(String).join(" "));
+  try {
+    await run(["dev"], {
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch: () => ({ status: 0 }),
+      home: mkdtempSync(join(tmpdir(), "agentparty-sanitize-")),
+      env: { AGENTPARTY_TOKEN: "ap_x" } as NodeJS.ProcessEnv,
+      // server 来自 config 文件：里面可以有 ANSI，能伪造终端输出
+      configServer: () => `http://evil.example.com/${String.fromCharCode(27)}[31mFAKE`,
+      verifyToken: async () => ({ kind: "agent" }),
+    } as unknown as ClaudeLaunchDependencies);
+  } finally {
+    console.error = original;
+  }
+  const joined = errs.join("\n");
+  expect(joined).toContain("拒绝把 AGENTPARTY_TOKEN 发往明文地址");
+  expect(joined).not.toContain(String.fromCharCode(27));
 });

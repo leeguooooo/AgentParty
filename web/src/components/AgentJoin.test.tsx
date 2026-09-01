@@ -26,7 +26,7 @@ mock.module("../lib/api", () => ({
 // agentTokenVault 单测。#642 仍通过受控的 execCommand 返回值覆盖成功/失败。
 let copyResult = true;
 
-const { AgentJoin } = await import("./AgentJoin");
+const { AgentJoin, wakeableSessionCommand, wakeableCommandCarriesToken } = await import("./AgentJoin");
 
 class TestEventTarget {
   private listeners = new Map<string, Set<(event: unknown) => void>>();
@@ -935,3 +935,37 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"))).toHaveLength(0);
   });
 });
+
+// #1029：owner「唤醒会话应该是带 token 的」。重连引导要解决的正是「本地 token 被撤销」，
+// 不带凭据的 `party claude <chan>` 在这个场景下必然失败。
+describe("第③步的唤醒命令带 token（#1029）", () => {
+  test("有明文 token ⇒ claude 那条带 AGENTPARTY_TOKEN 前缀（走环境变量，不进 argv flag）", () => {
+    const cmd = wakeableSessionCommand("ludo", "claude", "ap_secret-123");
+    expect(cmd).toBe("AGENTPARTY_TOKEN='ap_secret-123' party claude ludo");
+    expect(cmd).not.toContain("--token");
+    expect(wakeableCommandCarriesToken("claude", "ap_secret-123")).toBe(true);
+  });
+
+  test("没有 token ⇒ 与今天一字不差", () => {
+    expect(wakeableSessionCommand("ludo", "claude")).toBe("party claude ludo");
+    expect(wakeableSessionCommand("ludo", "claude", null)).toBe("party claude ludo");
+    expect(wakeableCommandCarriesToken("claude", null)).toBe(false);
+  });
+
+  test("serve 不认这个环境变量 ⇒ 绝不给它加前缀（否则是一条骗人的命令）", () => {
+    expect(wakeableSessionCommand("ludo", "codex", "ap_secret")).toBe("party serve ludo --runner codex");
+    expect(wakeableSessionCommand("ludo", "other", "ap_secret")).toBe("party serve ludo");
+    expect(wakeableCommandCarriesToken("codex", "ap_secret")).toBe(false);
+  });
+
+  test("含 shell 元字符的 token 一律不拼进命令", () => {
+    for (const bad of ["a'b", "a b", "a;rm -rf /", "$(id)"]) {
+      expect(wakeableSessionCommand("ludo", "claude", bad)).toBe("party claude ludo");
+      expect(wakeableCommandCarriesToken("claude", bad)).toBe(false);
+    }
+  });
+});
+
+// #1028 端到端：owner 截图里第 ② 步打了 ✓，依据是「已报到（4637 分钟前）」。
+// 纯函数用例挡不住这个——判据读的是 session.baseline，只更新 baselineRef 的修复完全不生效
+// （CodeRabbit on #1031 指出、变异自检实测确认）。所以这条用例必须真渲染弹窗。
