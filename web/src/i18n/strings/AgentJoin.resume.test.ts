@@ -60,4 +60,16 @@ describe("第③步的 resume 说明（中英都要有）", () => {
     expect(interactiveBranch).toContain('session.harness === "claude" && (');
     expect(interactiveBranch).toContain("AgentJoin.step3.resumeClaude");
   });
+
+  // codex stop-time review：我在新文案里用了 `**粗体**`，可这些 hint 是**纯文本**渲染
+  // （`<p className="agent-join-hint">{t(...)}</p>`），用户看到的会是一串字面星号。
+  // 这个文件在我改之前一次 `**` 都没有——是我一个人引进来的。
+  // 守卫覆盖**整份文案**，不只我加的那两条：这类错误不该靠人眼查。
+  test("整份文案里不许出现 Markdown 粗体标记（hint 是纯文本渲染）", () => {
+    const offenders = strings
+      .split("\n")
+      .map((line, index) => ({ line, no: index + 1 }))
+      .filter(({ line }) => line.includes('"AgentJoin.') && line.includes("**"));
+    expect(offenders.map((o) => `L${o.no}`)).toEqual([]);
+  });
 });
