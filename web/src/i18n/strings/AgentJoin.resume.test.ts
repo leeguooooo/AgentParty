@@ -30,11 +30,21 @@ describe("第③步的 resume 说明（中英都要有）", () => {
     expect(en).toContain("fresh conversation");
   });
 
-  test("常驻档那句必须说明它自带 resume、上下文连续", () => {
-    const zh = strings.slice(strings.lastIndexOf('"AgentJoin.step3.resumeUnattended"'));
-    const en = strings.slice(strings.indexOf('"AgentJoin.step3.resumeUnattended"'));
-    expect(zh.slice(0, 300)).toContain("自带 resume");
-    expect(en.slice(0, 300)).toContain("resumes on its own");
+  // codex stop-time review：第一版写成「每次唤醒都对该 lane 的会话 resume」——把定向投递
+  // 那条抹掉了。实际是**两条线**（cli/src/commands/serve.ts 的 continuationScope）：
+  //   普通唤醒 → <workdir>/RUNNER_SESSION_FILE，一个工作目录一条会话；
+  //   带 work_id/continuation_ref 的定向投递 → continuationPath(workdir, ref)，每条 work 独立。
+  // 这条用例钉住「两条线都得说」，防止再退回那个笼统说法。
+  test("常驻档那句必须区分两条续会线：工作目录的会话 vs 每条 work 的独立续会", () => {
+    const zh = strings.slice(strings.lastIndexOf('"AgentJoin.step3.resumeUnattended"'), strings.length).slice(0, 400);
+    const en = strings.slice(strings.indexOf('"AgentJoin.step3.resumeUnattended"'), strings.length).slice(0, 400);
+    expect(zh).toContain("工作目录");
+    expect(zh).toContain("独立续会");
+    expect(en).toContain("working directory");
+    expect(en).toContain("its own separate session");
+    // 不许再说成「每次唤醒都续同一条」——那正是被 codex 指出的错
+    expect(zh).not.toContain("每次唤醒都对该 lane");
+    expect(en).not.toContain("every wake runs");
   });
 
   test("组件把两句挂在正确的分支上（交互档 claude / 常驻档），别挂反", () => {
