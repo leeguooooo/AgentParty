@@ -10,6 +10,7 @@ import {
   writeClaudeDefaultArgs,
 } from "../claude-default-args";
 import { agentpartyHome, readConfig, refreshConfigInPlace } from "../config";
+import { maybeAutoUpgrade, stripNoAutoUpgradeFlag, type AutoUpgradeOutcome } from "../auto-upgrade";
 import { stripTerminalControls } from "../format";
 import { fetchMe } from "../rest";
 import { normalizeWakeLang } from "../wake-note-i18n";
@@ -19,7 +20,7 @@ import {
   syncClaudePluginToCli,
   type ClaudePluginSyncResult,
 } from "../claude-plugin-sync";
-import { RUNNING_VERSION, compareVersions } from "../upgrade";
+import { RUNNING_VERSION, compareVersions, serverVersionUpgradeNotice } from "../upgrade";
 import { isSlug } from "../validation";
 import {
   claudePluginDoctorFixLines,
@@ -175,6 +176,8 @@ export interface ClaudeLaunchDependencies {
   preflight(channel: string | undefined): Promise<ClaudeLaunchPreflight>;
   /** #1029：AGENTPARTY_TOKEN 有值时先重绑身份；缺省走 `party init`。 */
   rebindToken?(channel: string | undefined): Promise<number>;
+  /** #1030：自动升级；缺省走真实探测+升级+re-exec。测试注入假的，绝不碰网络。 */
+  autoUpgrade?(env: NodeJS.ProcessEnv, flagDisabled: boolean, argv: readonly string[]): Promise<AutoUpgradeOutcome>;
   /** #1031：重绑前用来判「凭据能不能发往这个地址」的 server；缺省读本地 config。 */
   configServer?(): string | null;
   /** #1031：先验后写——用这个 token 问一次 /api/me；缺省真打网络。 */
@@ -357,6 +360,40 @@ export function safeTokenTarget(server: string): boolean {
   }
 }
 
+/** 默认自动升级：探服务端最新版 → `party upgrade` → 用新二进制重跑本次命令。 */
+async function defaultAutoUpgrade(
+  env: NodeJS.ProcessEnv,
+  flagDisabled: boolean,
+  argv: readonly string[],
+): Promise<AutoUpgradeOutcome> {
+  return maybeAutoUpgrade(
+    {
+      latestVersion: async () => {
+        // 判据复用既有的 serverVersionUpgradeNotice（它已经处理了 prerelease 不算已发布等边界），
+        // 不在这里再写一份版本比较。
+        const { resolveAuthDetailed } = await import("../oidc-cli");
+        const auth = await resolveAuthDetailed();
+        if (auth.server === null) return null;
+        const { fetchServerVersion } = await import("../rest");
+        const info = await fetchServerVersion(auth.server);
+        const notice = serverVersionUpgradeNotice(info.version);
+        return notice === null ? null : notice.available_version;
+      },
+      upgrade: async () => (await import("./upgrade")).run([]),
+      reexec: () => {
+        // 升级已经把新二进制原子替换到同一路径，用它重跑同一条命令。
+        const result = spawnSync(process.execPath, ["claude", ...argv], { stdio: "inherit" });
+        return result.error === undefined ? (result.status ?? 0) : null;
+      },
+      now: () => Date.now(),
+      cwd: () => process.cwd(),
+      log: (line) => console.log(line),
+    },
+    env,
+    flagDisabled,
+  );
+}
+
 export async function run(
   argv: string[],
   deps: ClaudeLaunchDependencies = defaultDependencies,
@@ -367,6 +404,14 @@ export async function run(
   }
   const env = deps.env ?? process.env;
   const home = deps.home ?? agentpartyHome(env);
+  // #1030：有新版就先把自己升上去，再跑本次命令。只在这类交互式入口做——
+  // hook / mcp / claude-channel 的入口里没有这次调用，它们一次网络都不打（#602 / #1025）。
+  {
+    const stripped = stripNoAutoUpgradeFlag(argv);
+    if (stripped.argv.length !== argv.length) argv = stripped.argv;
+    const outcome = await (deps.autoUpgrade ?? defaultAutoUpgrade)(env, stripped.disabled, argv);
+    if (outcome.kind === "upgraded" && outcome.reexecCode !== null) return outcome.reexecCode;
+  }
   const separator = argv.indexOf("--");
   const rawArgsBeforeSeparator = separator === -1 ? argv : argv.slice(0, separator);
   // #1013：`--no-auto-plugin-update` 先摘掉（它只关自愈，不进 claude 的参数、也不参与位置参数校验）。
