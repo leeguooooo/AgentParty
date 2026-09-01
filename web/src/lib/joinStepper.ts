@@ -49,6 +49,27 @@ function afterBaseline(seq: number, baseline: JoinBaseline): boolean {
   return baseline.seq !== null && seq > baseline.seq;
 }
 
+/**
+ * #1028：打开引导那一刻没拿到 presence 读数时，把**第一次**看到的读数收作基线。
+ *
+ * 单纯拒绝 `baseline.seen === null` 会带来新问题：确实没有旧行的身份后来真的重连了、
+ * 但没有 live=true（例如 serve 那条腿），引导会永远停在第 ② 步。收作基线两头都对：
+ * 那条三天前的旧行只当起点、不算证据；此后任何更新的读数才算重新接上。
+ *
+ * 返回 null 表示无需改动，调用方保留原基线。
+ */
+export function adoptBaselineSeen(
+  baseline: JoinBaseline,
+  presence: readonly PresenceEntry[],
+  name: string,
+): JoinBaseline | null {
+  if (!baseline.strict || baseline.seen !== null) return null;
+  const entry = presenceOf(presence, name);
+  if (entry === null) return null;
+  const seen = presenceLastSeen(entry);
+  return seen === null ? null : { ...baseline, seen };
+}
+
 export interface CheckinEvidence {
   /** 报到消息的 seq；只有 presence 证据、没看到消息时为 null。 */
   seq: number | null;
@@ -85,7 +106,14 @@ export function checkinEvidence(
   // 不受浏览器时钟影响；recover 下那条陈旧 away 行的 last_seen 不会变，所以不会冒充重连成功。
   if (seen === null) return null;
   if (!baseline.strict) return { seq: null, ts: seen };
-  return baseline.seen === null || seen > baseline.seen ? { seq: null, ts: seen } : null;
+  // #1028：`baseline.seen === null` 是「打开引导那一刻还没拿到读数」，不是「随便什么读数都算」。
+  // 原来把它当成后者，于是 presence 刷新后带回的一条**三天前**的离线行会被判成「刚刚重新接上」
+  // （owner 实测：第 ② 步 ✓ 依据是「已报到（4637 分钟前）」，随后第 ③ 步的命令根本跑不通）。
+  //
+  // 没有可比基线时只能等：要么等消息 seq（服务端单调量），要么等 live=true（服务端当场判活连接）。
+  // 刻意不拿浏览器时钟去和服务端 last_seen 比——那是 #1005 已经排除掉的做法。
+  if (baseline.seen === null) return null;
+  return seen > baseline.seen ? { seq: null, ts: seen } : null;
 }
 
 export interface WakeableEvidence {

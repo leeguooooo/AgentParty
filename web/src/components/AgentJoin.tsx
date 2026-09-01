@@ -30,6 +30,7 @@ import {
   type JoinPackMode,
 } from "../lib/joinPack";
 import {
+  adoptBaselineSeen,
   checkinEvidence,
   joinBaseline,
   selfVerifiedEvidence,
@@ -337,6 +338,7 @@ export function AgentJoin({
     if (active === false && phase.kind !== "idle") reset();
   }, [active, phase.kind, reset]);
 
+
   const openStepper = useCallback(
     (session: StepperSession) => {
       startedAtRef.current.set(session.name, session.sinceTs);
@@ -469,6 +471,16 @@ export function AgentJoin({
   }, [needMessagesPoll, needPresencePoll, pollIntervalMs, slug, token]);
 
   const presence = presenceProp ?? polled.presence;
+  // #1028：打开引导时若 presence 还没有这一行，基线是空的。把第一次看到的读数收作基线——
+  // 那条可能是三天前的旧行，只当起点，不算「刚刚重新接上」。
+  useEffect(() => {
+    const name = phase.kind === "stepper" ? phase.session.name : null;
+    if (name === null) return;
+    const current = baselineRef.current.get(name);
+    if (current === undefined) return;
+    const adopted = adoptBaselineSeen(current, presence, name);
+    if (adopted !== null) baselineRef.current.set(name, adopted);
+  }, [phase, presence]);
   const messages = messagesProp ?? polled.messages;
 
   const mint = useCallback(async () => {

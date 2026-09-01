@@ -3,6 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
 import {
+  adoptBaselineSeen,
   checkinEvidence,
   joinBaseline,
   selfVerifiedEvidence,
@@ -238,5 +239,42 @@ describe("四步展示状态（#1005）", () => {
   test("maxSeq 取历史里最大的 seq（探针基线）", () => {
     expect(maxSeq([msg({ seq: 3, ts: NOW }), msg({ seq: 91, ts: NOW }), msg({ seq: 12, ts: NOW })])).toBe(91);
     expect(maxSeq([])).toBe(0);
+  });
+});
+
+// #1028：owner 截图里第 ② 步打了 ✓，依据是「已报到（4637 分钟前）」——三天前的旧行。
+// 根因是把「打开时没拿到读数」当成了「随便什么读数都算」。
+describe("陈旧报到不算重新接上（#1028）", () => {
+  const name = "server";
+  const staleTs = 1_700_000_000_000;
+  const staleRow = [{ name, state: "offline", ts: staleTs, last_seen: staleTs }] as unknown as PresenceEntry[];
+
+  test("打开时没有 presence 行 ⇒ 之后那条三天前的旧行不算报到", () => {
+    const baseline = joinBaseline([], [], name, true);
+    expect(baseline.seen).toBeNull();
+    expect(checkinEvidence([], staleRow, name, baseline)).toBeNull();
+  });
+
+  test("第一次看到的读数被收作基线；只有更新的读数才算报到", () => {
+    const opened = joinBaseline([], [], name, true);
+    const adopted = adoptBaselineSeen(opened, staleRow, name);
+    expect(adopted?.seen).toBe(staleTs);
+    // 同一条旧行再来一次仍然不算
+    expect(checkinEvidence([], staleRow, name, adopted!)).toBeNull();
+    // 真的重连了（读数变新）才算
+    const fresh = [{ name, state: "online", ts: staleTs + 60_000, last_seen: staleTs + 60_000 }] as unknown as PresenceEntry[];
+    expect(checkinEvidence([], fresh, name, adopted!)?.ts).toBe(staleTs + 60_000);
+  });
+
+  test("已有基线时不被覆盖；非 strict（新铸身份）不受影响", () => {
+    const withBaseline = { strict: true, seq: null, seen: staleTs, verifiedAt: null };
+    expect(adoptBaselineSeen(withBaseline, staleRow, name)).toBeNull();
+    expect(adoptBaselineSeen(joinBaseline([], [], name, false), staleRow, name)).toBeNull();
+  });
+
+  test("live=true 仍然直接算数（服务端当场判定的活连接，不含时间比较）", () => {
+    const baseline = joinBaseline([], [], name, true);
+    const live = [{ name, state: "online", live: true, ts: staleTs, last_seen: staleTs }] as unknown as PresenceEntry[];
+    expect(checkinEvidence([], live, name, baseline)).not.toBeNull();
   });
 });
