@@ -29,6 +29,7 @@ function deps(over: Partial<AutoUpgradeDeps> = {}): AutoUpgradeDeps & { logs: st
       calls.push("upgrade");
       return 0;
     },
+    installedVersion: () => "9.9.9",
     reexec: () => {
       calls.push("reexec");
       return 0;
@@ -86,7 +87,7 @@ describe("交互式入口的自动升级（#1030）", () => {
   test("升级失败 ⇒ 说清楚并继续用当前版本跑，绝不挡住本次命令", async () => {
     for (const upgrade of [async () => 1, async () => { throw new Error("boom"); }]) {
       const d = deps({ upgrade: upgrade as AutoUpgradeDeps["upgrade"] });
-      expect(await maybeAutoUpgrade(d, {}, false)).toEqual({ kind: "failed" });
+      expect(await maybeAutoUpgrade(d, {}, false)).toEqual({ kind: "failed", installed: null });
       expect(d.calls).not.toContain("reexec");
       expect(d.logs.join("\n")).toContain("自动升级没成功");
     }
@@ -130,4 +131,31 @@ test("`--` 之后的同名参数原样保留，也不算开关", () => {
   });
   // 终止符本身必须保留：摘掉它会让后面的参数被当成我们的位置参数
   expect(stripNoAutoUpgradeFlag(["dev", "--"])).toEqual({ argv: ["dev", "--"], disabled: false });
+});
+
+// codex stop-time review：退出码 0 只说明「命令没报错」。发布窗口里 GitHub Release 的资产可能
+// 还没传完（isReleaseAssetPublishing 专为此存在），"latest" 中途也可能解析到别的版本。
+// 不把盘上的版本读回来就宣布成功，就是拿命令的成败冒充事实（#1011 在插件上的同一课）。
+describe("升没升上去只能由读回来的版本回答", () => {
+  test("命令 exit 0 但盘上版本没变 ⇒ 判失败，不重跑、也不谎报升级", async () => {
+    const d = deps({ installedVersion: () => "0.1.0" });
+    const out = await maybeAutoUpgrade(d, {}, false);
+    expect(out).toEqual({ kind: "failed", installed: "0.1.0" });
+    expect(d.calls).not.toContain("reexec");
+    expect(d.logs.join("\n")).toContain("没升上去");
+  });
+
+  test("读不出盘上版本 ⇒ 同样当失败（读不出不是成功）", async () => {
+    const d = deps({ installedVersion: () => null });
+    expect(await maybeAutoUpgrade(d, {}, false)).toEqual({ kind: "failed", installed: null });
+    expect(d.calls).not.toContain("reexec");
+  });
+
+  test("装上的版本与期望的 latest 不同 ⇒ 按读回来的报数，不复述期望值", async () => {
+    const d = deps({ latestVersion: async () => "9.9.9", installedVersion: () => "9.9.8" });
+    const out = await maybeAutoUpgrade(d, {}, false);
+    expect(out).toMatchObject({ kind: "upgraded", to: "9.9.8" });
+    expect(d.logs.join("\n")).toContain("9.9.8");
+    expect(d.logs.join("\n")).not.toContain("已升级到 9.9.9");
+  });
 });

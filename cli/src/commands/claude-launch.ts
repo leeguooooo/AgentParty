@@ -20,7 +20,7 @@ import {
   syncClaudePluginToCli,
   type ClaudePluginSyncResult,
 } from "../claude-plugin-sync";
-import { RUNNING_VERSION, compareVersions, serverVersionUpgradeNotice } from "../upgrade";
+import { RUNNING_VERSION, compareVersions, readInstalledPartyVersion, serverVersionUpgradeNotice } from "../upgrade";
 import { isSlug } from "../validation";
 import {
   claudePluginDoctorFixLines,
@@ -381,6 +381,8 @@ async function defaultAutoUpgrade(
         return notice === null ? null : notice.available_version;
       },
       upgrade: async () => (await import("./upgrade")).run([]),
+      // 读回盘上的版本：升没升上去只能由它回答，不能由退出码回答。
+      installedVersion: () => readInstalledPartyVersion(process.execPath),
       reexec: () => {
         // 升级已经把新二进制原子替换到同一路径，用它重跑同一条命令。
         // 重跑的新进程自己还要用这个 token 去重绑，所以**只**在这一个子进程里交回去

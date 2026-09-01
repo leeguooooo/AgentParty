@@ -51,7 +51,8 @@ export interface CliUpgradeNotice {
   command: string;
 }
 
-function defaultReadInstalledVersion(execPath: string): string | null {
+/** 读盘上二进制自报的版本；读不出返回 null。导出供自动升级「先读回来再宣布成功」用（#1036 后续）。 */
+export function readInstalledPartyVersion(execPath: string): string | null {
   try {
     const proc = Bun.spawnSync([execPath, "--version"], { stdout: "pipe", stderr: "ignore" });
     if (!proc.success) return null;
@@ -249,7 +250,7 @@ export async function downloadPartyUpgrade(
 export function pendingUpgrade(deps: UpgradeDeps = {}): string | null {
   const running = deps.runningVersion ?? RUNNING_VERSION;
   const execPath = deps.execPath ?? process.execPath;
-  const read = deps.readInstalledVersion ?? defaultReadInstalledVersion;
+  const read = deps.readInstalledVersion ?? readInstalledPartyVersion;
   // 只有 execPath 看起来是 party 二进制（basename 含 party）才比——dev 下 execPath=bun，跳过。
   if (!isPartyBinaryPath(execPath)) return null;
   const installed = read(execPath);
