@@ -30,31 +30,102 @@ case "${1:-}" in
     ;;
 esac
 
-if [ -n "${AGENTPARTY_RUNTIME_BIN:-}" ]; then
-  case "$AGENTPARTY_RUNTIME_BIN" in
-    /*) : ;;
-    *) fail "AGENTPARTY_RUNTIME_BIN must be an absolute path" ;;
-  esac
-  [ -x "$AGENTPARTY_RUNTIME_BIN" ] \
-    || fail "AGENTPARTY_RUNTIME_BIN is not executable: $AGENTPARTY_RUNTIME_BIN"
-  exec "$AGENTPARTY_RUNTIME_BIN" "$@"
-fi
-
-path_party="$(command -v party 2>/dev/null || true)"
-if [ -n "$path_party" ] && [ -x "$path_party" ]; then
-  exec "$path_party" "$@"
-fi
-
-for candidate in \
-  "${HOME:-}/.local/bin/party" \
-  "/opt/homebrew/bin/party" \
-  "/usr/local/bin/party" \
-  "/Applications/AgentParty.app/Contents/MacOS/party"
-do
-  [ "$candidate" != "/.local/bin/party" ] || continue
-  if [ -x "$candidate" ]; then
-    exec "$candidate" "$@"
+# 解析出真正的 party 可执行体。写成函数（而不是一路 exec）是因为 #1025 的合并逻辑
+# 需要先把 stdin 读进来，再用管道喂给它——那条路径没法直接 exec 整条流水线。
+resolve_party() {
+  if [ -n "${AGENTPARTY_RUNTIME_BIN:-}" ]; then
+    case "$AGENTPARTY_RUNTIME_BIN" in
+      /*) : ;;
+      *) fail "AGENTPARTY_RUNTIME_BIN must be an absolute path" ;;
+    esac
+    [ -x "$AGENTPARTY_RUNTIME_BIN" ] \
+      || fail "AGENTPARTY_RUNTIME_BIN is not executable: $AGENTPARTY_RUNTIME_BIN"
+    printf '%s' "$AGENTPARTY_RUNTIME_BIN"
+    return 0
   fi
-done
 
-fail "party runtime not found. Install it with: curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh ; then run /reload-plugins or start a new Claude session"
+  path_party="$(command -v party 2>/dev/null || true)"
+  if [ -n "$path_party" ] && [ -x "$path_party" ]; then
+    printf '%s' "$path_party"
+    return 0
+  fi
+
+  for candidate in \
+    "${HOME:-}/.local/bin/party" \
+    "/opt/homebrew/bin/party" \
+    "/usr/local/bin/party" \
+    "/Applications/AgentParty.app/Contents/MacOS/party"
+  do
+    [ "$candidate" != "/.local/bin/party" ] || continue
+    if [ -x "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+
+  fail "party runtime not found. Install it with: curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh ; then run /reload-plugins or start a new Claude session"
+}
+
+# ── #1025 第二刀：把 PreToolUse/PostToolUse 的重复启动合并掉 ─────────────────
+#
+# 已武装的会话每个事件仍要启动一次完整的 party。实测（Apple Silicon，load ~130）：
+# 单次 wall 1.9–4.4 秒，峰值 9.4–12.3 秒——而 Claude 的 hook 超时是 10 秒，于是
+# SessionStart / Stop 会被判 failed（owner 实测截图）。CPU 只有 0.25s，差的几十倍全是
+# 高负载下的调度等待与调页；而负载本身有很大一部分正是这些短进程自己造出来的。
+#
+# 能合并是因为 hook 内部本来就对普通事件做 15 秒节流：同一窗口内的第二、第三次启动，
+# 做完的事和第一次一模一样。所以只对**这两类**事件按时间窗合并：
+#   - 相位边界事件（Notification=权限等待、SessionStart、compaction、turn 失败…）永不合并；
+#   - Stop 走的是 stop-guard 子命令，完全不经过这里——它要读按 (server,token,channel) 哈希出来的
+#     journal 才能判断该不该拦，sh 里算不出那个路径，靠猜文件位置跳过等于「该拦的没拦住」。
+#
+# 合并只损失一条重复的 presence 活动上报（那本来就会被节流丢掉），不影响消息收发与唤醒。
+# 关掉：AGENTPARTY_HOOK_COALESCE_SECONDS=0。
+coalesce_seconds="${AGENTPARTY_HOOK_COALESCE_SECONDS:-10}"
+
+maybe_coalesce_report() {
+  # $1 = 完整 payload。返回 0 表示「本次可以跳过」。
+  [ "$coalesce_seconds" -gt 0 ] 2>/dev/null || return 1
+  case "$1" in
+    *'"hook_event_name":"PreToolUse"'*|*'"hook_event_name": "PreToolUse"'*|\
+    *'"hook_event_name":"PostToolUse"'*|*'"hook_event_name": "PostToolUse"'*) : ;;
+    *) return 1 ;;
+  esac
+
+  if [ -n "${AP_ACTIVITY_FILE:-}" ]; then
+    stamp="${AP_ACTIVITY_FILE}.coalesce"
+  else
+    # session_id 用纯参数展开取，不起子进程（这条路径的全部意义就是别花钱）。
+    sid="$1"
+    case "$sid" in *'"session_id":"'*) sid="${sid#*\"session_id\":\"}"; sid="${sid%%\"*}" ;; *) return 1 ;; esac
+    # 它要拼进路径：字符集不合法就别合并，绝不拿它构造路径。
+    case "$sid" in ""|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    stamp="${AGENTPARTY_HOME:-${HOME:-}/.agentparty}/state/activity/${sid}.json.coalesce"
+  fi
+
+  now="$(date +%s 2>/dev/null || echo 0)"
+  case "$now" in ""|*[!0-9]*) return 1 ;; esac
+  last="$(cat "$stamp" 2>/dev/null || echo 0)"
+  case "$last" in ""|*[!0-9]*) last=0 ;; esac
+
+  if [ "$((now - last))" -lt "$coalesce_seconds" ] && [ "$last" -le "$now" ]; then
+    return 0
+  fi
+  # 这次要真跑：先记下时刻，窗口内后续的同类事件就能跳过。写不进去就当没有窗口（照常启动）。
+  mkdir -p "${stamp%/*}" 2>/dev/null || true
+  printf '%s' "$now" > "$stamp" 2>/dev/null || true
+  return 1
+}
+
+party_bin="$(resolve_party)"
+
+if [ "${1:-}" = "hook" ] && [ "${2:-}" = "report" ]; then
+  payload="$(cat)"
+  if maybe_coalesce_report "$payload"; then
+    exit 0
+  fi
+  printf '%s' "$payload" | "$party_bin" "$@"
+  exit 0
+fi
+
+exec "$party_bin" "$@"

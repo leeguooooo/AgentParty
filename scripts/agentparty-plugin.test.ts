@@ -233,6 +233,121 @@ describe("AgentParty marketplace plugin", () => {
     });
   });
 
+  // #1025 第二刀：已武装的会话每个事件仍要启动一次完整的 party（实测 load ~130 下 wall 1.9–4.4s、
+  // 峰值 9.4–12.3s，而 Claude 的 hook 超时是 10s）。hook 内部本来就对普通事件做 15 秒节流，
+  // 所以同一窗口内的重复启动做完的事一模一样——在 wrapper 层合并掉。
+  describe("PreToolUse/PostToolUse 的重复启动被合并（#1025）", () => {
+    function stubHome(): { home: string; marker: string; env: NodeJS.ProcessEnv } {
+      const home = mkdtempSync(join(tmpdir(), "agentparty-coalesce-"));
+      const marker = join(home, "spawned.txt");
+      const installed = resolve(home, ".local/bin/party");
+      mkdirSync(resolve(home, ".local/bin"), { recursive: true });
+      writeFileSync(installed, `#!/bin/sh\nprintf 'x' >> ${marker}\ncat > /dev/null\n`);
+      chmodSync(installed, 0o755);
+      return {
+        home,
+        marker,
+        env: {
+          HOME: home,
+          AGENTPARTY_HOME: join(home, ".agentparty"),
+          PATH: "/usr/bin:/bin",
+          AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1",
+        },
+      };
+    }
+
+    const spawns = (marker: string) => (existsSync(marker) ? readFileSync(marker, "utf8").length : 0);
+    const fire = (env: NodeJS.ProcessEnv, event: string, extra: NodeJS.ProcessEnv = {}) =>
+      spawnSync(runtimeLauncher, ["hook", "report"], {
+        env: { ...env, ...extra },
+        input: JSON.stringify({ hook_event_name: event, tool_name: "Bash", session_id: "sess-1" }),
+        encoding: "utf8",
+      });
+
+    test("同一窗口内连发 5 次 PreToolUse ⇒ 只启动 1 次", () => {
+      const { home, marker, env } = stubHome();
+      try {
+        for (let i = 0; i < 5; i += 1) fire(env, "PreToolUse");
+        expect(spawns(marker)).toBe(1);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("相位边界事件（权限等待等）永不合并", () => {
+      const { home, marker, env } = stubHome();
+      try {
+        for (let i = 0; i < 3; i += 1) fire(env, "Notification");
+        expect(spawns(marker)).toBe(3);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("AGENTPARTY_HOOK_COALESCE_SECONDS=0 关掉合并", () => {
+      const { home, marker, env } = stubHome();
+      try {
+        for (let i = 0; i < 3; i += 1) fire(env, "PreToolUse", { AGENTPARTY_HOOK_COALESCE_SECONDS: "0" });
+        expect(spawns(marker)).toBe(3);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("payload 原样透传（读了 stdin 就必须再喂回去）", () => {
+      const home = mkdtempSync(join(tmpdir(), "agentparty-coalesce-echo-"));
+      const installed = resolve(home, ".local/bin/party");
+      mkdirSync(resolve(home, ".local/bin"), { recursive: true });
+      writeFileSync(installed, "#!/bin/sh\ncat\n");
+      chmodSync(installed, 0o755);
+      try {
+        const payload = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", session_id: "sess-1" });
+        const result = spawnSync(runtimeLauncher, ["hook", "report"], {
+          env: { HOME: home, AGENTPARTY_HOME: join(home, ".agentparty"), PATH: "/usr/bin:/bin", AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1" },
+          input: payload,
+          encoding: "utf8",
+        });
+        expect(result.stdout).toBe(payload);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("恶意 session_id 既不参与合并、也绝不拼进路径", () => {
+      const { home, marker, env } = stubHome();
+      try {
+        for (let i = 0; i < 3; i += 1) {
+          spawnSync(runtimeLauncher, ["hook", "report"], {
+            env,
+            input: JSON.stringify({ hook_event_name: "PreToolUse", session_id: "../../../../etc/x" }),
+            encoding: "utf8",
+          });
+        }
+        // 不合并（字符集不合法 ⇒ 每次都照常启动），且没有在 home 之外留下任何 .coalesce 文件
+        expect(spawns(marker)).toBe(3);
+        expect(existsSync(join(home, ".agentparty", "state", "activity"))).toBe(false);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("Stop 走 stop-guard，完全不经过合并（该拦的必须还能拦）", () => {
+      const { home, marker, env } = stubHome();
+      try {
+        for (let i = 0; i < 3; i += 1) {
+          spawnSync(runtimeLauncher, ["hook", "stop-guard"], {
+            env,
+            input: JSON.stringify({ hook_event_name: "Stop", session_id: "sess-1" }),
+            encoding: "utf8",
+          });
+        }
+        expect(spawns(marker)).toBe(3);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  });
+
   test("fails explicitly instead of downloading when a configured runtime is missing", () => {
     const result = spawnSync(runtimeLauncher, ["mcp"], {
       env: {
