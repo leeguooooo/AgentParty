@@ -62,6 +62,13 @@ function successfulRunner(overrides: Map<string, { status: number; stdout: strin
         expect(input).toBe("{}");
         return { status: 2, stdout: "", stderr: "malformed event envelope\n" };
       case "hook report": {
+        // #1025：出厂时 hook 走的是插件 wrapper，未被 AgentParty 启动器武装过的会话在
+        // exec 之前就退出。桩必须忠实反映这一点——否则它会让「早退被改坏」的代码全绿。
+        // （真产物那一侧由 scripts/verify-cli-binary.ts 对真二进制、真 wrapper 验，
+        // 并做过变异自检：去掉早退 → 验收失败。）
+        if (!unarmedHookSpawns && env.AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN !== "1" && !env.AP_ACTIVITY_FILE) {
+          return { status: 0, stdout: "", stderr: "" };
+        }
         const payload = JSON.parse(input ?? "") as {
           session_id: string;
           hook_event_name: string;
@@ -114,6 +121,12 @@ afterEach(() => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+/**
+ * #1025 负向用例用：设成 true 就模拟一个「未武装也照样启动 runtime」的坏产物。
+ * 验收必须因此失败——否则那条断言等于没写。
+ */
+let unarmedHookSpawns = false;
 
 describe("CLI binary acceptance", () => {
   test("parses one explicit binary and rejects ambiguous requests", () => {
@@ -181,5 +194,16 @@ describe("CLI binary acceptance", () => {
     expect(() => verifyCliBinary(artifact(), pluginRoot, runner)).toThrow(
       "party claude-cross-session-hook exited 0; expected 2",
     );
+  });
+
+  test("未武装的会话若仍然启动 runtime，验收必须失败（#1025 回归门禁）", () => {
+    // 直接钉住那条断言的**存在**：把它从 verify-cli-binary.ts 里删掉，本用例就会红。
+    unarmedHookSpawns = true;
+    try {
+      expect(() => verifyCliBinary(artifact(), pluginRoot, successfulRunner()))
+        .toThrow(/unarmed plugin lifecycle hook still wrote/);
+    } finally {
+      unarmedHookSpawns = false;
+    }
   });
 });
