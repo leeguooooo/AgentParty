@@ -24,8 +24,21 @@ export type ClaudePluginProbe =
  * 读本机已装的 agentparty 插件版本。走的是 doctor 同一个解析器（parseClaudePluginList），
  * 判据不另写一份。
  */
+/**
+ * spawn `claude` 时一律摘掉本机凭据（纵深防御，codex stop-time review on #1036）。
+ *
+ * 调用方（`party claude`）已经在最早时机把 AGENTPARTY_TOKEN 摘出环境，但 `claude` 是我们
+ * 交出去的、还会自己再 spawn 一堆东西的外部进程——凭据没有任何理由跟着它走。这一层保证
+ * 「上游哪天忘了摘，这里也不会漏」。
+ */
+export function claudeSpawnEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...base };
+  delete env.AGENTPARTY_TOKEN;
+  return env;
+}
+
 export function probeInstalledClaudePlugin(spawn: PluginSpawn): ClaudePluginProbe {
-  const r = spawn("claude", ["plugin", "list", "--json"], { encoding: "utf8", timeout: 30_000 });
+  const r = spawn("claude", ["plugin", "list", "--json"], { encoding: "utf8", timeout: 30_000, env: claudeSpawnEnv() });
   if (r.error !== undefined) return { available: false };
   if (r.status !== 0 || typeof r.stdout !== "string") return { available: true, version: undefined };
   const list = parseClaudePluginList(r.stdout);
@@ -41,7 +54,7 @@ export function installedClaudePluginVersion(spawn: PluginSpawn): string | null 
 
 /** 跑一次 `claude plugin update agentparty@agentparty`。true＝exit 0。 */
 export function runClaudePluginUpdate(spawn: PluginSpawn): boolean {
-  const r = spawn("claude", ["plugin", "update", CLAUDE_PLUGIN], { encoding: "utf8", timeout: 60_000 });
+  const r = spawn("claude", ["plugin", "update", CLAUDE_PLUGIN], { encoding: "utf8", timeout: 60_000, env: claudeSpawnEnv() });
   return r.error === undefined && r.status === 0;
 }
 

@@ -497,3 +497,69 @@ describe("party claude 接上自动升级（#1030）", () => {
     expect(h.calls).toHaveLength(0);
   });
 });
+
+// codex stop-time review on #1036：自动升级排在重绑之前，而 `party upgrade` 会 spawn
+// `claude plugin update` —— 那一刻 AGENTPARTY_TOKEN 还在 process.env 里，直接被插件子进程继承。
+describe("凭据在任何 spawn 之前就离开环境（#1036 codex review）", () => {
+  test("自动升级跑起来时，process.env 里已经没有 token 了", async () => {
+    let seenDuringUpgrade: string | undefined = "还没跑";
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const deps = {
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch(args: string[], env: NodeJS.ProcessEnv) {
+        calls.push({ args, env });
+        return { status: 0 };
+      },
+      home: mkdtempSync(join(tmpdir(), "agentparty-token-scrub-")),
+      env: { AGENTPARTY_TOKEN: "ap_secret" } as NodeJS.ProcessEnv,
+      configServer: () => "https://agentparty.example.com",
+      verifyToken: async () => ({ kind: "agent" }),
+      rebindToken: async () => 0,
+      autoUpgrade: async () => {
+        // 这一刻正是 `party upgrade` 会 spawn `claude plugin update` 的时机
+        seenDuringUpgrade = process.env.AGENTPARTY_TOKEN;
+        return { kind: "current" } as const;
+      },
+    } as unknown as ClaudeLaunchDependencies;
+
+    const before = process.env.AGENTPARTY_TOKEN;
+    process.env.AGENTPARTY_TOKEN = "ap_secret";
+    try {
+      expect(await run(["dev"], deps)).toBe(0);
+    } finally {
+      if (before === undefined) delete process.env.AGENTPARTY_TOKEN;
+      else process.env.AGENTPARTY_TOKEN = before;
+    }
+    expect(seenDuringUpgrade).toBeUndefined();
+    // 子进程 claude 同样拿不到
+    expect(calls[0]!.env.AGENTPARTY_TOKEN).toBeUndefined();
+  });
+
+  test("重绑结束后 token 立刻从环境里摘走（窗口只覆盖那一次调用）", async () => {
+    let seenDuringRebind: string | undefined;
+    const deps = {
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch: () => ({ status: 0 }),
+      home: mkdtempSync(join(tmpdir(), "agentparty-token-window-")),
+      env: { AGENTPARTY_TOKEN: "ap_secret" } as NodeJS.ProcessEnv,
+      configServer: () => "https://agentparty.example.com",
+      verifyToken: async () => ({ kind: "agent" }),
+      autoUpgrade: async () => ({ kind: "current" }) as const,
+      rebindToken: async () => {
+        seenDuringRebind = process.env.AGENTPARTY_TOKEN;
+        return 0;
+      },
+    } as unknown as ClaudeLaunchDependencies;
+
+    const before = process.env.AGENTPARTY_TOKEN;
+    process.env.AGENTPARTY_TOKEN = "ap_secret";
+    try {
+      await run(["dev"], deps);
+    } finally {
+      if (before === undefined) delete process.env.AGENTPARTY_TOKEN;
+      else process.env.AGENTPARTY_TOKEN = before;
+    }
+    // init 靠 process.env 读 token，所以重绑期间必须看得见
+    expect(seenDuringRebind).toBe("ap_secret");
+  });
+});
