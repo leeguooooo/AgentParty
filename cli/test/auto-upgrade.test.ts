@@ -115,3 +115,19 @@ describe("交互式入口的自动升级（#1030）", () => {
     }
   });
 });
+
+// CodeRabbit on #1036：`party claude dev -- --no-auto-upgrade` 里那个是给 claude 的参数，
+// 既不该被当成我们的开关，也不该被摘掉。
+test("`--` 之后的同名参数原样保留，也不算开关", () => {
+  expect(stripNoAutoUpgradeFlag(["dev", "--", NO_AUTO_UPGRADE_FLAG])).toEqual({
+    argv: ["dev", "--", NO_AUTO_UPGRADE_FLAG],
+    disabled: false,
+  });
+  // `--` 之前的才算我们的
+  expect(stripNoAutoUpgradeFlag(["dev", NO_AUTO_UPGRADE_FLAG, "--", "--model", "sonnet"])).toEqual({
+    argv: ["dev", "--", "--model", "sonnet"],
+    disabled: true,
+  });
+  // 终止符本身必须保留：摘掉它会让后面的参数被当成我们的位置参数
+  expect(stripNoAutoUpgradeFlag(["dev", "--"])).toEqual({ argv: ["dev", "--"], disabled: false });
+});

@@ -41,10 +41,18 @@ export type AutoUpgradeOutcome =
   | { kind: "failed" }            // 升级动过手但没成功——不挡本次命令
   | { kind: "upgraded"; from: string; to: string; reexecCode: number | null };
 
-/** `--no-auto-upgrade` 从 argv 里摘掉（它不该流进下游命令的参数校验）。 */
+/**
+ * `--no-auto-upgrade` 从 argv 里摘掉（它不该流进下游命令的参数校验）。
+ *
+ * 只认 `--` **之前**的：`party claude dev -- --no-auto-upgrade` 里那个是给 claude 的参数，
+ * 既不该被当成我们的开关、更不该被摘掉（CodeRabbit on #1036）。终止符本身与其后的一切原样保留。
+ */
 export function stripNoAutoUpgradeFlag(argv: readonly string[]): { argv: string[]; disabled: boolean } {
-  const disabled = argv.includes(NO_AUTO_UPGRADE_FLAG);
-  return { argv: argv.filter((a) => a !== NO_AUTO_UPGRADE_FLAG), disabled };
+  const terminator = argv.indexOf("--");
+  const own = terminator === -1 ? argv : argv.slice(0, terminator);
+  const rest = terminator === -1 ? [] : argv.slice(terminator);
+  const disabled = own.includes(NO_AUTO_UPGRADE_FLAG);
+  return { argv: [...own.filter((a) => a !== NO_AUTO_UPGRADE_FLAG), ...rest], disabled };
 }
 
 export function autoUpgradeDisabled(env: NodeJS.ProcessEnv, flagDisabled: boolean): boolean {
