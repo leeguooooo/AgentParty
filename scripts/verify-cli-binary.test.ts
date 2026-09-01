@@ -94,8 +94,19 @@ function successfulRunner(overrides: Map<string, { status: number; stdout: strin
         return { status: 0, stdout: "", stderr: "" };
       }
       case "hook stop-guard": {
-        const activityFile = env.AP_ACTIVITY_FILE;
-        expect(typeof activityFile).toBe("string");
+        // 同 `hook report`：Stop 也走插件 wrapper，未武装的会话在 exec 之前就退出。
+        // wrapper 的判据是 argv[1]==="hook"，两个子命令共用同一道闸——桩必须两边都模拟，
+        // 否则「只有 report 被挡住、stop-guard 漏了」这种缺陷会全绿。
+        if (!unarmedHookSpawns && env.AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN !== "1" && !env.AP_ACTIVITY_FILE) {
+          return { status: 0, stdout: "", stderr: "" };
+        }
+        const activityFile = env.AP_ACTIVITY_FILE ?? join(
+          env.AGENTPARTY_HOME!,
+          "state",
+          "activity",
+          `${(JSON.parse(input ?? "{}") as { session_id?: string }).session_id ?? "unknown"}.json`,
+        );
+        mkdirSync(resolve(activityFile, ".."), { recursive: true });
         const payload = JSON.parse(input ?? "") as { stop_hook_active?: boolean };
         const armed = env.AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN === "1";
         writeFileSync(activityFile!, JSON.stringify({

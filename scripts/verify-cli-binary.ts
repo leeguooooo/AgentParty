@@ -301,20 +301,31 @@ export function verifyCliBinary(
       AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: undefined,
       AP_ACTIVITY_FILE: undefined,
     };
-    runExpected(
-      runner,
-      pluginRuntime,
-      ordinaryHookEnv,
-      pluginHookArguments(requestedPluginRoot, "SessionStart"),
-      0,
-      [],
-      [],
-      JSON.stringify({
-        session_id: ordinarySessionId,
-        hook_event_name: "SessionStart",
-        cwd: process.cwd(),
-      }),
-    );
+    // 覆盖每一类事件，而不是只挑 SessionStart：Stop 在 hooks.json 里映射到的是
+    // `hook stop-guard`（另一个子命令），只验一个事件证明不了整条早退。
+    for (const event of ["SessionStart", "PreToolUse", "Stop"] as const) {
+      const unarmed = runExpected(
+        runner,
+        pluginRuntime,
+        ordinaryHookEnv,
+        pluginHookArguments(requestedPluginRoot, event),
+        0,
+        [],
+        [],
+        JSON.stringify({
+          session_id: ordinarySessionId,
+          hook_event_name: event,
+          cwd: process.cwd(),
+          ...(event === "PreToolUse" ? { tool_name: "Bash" } : {}),
+          ...(event === "Stop" ? { stop_hook_active: false } : {}),
+        }),
+      );
+      // #602 铁律：hook 的 stdout 会被灌进模型上下文，必须逐字为空——
+      // "包含某些内容" 不够，任何多余输出都是违约。
+      if (unarmed.stdout !== "") {
+        throw new Error(`unarmed plugin ${event} hook wrote to stdout`);
+      }
+    }
     // No local snapshot: nothing ran. (The previous contract accepted a private
     // snapshot here; nothing ever read it except that same session's next hook,
     // which now also does not run.)
@@ -351,7 +362,8 @@ export function verifyCliBinary(
     }
     if (
       typeof armedActivity !== "object" || armedActivity === null ||
-      (armedActivity as { phase?: unknown }).phase !== "starting"
+      (armedActivity as { phase?: unknown }).phase !== "starting" ||
+      typeof (armedActivity as { ts?: unknown }).ts !== "number"
     ) {
       throw new Error("armed plugin lifecycle hook wrote the wrong local activity snapshot");
     }
