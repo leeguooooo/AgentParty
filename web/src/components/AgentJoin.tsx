@@ -1083,7 +1083,12 @@ export function AgentJoin({
                 t={t}
               >
                 {unattended ? (
-                  <p className="agent-join-hint">{t("AgentJoin.step3.hintUnattended")}</p>
+                  <>
+                    <p className="agent-join-hint">{t("AgentJoin.step3.hintUnattended")}</p>
+                    {/* 常驻档每次唤醒都带 --resume（serve.ts），上下文跨唤醒连续——这点得说，
+                        否则人会以为每次唤醒都是白纸一张。 */}
+                    <p className="agent-join-hint">{t("AgentJoin.step3.resumeUnattended")}</p>
+                  </>
                 ) : (
                   <>
                     <p className="agent-join-hint">
@@ -1095,6 +1100,12 @@ export function AgentJoin({
                             : "AgentJoin.step3.hintOther",
                       )}
                     </p>
+                    {/* 交互档起的是**新对话**，与常驻档相反——不写清楚，人会拿着"接着上次干"
+                        的预期去跑，然后发现上下文没了；也会去试图把已经在跑的会话接上（做不到：
+                        武装与否是进程启动那一刻按环境定的）。 */}
+                    {session.harness === "claude" && (
+                      <p className="agent-join-hint">{t("AgentJoin.step3.resumeClaude")}</p>
+                    )}
                     {/* #1029：这条命令现在可能带明文 token，安全警告必须与第 ② 步同形、
                         且排在命令块**之前**（理由见第 ② 步那处注释）。 */}
                     {wakeableCommandCarriesToken(session.harness, session.token) && (
