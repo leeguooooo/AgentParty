@@ -171,6 +171,8 @@ export interface ClaudeLaunchResult {
 
 export interface ClaudeLaunchDependencies {
   preflight(channel: string | undefined): Promise<ClaudeLaunchPreflight>;
+  /** #1029：AGENTPARTY_TOKEN 有值时先重绑身份；缺省走 `party init`。 */
+  rebindToken?(channel: string | undefined): Promise<number>;
   /** #1013：把本机插件对齐到 `cliVersion`（默认 syncClaudePluginToCli）；测试注入。 */
   syncPlugin?: (cliVersion: string) => ClaudePluginSyncResult;
   launch(args: string[], env: NodeJS.ProcessEnv): ClaudeLaunchResult;
@@ -222,6 +224,10 @@ export function claudeLaunchPlan(
       // #1018：这是 owner 亲手起的会话，工具面照常放行（进程树内继承，别的会话拿不到）。
       [MCP_OPT_IN_ENV]: "1",
       [CLAUDE_LIFECYCLE_OPT_IN_ENV]: "1",
+      // #1029：重绑用的 token 到此为止，绝不传进模型会话。它已经写进 config 了，而环境变量
+      // 会被 Claude 的每一个 Bash 子进程继承——模型一句 `echo $AGENTPARTY_TOKEN` 就能读到、
+      // 也就可能被它写进消息或文件。凭据的暴露面到启动器为止。
+      AGENTPARTY_TOKEN: undefined,
       ...(channel === undefined ? {} : { AGENTPARTY_CHANNEL: channel }),
     },
   };
@@ -297,6 +303,15 @@ function runShowDefaultArgs(env: NodeJS.ProcessEnv, home: string): number {
   return 0;
 }
 
+/**
+ * 默认重绑实现：复用 `party init`——它本来就认 AGENTPARTY_TOKEN，server 沿用已有 config，
+ * 顺带把 harness 绑定与规则文件一并写好。绝不在这里自己拼一份平行的写 config 逻辑。
+ */
+async function defaultRebindToken(channel: string | undefined): Promise<number> {
+  const init = await import("./init");
+  return init.run(channel === undefined ? [] : ["--channel", channel]);
+}
+
 export async function run(
   argv: string[],
   deps: ClaudeLaunchDependencies = defaultDependencies,
@@ -358,6 +373,22 @@ export async function run(
       return 1;
     }
     console.log(`唤醒文案语言已写入 config：lang=${lang}`);
+  }
+  // #1029：唤醒/重连命令要能带 token。web 的重连引导发的就是
+  //   AGENTPARTY_TOKEN='<T>' party claude <channel>
+  // 一条命令既换掉被撤销的 token 又起会话——否则引导给出的命令，在它要解决的那个故障下必然失败
+  // （owner 实测：照着引导跑，撞的正是 identity_unavailable / invalid or revoked token）。
+  //
+  // token 只走环境变量、绝不进 argv：`ps -axww` 同机任何用户可见，shell history 也留底（#111）。
+  const envToken = env.AGENTPARTY_TOKEN;
+  if (envToken !== undefined && envToken !== "") {
+    const rebind = deps.rebindToken ?? defaultRebindToken;
+    const code = await rebind(channel);
+    if (code !== 0) {
+      console.error("AGENTPARTY_TOKEN 重绑失败；单独跑一次看详情：party init --channel <channel>");
+      return code;
+    }
+    console.log(`已用 AGENTPARTY_TOKEN 重绑${channel === undefined ? "" : ` #${channel}`}的身份，继续启动……`);
   }
   let readiness: ClaudeLaunchPreflight;
   try {

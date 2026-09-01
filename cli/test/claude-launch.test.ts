@@ -241,3 +241,78 @@ describe("party claude --lang（#1003）", () => {
     expect(noConfig.calls).toHaveLength(0);
   });
 });
+
+// #1029：owner「唤醒会话应该是带 token 的」。web 重连引导发的是
+// `AGENTPARTY_TOKEN='<T>' party claude <channel>`——一条命令既换掉被撤销的 token 又起会话。
+describe("AGENTPARTY_TOKEN 重绑后再启动（#1029）", () => {
+  function base(calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }>, env: Record<string, string | undefined>) {
+    // 隔离本机 `party claude --default-args` 偏好（#978）
+    const home = mkdtempSync(join(tmpdir(), "agentparty-claude-token-"));
+    return {
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch(args: string[], childEnv: NodeJS.ProcessEnv) {
+        calls.push({ args, env: childEnv });
+        return { status: 0 };
+      },
+      home,
+      env: { ...env } as NodeJS.ProcessEnv,
+    } as unknown as ClaudeLaunchDependencies;
+  }
+
+  function harness(env: Record<string, string | undefined>) {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const rebinds: (string | undefined)[] = [];
+    return {
+      calls,
+      rebinds,
+      deps: {
+        ...base(calls, env),
+        rebindToken: async (channel: string | undefined) => {
+          rebinds.push(channel);
+          return 0;
+        },
+      } as ClaudeLaunchDependencies,
+    };
+  }
+
+  test("有 AGENTPARTY_TOKEN ⇒ 先重绑该频道，再照常启动", async () => {
+    const h = harness({ AGENTPARTY_TOKEN: "ap_secret" });
+    expect(await run(["dev"], h.deps)).toBe(0);
+    expect(h.rebinds).toEqual(["dev"]);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  test("没有 AGENTPARTY_TOKEN ⇒ 一次重绑都不做（行为与今天一字不差）", async () => {
+    const h = harness({});
+    expect(await run(["dev"], h.deps)).toBe(0);
+    expect(h.rebinds).toEqual([]);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  test("空字符串不算「给了 token」", async () => {
+    const h = harness({ AGENTPARTY_TOKEN: "" });
+    expect(await run(["dev"], h.deps)).toBe(0);
+    expect(h.rebinds).toEqual([]);
+  });
+
+  test("重绑失败 ⇒ 不启动会话，把退出码原样带出", async () => {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const deps = {
+      ...base(calls, { AGENTPARTY_TOKEN: "ap_secret" }),
+      rebindToken: async () => 7,
+    } as ClaudeLaunchDependencies;
+    expect(await run(["dev"], deps)).toBe(7);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("token 绝不进 argv，也绝不传给子进程 Claude", async () => {
+    const h = harness({ AGENTPARTY_TOKEN: "ap_secret" });
+    await run(["dev"], h.deps);
+    const launch = h.calls[0]!;
+    // argv：ps -axww 同机任何用户都看得见
+    expect(launch.args.join(" ")).not.toContain("ap_secret");
+    // 子进程环境：Claude 的每个 Bash 调用都继承它，模型一句 echo 就能读到
+    expect(launch.env.AGENTPARTY_TOKEN).toBeUndefined();
+    expect(JSON.stringify(launch.env)).not.toContain("ap_secret");
+  });
+});
