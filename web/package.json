@@ -22,16 +22,16 @@
     "@tauri-apps/plugin-updater": "^2.10.1",
     "dompurify": "^3.4.14",
     "highlight.js": "^11.12.0",
-    "marked": "^18.0.10",
+    "marked": "^18.0.11",
     "pinyin-pro": "^3.29.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
+    "@types/react-dom": "^19.2.5",
     "@types/react-test-renderer": "19.1.0",
-    "@vitejs/plugin-react": "^6.1.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "react-test-renderer": "19.2.8",
     "typescript": "^7.0.2",
     "vite": "^8.2.2"
