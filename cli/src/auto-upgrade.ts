@@ -21,8 +21,17 @@ export const NO_AUTO_UPGRADE_ENV = "AGENTPARTY_NO_AUTO_UPGRADE";
 export interface AutoUpgradeDeps {
   /** 服务端认为的最新 CLI 版本；读不到返回 null（当作「没结论」，不动手）。 */
   latestVersion: () => Promise<string | null>;
-  /** 真正执行升级；返回 0 表示成功。 */
+  /** 真正执行升级；返回 0 表示命令本身没报错——**不等于目标版本已装上**。 */
   upgrade: () => Promise<number>;
+  /**
+   * 升级后把盘上二进制的版本**读回来**。
+   *
+   * #1011 已经在插件上吃过这个亏：`claude plugin update` 退出码为 0 不代表版本真的变了。
+   * CLI 这边同样：发布窗口里 GitHub Release 的资产可能还没传完（isReleaseAssetPublishing
+   * 专门为此存在）、"latest" 在中途也可能解析到别的版本。所以「升没升上去」只能由**读回来的
+   * 版本**回答，不能由退出码回答（codex stop-time review）。读不出返回 null。
+   */
+  installedVersion: () => string | null;
   /** 升级后用新二进制重跑本次命令；返回它的退出码，null 表示没能重跑。 */
   reexec: () => number | null;
   now: () => number;
@@ -38,7 +47,7 @@ export type AutoUpgradeOutcome =
   | { kind: "throttled" }         // 还在 TTL 窗口内，这次不探
   | { kind: "current" }           // 已是最新
   | { kind: "unknown" }           // 探不到版本（网络/服务端），当作没结论
-  | { kind: "failed" }            // 升级动过手但没成功——不挡本次命令
+  | { kind: "failed"; installed: string | null } // 动过手但版本没变到目标——不挡本次命令
   | { kind: "upgraded"; from: string; to: string; reexecCode: number | null };
 
 /**
@@ -105,13 +114,25 @@ export async function maybeAutoUpgrade(
   if (code !== 0) {
     // 升级失败绝不挡住本次命令：说清楚，然后用当前版本继续。
     deps.log(`自动升级没成功（exit ${code}），本次继续用 ${running} 跑；手动升级：party upgrade`);
-    return { kind: "failed" };
+    return { kind: "failed", installed: null };
   }
+  // 退出码 0 只说明「命令没报错」。真正装上没装上，只有把盘上的版本**读回来**才知道——
+  // 发布窗口里资产可能还没传完、"latest" 中途也可能解析到别的版本。不读回来就宣布成功，
+  // 就是拿命令的成败冒充事实（#1011 在插件上的同一课）。
+  const installed = deps.installedVersion();
+  if (installed === null || compareVersions(installed, running) <= 0) {
+    deps.log(
+      `自动升级命令跑完了，但盘上仍是 ${installed ?? "读不出版本"}——没升上去（发布窗口里资产可能还没传完）。` +
+        `本次继续用 ${running} 跑；稍后手动重试：party upgrade`,
+    );
+    return { kind: "failed", installed };
+  }
+  // 装上的**可能不是**刚才那个 latest（发布中途 latest 变了）。以读回来的为准报数，别复述期望值。
   const reexecCode = deps.reexec();
   deps.log(
     reexecCode === null
-      ? `已升级到 ${latest}；本次命令仍在 ${running} 的进程里跑完，下次起就是新版`
-      : `已升级到 ${latest}，正在用新版本重跑本次命令……`,
+      ? `已升级到 ${installed}；本次命令仍在 ${running} 的进程里跑完，下次起就是新版`
+      : `已升级到 ${installed}，正在用新版本重跑本次命令……`,
   );
-  return { kind: "upgraded", from: running, to: latest, reexecCode };
+  return { kind: "upgraded", from: running, to: installed, reexecCode };
 }
