@@ -54,51 +54,60 @@ describe("Claude Cross-session discovery docs", () => {
     expect(architecture).toContain("短探针另有每流 1 MiB 上限");
     for (const path of ["README.md", "README.zh.md"]) {
       const source = read(path);
+      // #1024：细节搬去了 docs/claude-plugin*.md（README 只留安装命令与入口），
+      // 但每一条仍逐字被钉住——README 与该页合起来必须包含。
+      const zh = path !== "README.md";
+      const plugin = read(zh ? "docs/claude-plugin.zh.md" : "docs/claude-plugin.md");
+      const release = read(zh ? "docs/release-pipeline.zh.md" : "docs/release-pipeline.md");
+      // 断言的是「仍被记录，且从 README 可达」，不是「必须写在 README 里」——后者正是让
+      // README 涨到 626 行的那条压力。
+      const internals = read(zh ? "docs/cross-session-internals.zh.md" : "docs/cross-session-internals.md");
+      const documented = `${source}\n${plugin}\n${release}\n${internals}`;
+      expect(source).toContain(path === "README.md" ? "docs/claude-plugin.md" : "docs/claude-plugin.zh.md");
       expect(source).toContain("claude plugin marketplace add leeguooooo/AgentParty");
       expect(source).toContain("claude plugin install agentparty@agentparty");
       expect(source).toContain("claude plugin enable agentparty@agentparty");
       expect(source).toContain("party claude <channel>");
-      expect(source).toContain("identity_not_agent");
-      expect(source).toContain("activity_not_observed");
-      expect(source).toContain("channel.topology_visibility");
-      expect(source).toContain("topology_not_observed");
-      expect(source).toContain("topology_unavailable");
-      expect(source).toContain("2.1.154");
-      expect(source).toContain("defaultEnabled");
-      expect(source).toContain("--claude-package-version 2.1.154");
-      expect(source).toContain("claude_version_matches_request=true");
-      expect(source).toContain("worker-deploy.yml");
-      expect(source).toContain(path === "README.md" ? "40-character" : "40 位 commit SHA");
-      expect(source).toContain("version + commit");
-      expect(source).toContain("deployed_at");
-      expect(source).toContain(path === "README.md" ? "no-model preflight" : "无模型预检");
-      expect(source).toContain(path === "README.md" ? "Codex shell" : "Codex 外壳");
-      expect(source).toContain("bun scripts/verify-agentparty-plugin-install.ts");
-      expect(source).toContain("party doctor claude-plugin --channel <channel> --json");
-      expect(source).toContain("party claude --verify --channel dev");
-      expect(source).toContain("busy_activity_observed_before_send");
-      expect(source).toContain("claim_accept_reply_chain_observed");
-      expect(source).toContain("delivery_terminal_settled");
-      expect(source).toContain("system/init");
-      expect(source).toContain("`unknown`");
-      expect(source).toContain("source_cleanup=not_needed|retracted|not_found_or_unconfirmed|failed");
-      expect(source).toContain("cleanup_required=true");
-      expect(source).toContain("cleanup_search_marker");
-      expect(source).toContain("PermissionRequest");
-      expect(source).toContain("current_task");
-      expect(source).toContain(path === "README.md" ? "never prompt text or tool arguments" : "不上传 prompt 或工具参数");
-      expect(source).toContain(path === "README.md" ? "multiple matches fail closed" : "多条则 fail closed");
-      expect(source).toContain("busy_activity_not_observed");
-      expect(source).toContain("delivery_recovery v1");
-      expect(source).toContain("channel_writes_started=false");
-      expect(source).toContain("`--live`");
-      expect(source).toContain(path === "README.md"
-        ? "If Stop is blocked for an unfinished linked reply, presence stays `working`"
-        : "Stop 因待回复 execution 被阻止时，presence 保持 `working`");
-      expect(source).toContain("plugin_lifecycle_unavailable");
-      expect(source).toContain("`lifecycle`");
-      expect(source).toContain(path === "README.md" ? "random attempt ID" : "随机 attempt ID");
+      expect(documented).toContain("identity_not_agent");
+      expect(documented).toContain("activity_not_observed");
+      expect(documented).toContain("channel.topology_visibility");
+      expect(documented).toContain("topology_not_observed");
+      expect(documented).toContain("topology_unavailable");
+      expect(documented).toContain("2.1.154");
+      expect(documented).toContain("defaultEnabled");
+      expect(documented).toContain("--claude-package-version 2.1.154");
+      expect(documented).toContain("claude_version_matches_request=true");
+      expect(documented).toContain("worker-deploy.yml");
+      expect(documented).toContain(path === "README.md" ? "40-character" : "40 位 commit SHA");
+      expect(documented).toContain("version + commit");
+      expect(documented).toContain("deployed_at");
+      expect(documented).toContain(path === "README.md" ? "no-model preflight" : "无模型预检");
+      expect(documented).toContain(path === "README.md" ? "Codex shell" : "Codex 外壳");
+      expect(documented).toContain("bun scripts/verify-agentparty-plugin-install.ts");
+      expect(documented).toContain("party doctor claude-plugin --channel <channel> --json");
+      expect(documented).toContain("party claude --verify --channel dev");
+      expect(documented).toContain("busy_activity_observed_before_send");
+      expect(documented).toContain("claim_accept_reply_chain_observed");
+      expect(documented).toContain("delivery_terminal_settled");
+      expect(documented).toContain("system/init");
+      expect(documented).toContain("`unknown`");
+      expect(documented).toContain("source_cleanup=not_needed|retracted|not_found_or_unconfirmed|failed");
+      expect(documented).toContain("cleanup_required=true");
+      expect(documented).toContain("cleanup_search_marker");
+      expect(documented).toContain("PermissionRequest");
+      expect(documented).toContain("current_task");
+      expect(documented).toContain(path === "README.md" ? "never prompt text or tool arguments" : "不上传 prompt 或工具参数");
+      expect(documented).toContain(path === "README.md" ? "multiple matches fail closed" : "多条则 fail closed");
+      expect(documented).toContain("busy_activity_not_observed");
+      expect(documented).toContain("delivery_recovery v1");
+      expect(documented).toContain("channel_writes_started=false");
+      expect(documented).toContain("`--live`");
+      expect(documented).toContain("plugin_lifecycle_unavailable");
+      expect(documented).toContain("`lifecycle`");
+      expect(documented).toContain(path === "README.md" ? "random attempt ID" : "随机 attempt ID");
     }
+
+    // 线上文档站的镜像断言与 README 拆分无关，保持原样（online 是循环外的常量）。
     const online = read("web/public/docs/index.html");
     expect(online).toContain("Marketplace plugin：安装 Skill、Hook 与 Channel");
     expect(online).toContain("claude plugin marketplace add leeguooooo/AgentParty");
@@ -162,9 +171,25 @@ describe("Claude Cross-session discovery docs", () => {
     expect(source).not.toContain("sleep 20");
   });
 
+  // #1024：这条守卫原来要求 README.md / README.zh.md 里逐字出现约 50 个实现细节字符串
+  // （`850 ms`、`1–64`、`feature_flag_evaluation_disabled`…）。于是每加一个功能就往 README 追加一段——
+  // README 一度涨到 626 行，其中 Install 155 行、Attach 303 行（一段 1890 词、零个三级标题）。
+  //
+  // 要护的东西没变：**这条链路必须仍然被完整记录、且能从 README 找到**。改成分层断言：
+  //   README   只留用户真会敲的命令、会看到的顶层状态，以及通往内部文档的入口；
+  //   内部文档 承担全部细节字符串——一条都没少，只是搬了家。
   test("keeps the launch path discoverable from both READMEs", () => {
     for (const path of ["README.md", "README.zh.md"]) {
       const source = read(path);
+      const internals = read(
+        path === "README.md"
+          ? "docs/cross-session-internals.md"
+          : "docs/cross-session-internals.zh.md",
+      );
+      // README 必须能把人带到内部文档
+      expect(source).toContain(
+        path === "README.md" ? "docs/cross-session-internals.md" : "docs/cross-session-internals.zh.md",
+      );
       expect(source).toContain("party bridge claude design-review");
       expect(source).toContain("--cross-session required");
       expect(source).toContain("--cross-session-inbound accept");
@@ -172,114 +197,114 @@ describe("Claude Cross-session discovery docs", () => {
       expect(source).toContain("AGENTPARTY_CONFIG");
       expect(source).toContain("cross_session=enabled_for_launch");
       expect(source).toContain("cross_session=channel_only");
-      expect(source).toContain("party_channel_peer_check");
-      expect(source).toContain("SessionStart");
       expect(source).toContain("candidate_ref");
-      expect(source).toContain("v3");
       expect(source).toContain("--check --json");
-      expect(source).toContain("party bridge claude --verify");
-      expect(source).toContain("--receiver-cwd");
-      expect(source).toContain("--sender-cwd");
-      expect(source).toContain("expected_topology_relation");
-      expect(source).toContain("session_start_armed");
-      expect(source).toContain("delivery_verified");
-      expect(source).toContain("claude auth status");
-      expect(source).toContain("system/init.session_id");
-      expect(source).toContain("850 ms");
-      expect(source).toContain("send_to");
-      expect(source).toContain("1–64");
-      expect(source).toContain("mcp__agentparty-channel__");
-      expect(source).toContain("isolatePeerMachines");
-      expect(source).toContain("cross_machine=approval_required");
-      expect(source).toContain("cross_machine_policy_on_launch");
-      expect(source).toContain("on another machine (Remote Control)");
-      expect(source).toContain("in the cloud");
-      expect(source).toContain("lookalike");
-      expect(source).toContain("unsupported_provider");
-      expect(source).toContain("feature_flag_evaluation_disabled");
-      expect(source).toContain("DISABLE_TELEMETRY");
-      expect(source).toContain("claude_api_provider");
-      expect(source).toContain("cross_session_conflict_variables");
-      expect(source).toContain("channel_probe_phase");
-      expect(source).toContain("channel_probe_attempts");
-      expect(source).toContain("runtime_probe_attempts");
-      expect(source).toContain("`blockers`");
-      expect(source).toContain("worker_upgrade_required");
-      expect(source).toContain("150/500 ms");
-      expect(source).toContain("capability probe");
-      expect(source).toContain(path === "README.md" ? "malformed decoration" : "异常装饰");
-      expect(source).toContain(path === "README.md" ? "ambient environment" : "全局环境");
-      expect(source).toContain(path === "README.md" ? "text-only main-session" : "纯文本主会话");
-      expect(source).toContain("tool_result");
-      expect(source).toContain("session_id");
-      expect(source).toContain(path === "README.md" ? "duplicate marker" : "重复 marker");
-      expect(source).toContain(path === "README.md" ? "each outbound tool chain" : "每条出站工具链");
-      expect(source).toContain(path === "README.md" ? "distinct reply marker" : "reply marker");
-      expect(source).toContain(path === "README.md" ? "private 0600 signal file" : "0600 信号文件");
-      expect(source).toContain("timing_barriers_intact=true");
-      expect(source).toContain("distinct_claude_session_ids=true");
-      expect(source).toContain("distinct_bridge_addresses=true");
-      expect(source).toContain(path === "README.md" ? "non-error `SendMessage` result" : "非错误且唯一的");
-      expect(source).toContain(path === "README.md" ? "wait result before" : "等待结果必须早于");
-      expect(source).toContain(path === "README.md" ? "share one 180-second deadline" : "同一个 180 秒总时限");
-      expect(source).toContain(path === "README.md" ? "one 20-second readiness" : "同一个 20 秒 readiness");
-      expect(source).toContain(path === "README.md" ? "full stream" : "完整流");
-      expect(source).toContain(path === "README.md" ? "direct, top-level, singleton" : "顶层、直接且单独");
-      expect(source).toContain(path === "README.md" ? "only non-error result" : "唯一且非错误");
-      expect(source).toContain(path === "README.md" ? "foreign or child session" : "外来 session 或子 agent");
-      expect(source).toContain(path === "README.md" ? "no unrelated tool call" : "不能插入无关工具");
-      expect(source).toContain(path === "README.md" ? "non-null `agent_id`" : "非空 `agent_id`");
-      expect(source).toContain("`parent_tool_use_id`");
-      expect(source).toContain("`isReplay`");
-      expect(source).toContain(path === "README.md" ? "blocking exit 2" : "退出码 2");
-      expect(source).toContain(path === "README.md" ? "malformed envelopes" : "畸形 envelope");
-      expect(source).toContain(path === "README.md" ? "two distinct confirmed" : "两个不同的 confirmed");
-      expect(source).toContain(path === "README.md" ? "4,096 nodes" : "4096 个节点");
-      expect(source).toContain("4 MiB");
-      expect(source).toContain("tool_use_id");
-      expect(source).toContain(path === "README.md" ? "previous session cannot" : "上一条 session");
-      expect(source).toContain(path === "README.md" ? "share the consume lock" : "共用 consume lock");
-      expect(source).toContain("`blockers`");
-      expect(source).toContain("claude_auth_status");
-      expect(source).toContain("claude_auth_required");
-      expect(source).toContain("worker_upgrade_required");
-      expect(source).toContain("runtime_peer_unavailable");
-      expect(source).toContain("agentparty_unavailable");
-      expect(source).toContain("receiver_identity");
-      expect(source).toContain("sender_channel_access");
-      expect(source).toContain("not_checked");
-      expect(source).toContain("invalid_request");
-      expect(source).toContain("environment_unavailable");
-      expect(source).toContain("internal_error");
-      expect(source).toContain("`error_code`");
-      expect(source).toContain("AGENTPARTY_RUNTIME_SMOKE_TOKEN");
-      expect(source).toContain("caller_binding=live_socket");
-      expect(source).toContain("--capability-only");
-      expect(source).toContain("sockets_closed=true");
-      expect(source).toContain(path === "README.md" ? "sends no Channel or Claude message" : "不发送 Channel 或 Claude 消息");
-      expect(source).toContain("protocol_checked=false");
-      expect(source).toContain(path === "README.md" ? "10-second" : "10 秒截止时间");
-      expect(source).toContain("worker_deployment_status");
-      expect(source).toContain("worker_deployment_unavailable");
-      expect(source).toContain("development_unversioned");
-      expect(source).toContain("agentparty.claude-cross-session-native-preflight.v1");
-      expect(source).toContain("model_calls_started=false");
-      expect(source).toContain("receiver_lifecycle_activity_observed=true");
-      expect(source).toContain("sender_lifecycle_activity_observed=true");
-      expect(source).toContain(path === "README.md" ? "native delivery" : "原生送达");
-      expect(source).toContain("error_code=invalid_arguments");
-      expect(source).toContain("internal_error");
-      expect(source).toContain("request|preflight|receiver_startup|execution|evidence|internal");
-      expect(source).toContain("delivery_verified=true");
-      expect(source).toContain("party who --json");
       expect(source).toContain("same_local_installation");
-      expect(source).toContain("same_node");
-      expect(source).toContain("cross_session=session_start_unarmed");
-      expect(source).toContain(path === "README.md" ? "while Claude is still running" : "Claude 仍运行");
-      expect(source).toContain(path === "README.md" ? "all three signals" : "三项未齐");
-      expect(source).toContain(path === "README.md"
-        ? "full AgentParty verifier uses its v2 acceptance schema"
-        : "AgentParty 完整验收对所有非 help 结果都使用 v2 acceptance schema");
+      // 细节仍然逐字被钉住：README 与其内部文档合起来必须包含每一条。不指定住在哪一份，
+      // 因为切分是按段落做的——少数细节自然留在了 README 保留的那几段里。
+      const documented = `${source}\n${internals}`;
+      expect(documented).toContain("party_channel_peer_check");
+      expect(documented).toContain("SessionStart");
+      expect(documented).toContain("v3");
+      expect(documented).toContain("party bridge claude --verify");
+      expect(documented).toContain("--receiver-cwd");
+      expect(documented).toContain("--sender-cwd");
+      expect(documented).toContain("expected_topology_relation");
+      expect(documented).toContain("session_start_armed");
+      expect(documented).toContain("delivery_verified");
+      expect(documented).toContain("claude auth status");
+      expect(documented).toContain("system/init.session_id");
+      expect(documented).toContain("850 ms");
+      expect(documented).toContain("send_to");
+      expect(documented).toContain("1–64");
+      expect(documented).toContain("mcp__agentparty-channel__");
+      expect(documented).toContain("isolatePeerMachines");
+      expect(documented).toContain("cross_machine=approval_required");
+      expect(documented).toContain("cross_machine_policy_on_launch");
+      expect(documented).toContain("on another machine (Remote Control)");
+      expect(documented).toContain("in the cloud");
+      expect(documented).toContain("lookalike");
+      expect(documented).toContain("unsupported_provider");
+      expect(documented).toContain("feature_flag_evaluation_disabled");
+      expect(documented).toContain("DISABLE_TELEMETRY");
+      expect(documented).toContain("claude_api_provider");
+      expect(documented).toContain("cross_session_conflict_variables");
+      expect(documented).toContain("channel_probe_phase");
+      expect(documented).toContain("channel_probe_attempts");
+      expect(documented).toContain("runtime_probe_attempts");
+      expect(documented).toContain("`blockers`");
+      expect(documented).toContain("worker_upgrade_required");
+      expect(documented).toContain("150/500 ms");
+      expect(documented).toContain("capability probe");
+      expect(documented).toContain(path === "README.md" ? "malformed decoration" : "异常装饰");
+      expect(documented).toContain(path === "README.md" ? "ambient environment" : "全局环境");
+      expect(documented).toContain(path === "README.md" ? "text-only main-session" : "纯文本主会话");
+      expect(documented).toContain("tool_result");
+      expect(documented).toContain("session_id");
+      expect(documented).toContain(path === "README.md" ? "duplicate marker" : "重复 marker");
+      expect(documented).toContain(path === "README.md" ? "each outbound tool chain" : "每条出站工具链");
+      expect(documented).toContain(path === "README.md" ? "distinct reply marker" : "reply marker");
+      expect(documented).toContain(path === "README.md" ? "private 0600 signal file" : "0600 信号文件");
+      expect(documented).toContain("timing_barriers_intact=true");
+      expect(documented).toContain("distinct_claude_session_ids=true");
+      expect(documented).toContain("distinct_bridge_addresses=true");
+      expect(documented).toContain(path === "README.md" ? "non-error `SendMessage` result" : "非错误且唯一的");
+      expect(documented).toContain(path === "README.md" ? "wait result before" : "等待结果必须早于");
+      expect(documented).toContain(path === "README.md" ? "share one 180-second deadline" : "同一个 180 秒总时限");
+      expect(documented).toContain(path === "README.md" ? "one 20-second readiness" : "同一个 20 秒 readiness");
+      expect(documented).toContain(path === "README.md" ? "full stream" : "完整流");
+      expect(documented).toContain(path === "README.md" ? "direct, top-level, singleton" : "顶层、直接且单独");
+      expect(documented).toContain(path === "README.md" ? "only non-error result" : "唯一且非错误");
+      expect(documented).toContain(path === "README.md" ? "foreign or child session" : "外来 session 或子 agent");
+      expect(documented).toContain(path === "README.md" ? "no unrelated tool call" : "不能插入无关工具");
+      expect(documented).toContain(path === "README.md" ? "non-null `agent_id`" : "非空 `agent_id`");
+      expect(documented).toContain("`parent_tool_use_id`");
+      expect(documented).toContain("`isReplay`");
+      expect(documented).toContain(path === "README.md" ? "blocking exit 2" : "退出码 2");
+      expect(documented).toContain(path === "README.md" ? "malformed envelopes" : "畸形 envelope");
+      expect(documented).toContain(path === "README.md" ? "two distinct confirmed" : "两个不同的 confirmed");
+      expect(documented).toContain(path === "README.md" ? "4,096 nodes" : "4096 个节点");
+      expect(documented).toContain("4 MiB");
+      expect(documented).toContain("tool_use_id");
+      expect(documented).toContain(path === "README.md" ? "previous session cannot" : "上一条 session");
+      expect(documented).toContain(path === "README.md" ? "share the consume lock" : "共用 consume lock");
+      expect(documented).toContain("`blockers`");
+      expect(documented).toContain("claude_auth_status");
+      expect(documented).toContain("claude_auth_required");
+      expect(documented).toContain("worker_upgrade_required");
+      expect(documented).toContain("runtime_peer_unavailable");
+      expect(documented).toContain("agentparty_unavailable");
+      expect(documented).toContain("receiver_identity");
+      expect(documented).toContain("sender_channel_access");
+      expect(documented).toContain("not_checked");
+      expect(documented).toContain("invalid_request");
+      expect(documented).toContain("environment_unavailable");
+      expect(documented).toContain("internal_error");
+      expect(documented).toContain("`error_code`");
+      expect(documented).toContain("AGENTPARTY_RUNTIME_SMOKE_TOKEN");
+      expect(documented).toContain("caller_binding=live_socket");
+      expect(documented).toContain("--capability-only");
+      expect(documented).toContain("sockets_closed=true");
+      expect(documented).toContain(path === "README.md" ? "sends no Channel or Claude message" : "不发送 Channel 或 Claude 消息");
+      expect(documented).toContain("protocol_checked=false");
+      expect(documented).toContain(path === "README.md" ? "10-second" : "10 秒截止时间");
+      expect(documented).toContain("worker_deployment_status");
+      expect(documented).toContain("worker_deployment_unavailable");
+      expect(documented).toContain("development_unversioned");
+      expect(documented).toContain("agentparty.claude-cross-session-native-preflight.v1");
+      expect(documented).toContain("model_calls_started=false");
+      expect(documented).toContain("receiver_lifecycle_activity_observed=true");
+      expect(documented).toContain("sender_lifecycle_activity_observed=true");
+      expect(documented).toContain(path === "README.md" ? "native delivery" : "原生送达");
+      expect(documented).toContain("error_code=invalid_arguments");
+      expect(documented).toContain("internal_error");
+      expect(documented).toContain("request|preflight|receiver_startup|execution|evidence|internal");
+      expect(documented).toContain("delivery_verified=true");
+      expect(documented).toContain("party who --json");
+      expect(documented).toContain("same_node");
+      expect(documented).toContain("cross_session=session_start_unarmed");
+      expect(documented).toContain(path === "README.md" ? "while Claude is still running" : "Claude 仍运行");
+      expect(documented).toContain(path === "README.md" ? "all three signals" : "三项未齐");
     }
   });
 
