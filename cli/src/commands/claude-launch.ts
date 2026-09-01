@@ -10,6 +10,8 @@ import {
   writeClaudeDefaultArgs,
 } from "../claude-default-args";
 import { agentpartyHome, readConfig, refreshConfigInPlace } from "../config";
+import { stripTerminalControls } from "../format";
+import { fetchMe } from "../rest";
 import { normalizeWakeLang } from "../wake-note-i18n";
 import { MCP_OPT_IN_ENV } from "../mcp-session-binding";
 import {
@@ -175,6 +177,8 @@ export interface ClaudeLaunchDependencies {
   rebindToken?(channel: string | undefined): Promise<number>;
   /** #1031：重绑前用来判「凭据能不能发往这个地址」的 server；缺省读本地 config。 */
   configServer?(): string | null;
+  /** #1031：先验后写——用这个 token 问一次 /api/me；缺省真打网络。 */
+  verifyToken?(server: string, token: string): Promise<{ kind: string } | null>;
   /** #1013：把本机插件对齐到 `cliVersion`（默认 syncClaudePluginToCli）；测试注入。 */
   syncPlugin?: (cliVersion: string) => ClaudePluginSyncResult;
   launch(args: string[], env: NodeJS.ProcessEnv): ClaudeLaunchResult;
@@ -325,6 +329,15 @@ export function rebindInitArgs(channel: string | undefined): string[] {
   return ["--harness", "claude", ...(channel === undefined ? [] : ["--channel", channel])];
 }
 
+/** 先验后写用的探针：拿这个 token 问一次 /api/me，任何失败都返回 null。 */
+async function defaultVerifyToken(server: string, token: string): Promise<{ kind: string } | null> {
+  try {
+    return await fetchMe(server, token, AbortSignal.timeout(5_000));
+  } catch {
+    return null;
+  }
+}
+
 /** 当前 config 指向的 server；读不到就返回 null（交给 init 自己报错）。 */
 function defaultConfigServer(): string | null {
   return readConfig()?.server ?? null;
@@ -418,8 +431,27 @@ export async function run(
     // 的兄弟身份探活同一条：token 一旦上路就收不回来。
     const target = (deps.configServer ?? defaultConfigServer)();
     if (target !== null && !safeTokenTarget(target)) {
-      console.error(`拒绝把 AGENTPARTY_TOKEN 发往明文地址：${target}（只允许 https，或 loopback 上的 http）`);
+      // server 来自本地 config，是文件内容不是我们写的常量：进终端前必须清洗
+      // （ANSI / 控制字符能伪造输出，CodeRabbit on #1031）。
+      console.error(
+        `拒绝把 AGENTPARTY_TOKEN 发往明文地址：${stripTerminalControls(target)}（只允许 https，或 loopback 上的 http）`,
+      );
       return 1;
+    }
+    // 先验后写：`party init` 会**覆盖**已有 config，而这条命令是启动器——一个手滑设错的
+    // AGENTPARTY_TOKEN 不该把原本还能用的身份毁掉（CodeRabbit on #1031）。先拿它问一次
+    // /api/me，确认是个 agent 再落盘。
+    if (target !== null) {
+      const verify = deps.verifyToken ?? defaultVerifyToken;
+      const verified = await verify(target, envToken);
+      if (verified === null) {
+        console.error("AGENTPARTY_TOKEN 没能通过服务端校验，已保留原有身份不动；换一个有效 token 再试");
+        return 1;
+      }
+      if (verified.kind !== "agent") {
+        console.error(`AGENTPARTY_TOKEN 不是 agent 身份（kind=${stripTerminalControls(verified.kind)}），已保留原有身份不动`);
+        return 1;
+      }
     }
     const rebind = deps.rebindToken ?? defaultRebindToken;
     const code = await rebind(channel);
