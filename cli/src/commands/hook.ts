@@ -1322,7 +1322,7 @@ export function defaultCodexStopWakeDeps(
     },
     readSeen: readCodexStopWakeSeen,
     recordSeen: (path, seq, at) => recordCodexStopWakeSeen(path, seq, at),
-    emit: (line) => console.log(line),
+    emit: (line) => emitHookLine(line),
     log: (line) => appendCodexAutoWakeLog(home, line),
     now: () => Date.now(),
     wakeLang: async (channel, cwd) => {
@@ -1826,7 +1826,8 @@ async function runHookInput(blockStop: boolean): Promise<number> {
     // recent permission/tool/idle push must not mask that the model was kept
     // alive for another continuation.
     reportHookPayload(record, "working", true);
-    console.log(JSON.stringify({
+    // 唯一允许写 stdout 的出口（#1032）：闸内其余 console.log 都被改道去了 stderr。
+    emitHookLine(JSON.stringify({
       decision: "block",
       reason:
         `AgentParty still has ${pendingCount} delivered execution${pendingCount === 1 ? "" : "s"} ` +
@@ -1840,6 +1841,40 @@ async function runHookInput(blockStop: boolean): Promise<number> {
   return 0;
 }
 
+/**
+ * hook 路径的 stdout 闸（#1032）。
+ *
+ * 这些子命令的输出契约是「要么零字节，要么恰好一行 JSON」——codex 拿 stdout 当 Stop hook 的
+ * 决策，Claude 拿 stdout 当模型上下文。可路径上任何一处 `console.log`（我们自己的、还是某个
+ * 被 import 进来的模块的）都会直接落进那条信道并让它变成非法输出。真机实测：一个交互式 codex
+ * 会话轮次结束时报 `hook returned invalid stop hook JSON output`。
+ *
+ * `party mcp` 早就为同一个原因做过这件事（#596：stdio 是 JSON-RPC 信道）。这里照抄：把
+ * console.log 改道到 stderr，只留一条显式通道给真正要写的那行。
+ *
+ * 注意这不是「猜哪里会打印」——它让契约与打印点解耦：以后谁往这条路径上加日志都不会再破坏它。
+ */
+export async function withHookStdoutGuard(body: () => Promise<number>): Promise<number> {
+  const previous = console.log;
+  hookStdoutWrite = (line: string) => previous(line);
+  console.log = (...args: unknown[]) => console.error(...args);
+  try {
+    return await body();
+  } finally {
+    console.log = previous;
+    hookStdoutWrite = null;
+  }
+}
+
+/** 闸打开期间，唯一允许写 stdout 的通道；闸外为 null（照常用 console.log）。 */
+let hookStdoutWrite: ((line: string) => void) | null = null;
+
+/** hook 决策行的唯一出口：闸内走保留下来的真 stdout，闸外退回 console.log。 */
+export function emitHookLine(line: string): void {
+  if (hookStdoutWrite === null) console.log(line);
+  else hookStdoutWrite(line);
+}
+
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
@@ -1850,13 +1885,13 @@ export async function run(argv: string[]): Promise<number> {
   if (sub === "uninstall") return runUninstall(rest);
   if (sub === "status") return runStatus(rest);
   if (sub === "push") return runPush(rest);
-  if (sub === "codex-report") return runCodexHookInput();
-  if (sub === "codex-stop") return runCodexStopHookInput();
+  if (sub === "codex-report") return withHookStdoutGuard(() => runCodexHookInput());
+  if (sub === "codex-stop") return withHookStdoutGuard(() => runCodexStopHookInput());
   if (sub === "codex-autowake") return runCodexAutoWakeCommand(rest);
   if (sub !== "report" && sub !== "stop-guard") {
     // 会写 stderr 的分支只剩人在终端敲错子命令。真 hook 调用恒为 `hook report`，不受影响。
     console.error(HELP);
     return 1;
   }
-  return runHookInput(sub === "stop-guard");
+  return withHookStdoutGuard(() => runHookInput(sub === "stop-guard"));
 }
