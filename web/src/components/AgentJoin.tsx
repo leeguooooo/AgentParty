@@ -1015,12 +1015,13 @@ export function AgentJoin({
               )}
               {session.recover && activePlan === "resume" && (
                 <p className="agent-join-hint">
-                  {resumeTarget !== null
-                    ? t("AgentJoin.plan.resumeKnown", {
-                        sid: resumeTarget.sessionId,
-                        cwd: resumeTarget.cwd === null ? "" : ` (${resumeTarget.cwd})`,
-                      })
-                    : t("AgentJoin.plan.resumeUnknown")}
+                  {/* 三种状态各说各的实话：有 sid 有 cwd（命令里带 cd）/ 有 sid 没 cwd（必须在原目录跑，
+                      命令里没有 cd）/ 没 sid（--continue 接该目录最近一次）。 */}
+                  {resumeTarget === null
+                    ? t("AgentJoin.plan.resumeUnknown")
+                    : resumeTarget.cwd === null
+                      ? t("AgentJoin.plan.resumeKnownNoCwd", { sid: resumeTarget.sessionId })
+                      : t("AgentJoin.plan.resumeKnown", { sid: resumeTarget.sessionId, cwd: ` (${resumeTarget.cwd})` })}
                 </p>
               )}
               {session.recover && activePlan === "diagnose" && <p className="agent-join-hint">{t("AgentJoin.plan.diagnoseHint")}</p>}

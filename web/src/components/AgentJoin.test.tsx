@@ -972,6 +972,31 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     );
   });
 
+  // codex stop-time review：有会话 id 但没记录目录时，命令里没有 cd，文案不能再说「先进到那个目录」。
+  test("recover + 上次会话有 id 但没记录 cwd ⇒ 命令不带 cd，文案明说要在原目录跑", () => {
+    const r = render(undefined, null, {
+      recoverName: "aaa",
+      presence: [
+        {
+          name: "aaa",
+          kind: "agent",
+          state: "offline",
+          note: null,
+          ts: NOW - 60_000,
+          last_seen: NOW - 60_000,
+          agent_session: { harness: "claude", session_id: "sid-no-cwd", updated_at: NOW - 60_000 },
+        } as unknown as PresenceEntry,
+      ],
+      messages: [],
+      now: () => NOW,
+    });
+    expect(joinCmd(r)).toBe("party claude demo -- --resume sid-no-cwd");
+    const hints = r.root.findAll((n) => n.props.className === "agent-join-hint").map((n) => String(n.children.join("")));
+    const hint = hints.find((h) => h.includes("sid-no-cwd")) ?? "";
+    expect(/directory|目录/.test(hint)).toBe(true);
+    expect(/changes into|先进到/.test(hint)).toBe(false);
+  });
+
   test("recover 身份猜不出 harness（other）且无上次会话 ⇒ 没有「接着上次」这一档，默认先诊断", () => {
     const r = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });
     const plans = r.root.findAll((n) => typeof n.props["data-plan"] === "string").map((n) => n.props["data-plan"]);
