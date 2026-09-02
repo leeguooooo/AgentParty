@@ -79,14 +79,21 @@ migrate() {
   ( cd "$REPO/worker" && node "$(wrangler_js)" d1 migrations apply agentparty --local --persist-to "$DATA_DIR" )
 }
 
-start() {
+# 版本元数据：注入到 /api/health 的 version / commit / deployed_at。
+# 生产部署由 worker/scripts/deployment-metadata.mjs 用同样的 --define 注入；这里是它的 POSIX sh 等价物。
+# 没有它，自部署实例永远报 version=dev、commit=unknown，升级后根本核不出「跑的是哪一版」。
+repo_version() {
+  v="$(sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$REPO/cli/package.json" 2>/dev/null | head -1)"
+  printf '%s' "${v:-dev}"
+}
+repo_commit() { git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unknown'; }
+
+# start 与 run 的公共前置：预检、数据目录、secret、迁移、.dev.vars。
+prepare() {
   preflight
   # D1 里存着**所有 token**，DO 存储里是频道全部内容：只给属主（真机实测改之前是 0755/0644）。
   ( umask 077; mkdir -p "$DATA_DIR" )
   chmod 700 "$DATA_DIR"
-  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-    die "已经在跑了（pid $(cat "$PIDFILE")）。先 \`$0 stop\`。"
-  fi
   [ -n "${AGENTPARTY_ADMIN_SECRET:-}" ] || die "必须设 AGENTPARTY_ADMIN_SECRET —— 自部署没有任何登录方式，第一个 token 只能靠它铸出来（见 docs/self-host-intranet.md）。"
   migrate
   # 凭据**绝不进 argv**：`ps -axww` 同机任何用户都看得见（真机实测：改之前那里明文躺着
@@ -94,15 +101,40 @@ start() {
   vars="$REPO/worker/.dev.vars"
   ( umask 077; printf 'HOSTED_MEMBERSHIP_GATING=false\nADMIN_SECRET=%s\n' "$AGENTPARTY_ADMIN_SECRET" > "$vars" )
   chmod 600 "$vars"
+}
+
+# 用 workerd 替换当前进程（exec）：调用方的 pid 就是 worker 的 pid，退出码原样透传。
+# `run` 直接用它（systemd Type=exec / 容器入口）；`start` 通过 `_launch` 在后台用它。
+launch() {
+  W="$(wrangler_js)"
+  version="$(repo_version)"
+  commit="$(repo_commit)"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cd "$REPO/worker" || die "进不去 $REPO/worker"
+  exec node "$W" dev --local --ip "$HOST" --port "$PORT" --persist-to "$DATA_DIR" \
+    --define "__AGENTPARTY_BUILD_VERSION__:\"${version}\"" \
+    --define "__AGENTPARTY_BUILD_COMMIT__:\"${commit}\"" \
+    --define "__AGENTPARTY_DEPLOYED_AT__:\"${started_at}\""
+}
+
+run() {
+  prepare
+  note "前台启动 workerd（$HOST:${PORT}，数据在 ${DATA_DIR}）；日志走标准输出"
+  launch
+}
+
+start() {
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+    die "已经在跑了（pid $(cat "$PIDFILE")）。先 \`$0 stop\`。"
+  fi
+  prepare
   note "启动 workerd（$HOST:${PORT}，数据在 ${DATA_DIR}）"
   # pid 必须是 **worker 自己的**。写成 `( ... & echo $! )` 记下的是这条子 shell 的 pid：
   # setsid 会把 node 放进新的会话组，于是 `kill -- -$pid` 根本够不到它——旧版 stop 因此
   # 「打印已停、删掉 pidfile，而 worker 还在跑」，是静默失败（真机实测撞到）。
-  # 让子进程先把自己的 $$ 写下来再 exec：exec 之后这个 pid 就是 node 的 pid。
-  W="$(wrangler_js)"
+  # 让子进程先把自己的 $$ 写下来，再 exec 进本脚本的 _launch → exec node：pid 全程不变。
   rm -f "$PIDFILE"
-  ( cd "$REPO/worker" && setsid sh -c 'echo $$ > "$1"; shift; exec "$@"' _ "$PIDFILE" \
-      node "$W" dev --local --ip "$HOST" --port "$PORT" --persist-to "$DATA_DIR" \
+  ( setsid sh -c 'echo $$ > "$1"; shift; exec "$@"' _ "$PIDFILE" sh "$0" _launch \
       >"$LOG" 2>&1 </dev/null & )
   i=0; while [ ! -s "$PIDFILE" ] && [ "$i" -lt 50 ]; do i=$((i + 1)); sleep 0.2; done
   [ -s "$PIDFILE" ] || die "启动后没拿到 pid，看日志：${LOG}"
@@ -157,10 +189,17 @@ status() {
 
 usage() {
   cat <<EOF
-usage: $0 <start|stop|status|migrate|preflight>
+usage: $0 <start|stop|status|run|migrate|preflight>
+
+  start      后台启动（pidfile + 日志文件），配合 stop / status
+  run        前台启动，日志走标准输出；给 systemd（Type=exec）或容器入口用
+  stop       停掉 start 起的那个进程（只认自己的 pidfile，不碰别的进程）
+  status     进程与 /api/health
+  migrate    只应用 D1 迁移
+  preflight  只做预检（Node 版本、web 产物）
 
 环境变量：
-  AGENTPARTY_ADMIN_SECRET   必填（start）。铸第一个 token 用，见 docs/self-host-intranet.md
+  AGENTPARTY_ADMIN_SECRET   必填（start / run）。铸第一个 token 用，见 docs/self-host-intranet.md
   AGENTPARTY_SELFHOST_DATA  状态目录，默认 <repo>/.selfhost-state（备份就备份它）
   AGENTPARTY_SELFHOST_HOST  默认 0.0.0.0
   AGENTPARTY_SELFHOST_PORT  默认 8787
@@ -169,6 +208,8 @@ EOF
 
 case "${1:-}" in
   start) start ;;
+  run) run ;;
+  _launch) launch ;;
   stop) stop ;;
   status) status ;;
   migrate) migrate ;;

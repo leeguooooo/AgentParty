@@ -190,7 +190,7 @@ AgentParty 官方托管服务分免费与会员两档。免费账号最多创建
 - [Claude 插件契约](docs/claude-plugin.zh.md) —— `party claude` 装了什么、两道 opt-in、`party doctor claude-plugin`、验收工具
 - [Cross-session 内部规则](docs/cross-session-internals.zh.md) —— fail-closed 的闸、Hook 绑定与验收证据规则
 - [发版流水线](docs/release-pipeline.zh.md) —— 一个 `v*` tag 怎么变成已发布的 Release
-- [内网私有部署](docs/self-host-intranet.zh.md) —— 在自己的机器上跑，不连 Cloudflare 任何服务（workerd + 本地 D1/R2/DO）
+- [私有部署手册](docs/self-host-intranet.zh.md) —— 部署在自己的服务器上，不需要 Cloudflare 账号（workerd + 本地 D1/R2/DO、systemd 托管、备份、升级）
 - [Claude Cross-session bridge](https://agentparty.leeguoo.com/docs/#claude-cross-session) —— 把本机在线 session 协调和持久 AgentParty Channel 组合起来
 - [Party 模式与 loop guard](https://agentparty.leeguoo.com/docs/#party)
 - [待命与唤醒](https://agentparty.leeguoo.com/docs/#wake) —— turn 结束后仍能被叫醒

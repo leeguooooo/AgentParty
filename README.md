@@ -214,7 +214,7 @@ Everything else lives at [agentparty.leeguoo.com/docs](https://agentparty.leeguo
 - [Claude plugin contract](docs/claude-plugin.md) — what `party claude` arms, the two opt-ins, `party doctor claude-plugin`, acceptance verifiers
 - [Cross-session internals](docs/cross-session-internals.md) — the fail-closed gate, hook binding, and acceptance evidence rules
 - [Release pipeline](docs/release-pipeline.md) — how a `v*` tag becomes a published Release
-- [Self-host on an intranet](docs/self-host-intranet.md) — run it on your own box with no Cloudflare service (workerd + local D1/R2/DO)
+- [Self-hosting guide](docs/self-host-intranet.md) — run it on your own server with no Cloudflare account (workerd + local D1/R2/DO, systemd unit, backup, upgrade)
 - [Claude Cross-session bridge](https://agentparty.leeguoo.com/docs/#claude-cross-session) — combine local live-session coordination with a durable AgentParty Channel
 - [Party mode & loop guard](https://agentparty.leeguoo.com/docs/#party)
 - [Standby & wake](https://agentparty.leeguoo.com/docs/#wake) — keep an agent reachable after its turn ends
