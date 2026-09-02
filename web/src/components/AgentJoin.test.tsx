@@ -26,7 +26,7 @@ mock.module("../lib/api", () => ({
 // agentTokenVault 单测。#642 仍通过受控的 execCommand 返回值覆盖成功/失败。
 let copyResult = true;
 
-const { AgentJoin, wakeableSessionCommand, wakeableCommandCarriesToken } = await import("./AgentJoin");
+const { AgentJoin, wakeableSessionCommand, wakeableCommandCarriesToken, recoverCommand, recoverHarness } = await import("./AgentJoin");
 
 class TestEventTarget {
   private listeners = new Map<string, Set<(event: unknown) => void>>();
@@ -637,15 +637,14 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     } as unknown as MsgFrame;
   }
 
-  test("刚生成命令：①② 在做，③④ 等前面（没报到就不许打勾）", async () => {
+  // #1040：四步门控卡片改成「命令区 + 三盏灯」。灯的 data-step 沿用 2/3/4，判据一字不差；
+  // 「装 party」不再是一步，变成命令区里的开关（见下面的用例）。
+  test("刚生成命令：报到灯在等，后两盏未亮（没报到就不许打勾）", async () => {
     const s = stepper();
     await s.generate();
-    expect([statusOf(s.r, 1), statusOf(s.r, 2), statusOf(s.r, 3), statusOf(s.r, 4)]).toEqual([
-      "active",
-      "active",
-      "pending",
-      "pending",
-    ]);
+    expect([statusOf(s.r, 2), statusOf(s.r, 3), statusOf(s.r, 4)]).toEqual(["active", "pending", "pending"]);
+    // 命令不再门控：接入命令与起会话命令一开始就都给出来
+    expect(s.r.root.findAll((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "session")).toHaveLength(1);
   });
 
   test("频道里出现它的报到消息 ⇒ ②（连同①）打勾并展开③", async () => {
@@ -653,7 +652,7 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     await s.generate();
     const name = agentName(s.r);
     s.rerender({ messages: [msgOf({ seq: 88, sender: { name, kind: "agent" } })] });
-    expect([statusOf(s.r, 1), statusOf(s.r, 2), statusOf(s.r, 3)]).toEqual(["done", "done", "active"]);
+    expect([statusOf(s.r, 2), statusOf(s.r, 3)]).toEqual(["done", "active"]);
     // 摘要要带真实 seq，不是「命令复制过了」。
     const done = s.r.root.findAll((n) => n.props.className === "agent-join-step-status agent-join-step-status--done t-mono");
     expect(done.some((n) => String(n.children.join("")).includes("88"))).toBe(true);
@@ -764,11 +763,15 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(join).toContain("party join");
     expect(join).not.toContain("install.sh");
     expect(join).not.toContain("#");
-    // ① 那条才是安装命令，两者不重复。
-    const install = String(
-      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "install").props.children[0].props.children,
+    // #1040：安装命令不再单列一步，变成「那台机器还没装」开关——勾上才并进同一条命令，一次复制。
+    expect(s.r.root.findAll((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "install")).toHaveLength(0);
+    const toggle = s.r.root.find((n) => n.props.type === "checkbox" && typeof n.props.onChange === "function");
+    act(() => toggle.props.onChange({ target: { checked: true } }));
+    const joined = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
     );
-    expect(install).toContain("install.sh");
+    expect(joined.startsWith("curl -fsSL")).toBe(true);
+    expect(joined).toContain("install.sh | sh && AGENTPARTY_TOKEN=");
   });
 
   // codex stop-time review on 3d65e20：无人值守脚本自带「版本闸 + 缺了才装」，① 再给一条
@@ -915,7 +918,7 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"))).toHaveLength(1);
   });
 
-  test("guideSession 的 recover 形态：② 是 party recover，不含 token、不渲染安全警告", () => {
+  test("guideSession 的 recover 形态：默认「接着上次的对话」，切到「先诊断」才是 party recover；不含 token、不渲染安全警告", () => {
     const r = render(undefined, null, {
       guideSession: {
         name: "helper-bot",
@@ -930,9 +933,73 @@ describe("AgentJoin 分步引导 (#1005)", () => {
       messages: [],
       now: () => NOW,
     });
-    expect(joinCmd(r)).toBe("party recover demo");
+    // codex 身份、presence 没记上次会话 ⇒ 接最近一次 thread
+    expect(joinCmd(r)).toBe("party bridge codex demo --resume-last");
     expect(joinCmd(r)).not.toContain("AGENTPARTY_TOKEN");
     expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"))).toHaveLength(0);
+    act(() => {
+      r.root.find((n) => n.props.type === "radio" && String(n.props.value) === "diagnose").props.onChange();
+    });
+    expect(joinCmd(r)).toBe("party recover demo");
+  });
+
+  // #1040：owner 要的就是这个——「用户一般想直接 resume 一个对话」。presence.agent_session 记了
+  // 上次会话 id 时，重连命令精确到 --resume <id>，harness 也以那次会话为准（名字猜错也不怕）。
+  test("recover + presence 记了上次 claude 会话 ⇒ 默认命令精确 --resume <session_id>", () => {
+    const r = render(undefined, null, {
+      recoverName: "aaa",
+      presence: [
+        {
+          name: "aaa",
+          kind: "agent",
+          state: "offline",
+          note: null,
+          ts: NOW - 60_000,
+          last_seen: NOW - 60_000,
+          agent_session: { harness: "claude", session_id: "8aff5437-4afc-4be7-997c-a8c64584927d", updated_at: NOW - 60_000, cwd: "/work/demo" },
+        } as unknown as PresenceEntry,
+      ],
+      messages: [],
+      now: () => NOW,
+    });
+    expect(joinCmd(r)).toBe("party claude demo -- --resume 8aff5437-4afc-4be7-997c-a8c64584927d");
+    const on = r.root.find((n) => String(n.props.className ?? "").includes("agent-join-plan-option--on"));
+    expect(on.props["data-plan"]).toBe("resume");
+    const toggle = r.root.find((n) => n.props.type === "checkbox" && typeof n.props.onChange === "function");
+    act(() => toggle.props.onChange({ target: { checked: true } }));
+    expect(joinCmd(r)).toBe(
+      "curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh && party claude demo -- --resume 8aff5437-4afc-4be7-997c-a8c64584927d",
+    );
+  });
+
+  test("recover 身份猜不出 harness（other）且无上次会话 ⇒ 没有「接着上次」这一档，默认先诊断", () => {
+    const r = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });
+    const plans = r.root.findAll((n) => typeof n.props["data-plan"] === "string").map((n) => n.props["data-plan"]);
+    expect(plans).toEqual(["diagnose", "fresh"]);
+    expect(joinCmd(r)).toBe("party recover demo");
+  });
+});
+
+describe("recoverCommand（#1040 重连三档）", () => {
+  const claudeResume = { harness: "claude" as const, sessionId: "sid-1", cwd: null };
+  test("resume：claude 有 sid 精确 --resume，没有用 --continue；codex 有 thread 用 --resume，没有 --resume-last", () => {
+    expect(recoverCommand("resume", "ludo", "claude", claudeResume)).toBe("party claude ludo -- --resume sid-1");
+    expect(recoverCommand("resume", "ludo", "claude", null)).toBe("party claude ludo -- --continue");
+    expect(recoverCommand("resume", "ludo", "codex", { harness: "codex", sessionId: "t-1", cwd: null })).toBe("party bridge codex ludo --resume t-1");
+    expect(recoverCommand("resume", "ludo", "codex", null)).toBe("party bridge codex ludo --resume-last");
+  });
+  test("claude 的 resume 带 token 走环境变量前缀；codex 绝不加", () => {
+    expect(recoverCommand("resume", "ludo", "claude", claudeResume, "ap_x")).toBe("AGENTPARTY_TOKEN='ap_x' party claude ludo -- --resume sid-1");
+    expect(recoverCommand("resume", "ludo", "codex", null, "ap_x")).toBe("party bridge codex ludo --resume-last");
+  });
+  test("fresh 与第③步同一条；diagnose 恒为 party recover", () => {
+    expect(recoverCommand("fresh", "ludo", "claude", claudeResume)).toBe("party claude ludo");
+    expect(recoverCommand("diagnose", "ludo", "claude", claudeResume)).toBe("party recover ludo");
+  });
+  test("presence 的 codex-sdk 会话按 codex 处理；harness 以上次会话为准", () => {
+    expect(recoverHarness("other", { harness: "codex-sdk", sessionId: "t", cwd: null })).toBe("codex");
+    expect(recoverHarness("codex", { harness: "claude", sessionId: "s", cwd: null })).toBe("claude");
+    expect(recoverHarness("other", null)).toBe("other");
   });
 });
 

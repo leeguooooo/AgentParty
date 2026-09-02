@@ -5767,28 +5767,9 @@ button.org-person-name {
 .agent-join-namewarn { margin: 0; }
 .agent-join-actions { display: flex; justify-content: flex-end; }
 
-/* 接入分步引导（#1005）。四步卡片：done 折叠成一行摘要，active 展开当前该做的那条命令，
-   pending 只留标题 + 「等上一步完成」。序号用 ①②③④/✓ 自己画，所以 ol 不要浏览器默认编号。 */
+/* 接入引导（#1005 → #1040 重构为「命令区 + 三盏灯」）。step-head/mark/title/status/body 这组
+   类名由三盏灯沿用；灯与命令区自身的规则在文件末尾的 #1040 段。 */
 .agent-join-card--stepper { width: min(680px, 94vw); }
-.agent-join-steps {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.agent-join-step {
-  border: 1.6px solid var(--d-ink);
-  background: var(--t-panel);
-  padding: 11px 13px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-.agent-join-step--active { box-shadow: 3px 3px 0 var(--d-shadow); }
-.agent-join-step--pending { opacity: 0.55; border-style: dashed; }
-.agent-join-step--done { background: var(--t-panel2); }
 .agent-join-step-head {
   display: flex;
   align-items: baseline;
@@ -5815,7 +5796,6 @@ button.org-person-name {
 }
 .agent-join-step-status--done { color: var(--d-green, #1f7a3d); }
 .agent-join-step-body { display: flex; flex-direction: column; gap: 8px; }
-.agent-join-step-wait { margin: 0; font-size: 12px; color: var(--t-dim); }
 .agent-join-probe { display: flex; flex-direction: column; gap: 6px; }
 .agent-join-probe-btn { align-self: flex-start; font-size: 13px; }
 .agent-join-senderr { margin: 0; }
@@ -8639,3 +8619,49 @@ button.org-person-name {
   background: var(--d-amber-soft);
   color: var(--d-amber);
 }
+
+/* #1040 引导重构：命令区（三档 + 安装开关）+ 三盏状态灯，取代四步门控卡片。 */
+.agent-join-plan { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.agent-join-plan-options {
+  border: 1.6px solid var(--d-ink);
+  padding: 8px 10px 10px;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.agent-join-plan-options > legend { padding: 0 4px; }
+.agent-join-plan-option {
+  flex: 1 1 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1.6px dashed var(--d-ink);
+  cursor: pointer;
+  background: var(--t-panel);
+}
+.agent-join-plan-option--on { border-style: solid; box-shadow: 3px 3px 0 var(--d-shadow); background: var(--t-panel2); }
+.agent-join-plan-option > input { position: absolute; opacity: 0; pointer-events: none; }
+.agent-join-plan-option-title { font-size: 13px; font-weight: 700; }
+.agent-join-plan-option-desc { font-size: 11.5px; color: var(--t-dim); }
+.agent-join-plan-install { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--t-dim); cursor: pointer; }
+.agent-join-lights {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-join-light {
+  border: 1.6px solid var(--d-ink);
+  background: var(--t-panel);
+  padding: 9px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-join-light--done { background: var(--t-panel2); }
+.agent-join-light--pending { opacity: 0.6; border-style: dashed; }
+.agent-join-light--active { box-shadow: 3px 3px 0 var(--d-shadow); }

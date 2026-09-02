@@ -1,10 +1,14 @@
 // 频道页「＋ 让 agent 加入」：登录人类先给 agent 起个能认出来的名字（默认 <你>-<频道>，
-// 可改成 drawstyle-review 这类），再铸一枚 channel-scoped agent token，然后进入**分步引导**（#1005）：
-//   ① 装 party → ② 在 agent 里跑接入命令 → ③ 起一个可唤醒的会话 → ④ 验证 → ✅ 接入完成
-// 每一步的 ✓ 来自服务端真实信号（presence / 历史，判据在 lib/joinStepper），不是本地猜；
+// 可改成 drawstyle-review 这类），再铸一枚 channel-scoped agent token，然后进入引导。
+//
+// #1040 重构：从「四步门控卡片」改成「命令区 + 三盏灯」——
+//   命令区：该给的命令全部直接给出，不再等上一步；「装 party」是一个开关（勾了并进同一条命令）。
+//   三盏灯：已报到 / 能被唤醒 / 回了测试 @ ——只按服务端真实信号亮（presence / 历史，判据在
+//   lib/joinStepper，与从前 ②③④ 一字不差），不按「命令复制过了」。
 // 弹窗打开时靠频道页传进来的 WS 流（拿不到就 2–3s 轮询），关掉即停。
 // 明文 token 只出现这一次（spec §10）：关掉再打开只能「重新生成」。
-// 「恢复/重连」（成员详情里的「重新接上」）走同一个 stepper，② 换成 `party recover <chan>`（#991）。
+// 「恢复/重连」（成员详情里的「重新接上」）走同一个弹窗，三档可选：接着上次的对话（默认；
+// presence.agent_session 记了上次会话 id 就精确 --resume）/ 开个新会话 / 先诊断（party recover）。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
 import { WAKE_VERIFY_PREFIX } from "@agentparty/shared";
@@ -42,7 +46,6 @@ import {
   verifyTimeoutTier,
   wakeableEvidence,
   type StepId,
-  type StepStatus,
   type VerifyProbe,
 } from "../lib/joinStepper";
 import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
@@ -158,6 +161,13 @@ type Phase =
 
 export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_SH_RAW_URL} | sh`;
 
+/** 三盏灯与从前 ②③④ 的判据一一对应（data-step 沿用数字，测试与样式不用改口径）。 */
+const LIGHTS: ReadonlyArray<{ id: StepId; key: "checkin" | "wakeable" | "verified" }> = [
+  { id: 2, key: "checkin" },
+  { id: 3, key: "wakeable" },
+  { id: 4, key: "verified" },
+];
+
 /**
  * 第 ③ 步「起一个可唤醒的会话」的命令：与 CLI `party join` 第 3 步印的修法同一条（#979 / #989）。
  *
@@ -185,6 +195,68 @@ export function wakeableSessionCommand(
 /** 第 ③ 步这条命令里是否带了明文 token（决定要不要挂安全警告）。 */
 export function wakeableCommandCarriesToken(harness: JoinPackHarness, token?: string | null): boolean {
   return harness === "claude" && typeof token === "string" && /^[A-Za-z0-9_-]+$/.test(token);
+}
+
+/** 重连引导的三档（#1040）：接着上次的对话 / 开个新会话 / 先诊断。 */
+export type RecoverPlan = "resume" | "fresh" | "diagnose";
+
+/** presence 里该身份上次自报的可恢复模型会话（#522 agent_session）。 */
+export interface ResumeTarget {
+  harness: "claude" | "codex" | "codex-sdk";
+  sessionId: string;
+  cwd: string | null;
+}
+
+export function resumeTargetOf(presence: readonly PresenceEntry[], name: string): ResumeTarget | null {
+  const info = presence.find((entry) => entry.name === name)?.agent_session;
+  if (info === undefined || typeof info.session_id !== "string" || !/^[A-Za-z0-9_-]+$/.test(info.session_id)) return null;
+  return { harness: info.harness, sessionId: info.session_id, cwd: typeof info.cwd === "string" ? info.cwd : null };
+}
+
+/** 重连时真正用来起会话的 harness：presence 记了上次会话就以它为准，否则按名字猜的那个。 */
+export function recoverHarness(fallback: JoinPackHarness, resume: ResumeTarget | null): JoinPackHarness {
+  if (resume === null) return fallback;
+  return resume.harness === "claude" ? "claude" : "codex";
+}
+
+/** 该 harness 下有哪些档可选：other 没有「上次会话」的概念，只剩诊断与新会话。 */
+export function availableRecoverPlans(harness: JoinPackHarness): RecoverPlan[] {
+  return harness === "other" ? ["diagnose", "fresh"] : ["resume", "fresh", "diagnose"];
+}
+
+/**
+ * 重连命令（#1040）。
+ * - resume：claude → `party claude <slug> -- --resume <sid>`（没有 sid 用 `--continue` 接最近一次）；
+ *           codex → `party bridge codex <slug> --resume <thread>`（没有用 `--resume-last`）。
+ * - fresh：与第 ③ 步同一条（wakeableSessionCommand）。
+ * - diagnose：`party recover <slug>`。
+ * token 只给 claude 那条加 AGENTPARTY_TOKEN 前缀，理由同 wakeableSessionCommand。
+ */
+export function recoverCommand(
+  plan: RecoverPlan,
+  slug: string,
+  harness: JoinPackHarness,
+  resume: ResumeTarget | null,
+  token?: string | null,
+): string {
+  if (plan === "diagnose") return `party recover ${slug}`;
+  if (plan === "fresh") return wakeableSessionCommand(slug, harness, token);
+  if (harness === "claude") {
+    const safe = typeof token === "string" && /^[A-Za-z0-9_-]+$/.test(token) ? token : null;
+    const prefix = safe === null ? "" : `AGENTPARTY_TOKEN='${safe}' `;
+    const tail = resume !== null && resume.harness === "claude" ? `--resume ${resume.sessionId}` : "--continue";
+    return `${prefix}party claude ${slug} -- ${tail}`;
+  }
+  if (harness === "codex") {
+    const tail = resume !== null && resume.harness !== "claude" ? `--resume ${resume.sessionId}` : "--resume-last";
+    return `party bridge codex ${slug} ${tail}`;
+  }
+  return `party recover ${slug}`;
+}
+
+/** 勾了「那台机器还没装」：把安装命令并在前面，一次复制。 */
+export function withInstall(command: string): string {
+  return `${INSTALL_COMMAND} && ${command}`;
 }
 
 function relativeAge(t: TFunc, ts: number, now: number): string {
@@ -216,46 +288,6 @@ function CommandBlock({
         {copied ? t("AgentJoin.copied") : t("AgentJoin.copy")}
       </button>
     </div>
-  );
-}
-
-const STEP_MARK: Record<StepId, string> = { 1: "①", 2: "②", 3: "③", 4: "④" };
-
-function StepCard({
-  id,
-  status,
-  title,
-  summary,
-  children,
-  t,
-}: {
-  id: StepId;
-  status: StepStatus;
-  title: string;
-  /** done 时折叠后显示的一句话；active 时显示在标题右侧的等待/状态句。 */
-  summary: string | null;
-  children?: React.ReactNode;
-  t: TFunc;
-}) {
-  return (
-    <li className={`agent-join-step agent-join-step--${status}`} data-step={id} data-status={status}>
-      <div className="agent-join-step-head">
-        <span className={`t-mono agent-join-step-mark agent-join-step-mark--${status}`} aria-hidden="true">
-          {status === "done" ? "✓" : STEP_MARK[id]}
-        </span>
-        <span className="agent-join-step-title">{title}</span>
-        {status === "pending" && <span className="agent-join-step-status t-mono">{t("AgentJoin.step.pending")}</span>}
-        {status === "done" && summary !== null && (
-          <span className="agent-join-step-status agent-join-step-status--done t-mono" role="status">{summary}</span>
-        )}
-      </div>
-      {status === "active" && (
-        <div className="agent-join-step-body">
-          {children}
-          {summary !== null && <p className="agent-join-step-wait t-mono" role="status">{summary}</p>}
-        </div>
-      )}
-    </li>
   );
 }
 
@@ -312,6 +344,9 @@ export function AgentJoin({
   const [now, setNow] = useState(() => nowFn());
   // 关掉未完成的引导后可「继续接入」：只留形态与开始时刻，明文 token 一律不留。
   const [lastSession, setLastSession] = useState<StepperSession | null>(null);
+  // #1040：recover 三档与「并上安装命令」开关，每次打开引导复位。
+  const [plan, setPlan] = useState<RecoverPlan>("resume");
+  const [includeInstall, setIncludeInstall] = useState(false);
   // 每个身份的引导开始时刻：关掉再打开（含 recover 重开）沿用同一基线，报到证据不会因重开而丢。
   /**
    * 常驻的读屏播报区（#1005 codex review 第七轮）。live region 必须**先存在于 DOM**，
@@ -363,6 +398,8 @@ export function AgentJoin({
 
   const openStepper = useCallback(
     (session: StepperSession) => {
+      setPlan("resume");
+      setIncludeInstall(false);
       startedAtRef.current.set(session.name, session.sinceTs);
       baselineRef.current.set(session.name, session.baseline);
       setCopiedKey(null);
@@ -709,6 +746,24 @@ export function AgentJoin({
   }, [complete, lastSession, session]);
 
   const unattended = session?.mode === "unattended";
+  // #1040 recover：上次会话（presence.agent_session）决定 harness 与能否精确 --resume。
+  const resumeTarget = useMemo(() => (session === null ? null : resumeTargetOf(presence, session.name)), [presence, session]);
+  const effectiveHarness = session === null ? "other" : session.recover ? recoverHarness(session.harness, resumeTarget) : session.harness;
+  const plans = availableRecoverPlans(effectiveHarness);
+  const activePlan: RecoverPlan = plans.includes(plan) ? plan : plans[0]!;
+  const baseCommand =
+    session === null
+      ? ""
+      : session.recover
+        ? recoverCommand(activePlan, slug, effectiveHarness, resumeTarget, session.token)
+        : (session.command ?? "");
+  const mainCommand = includeInstall && !unattended && baseCommand !== "" ? withInstall(baseCommand) : baseCommand;
+  const sessionCommand = session === null ? "" : wakeableSessionCommand(slug, session.harness, session.token);
+  const showSessionCommand = session !== null && !session.recover && !unattended && session.command !== null;
+  const anyCommandCarriesToken =
+    session !== null &&
+    ((session.token !== null && (session.recover ? wakeableCommandCarriesToken(effectiveHarness, session.token) : true)) ||
+      (showSessionCommand && wakeableCommandCarriesToken(session.harness, session.token)));
   const step2Summary =
     checkin === null
       ? t("AgentJoin.step2.waiting")
@@ -921,130 +976,109 @@ export function AgentJoin({
               </button>
             </header>
 
-            <p className="agent-join-lead">{t(session.recover ? "AgentJoin.stepper.leadRecover" : "AgentJoin.stepper.lead")}</p>
+            <p className="agent-join-lead">{t(session.recover ? "AgentJoin.plan.leadRecover" : "AgentJoin.plan.lead")}</p>
 
-            <ol className="agent-join-steps">
-              {/* ① 装 party：网页看不见目标机，报到（②）即证明装了——② 过了一起打 ✓。 */}
-              <StepCard id={1} status={statuses[1]} title={t("AgentJoin.step1.title")} summary={null} t={t}>
-                {/* 无人值守脚本自带「版本闸 + 缺了才装」，② 里已经有一次；这里再给一条就是同一个弹窗
-                    出现两遍安装命令（codex stop-time review on 3d65e20），所以这一档只说明、不给命令。 */}
-                {unattended ? (
-                  <p className="agent-join-hint">{t("AgentJoin.step1.hintUnattended")}</p>
-                ) : (
-                  <>
-                    <p className="agent-join-hint">{t("AgentJoin.step1.hint")}</p>
-                    <CommandBlock
-                      id="install"
-                      command={INSTALL_COMMAND}
-                      copied={copiedKey === "install"}
-                      onCopy={() => void copy("install", INSTALL_COMMAND)}
-                      t={t}
-                    />
-                  </>
-                )}
-              </StepCard>
+            {/* #1040：从「四步门控卡片」改成「命令区 + 三盏状态灯」。命令全部直接给出、不再等上一步；
+                灯只按服务端真实信号亮（判据不变，仍在 lib/joinStepper）。recover 形态默认给
+                「接着上次的对话」那一条：presence.agent_session 记了上次会话 id 就精确 --resume。 */}
+            <section className="agent-join-plan">
+              {session.recover && (
+                <fieldset className="agent-join-plan-options">
+                  <legend className="agent-join-namelabel t-mono">{t("AgentJoin.plan.label")}</legend>
+                  {plans.map((value) => (
+                    <label
+                      key={value}
+                      className={`agent-join-plan-option${activePlan === value ? " agent-join-plan-option--on" : ""}`}
+                      data-plan={value}
+                    >
+                      <input
+                        type="radio"
+                        name="agent-join-plan"
+                        value={value}
+                        checked={activePlan === value}
+                        onChange={() => setPlan(value)}
+                      />
+                      <span className="agent-join-plan-option-title">{t(`AgentJoin.plan.${value}`)}</span>
+                      <span className="agent-join-plan-option-desc">{t(`AgentJoin.plan.${value}Desc`)}</span>
+                    </label>
+                  ))}
+                </fieldset>
+              )}
+              {session.recover && activePlan === "resume" && (
+                <p className="agent-join-hint">
+                  {resumeTarget !== null
+                    ? t("AgentJoin.plan.resumeKnown", {
+                        sid: resumeTarget.sessionId,
+                        cwd: resumeTarget.cwd === null ? "" : ` (${resumeTarget.cwd})`,
+                      })
+                    : t("AgentJoin.plan.resumeUnknown")}
+                </p>
+              )}
+              {session.recover && activePlan === "diagnose" && <p className="agent-join-hint">{t("AgentJoin.plan.diagnoseHint")}</p>}
+              {!session.recover && !unattended && session.command !== null && (
+                <p className="agent-join-hint">{t("AgentJoin.step2.runHint")}</p>
+              )}
 
-              {/* ② 跑接入命令：interactive = party join（含 token，只出现一次）；unattended = serve 脚本；recover = party recover。 */}
-              <StepCard
-                id={2}
-                status={statuses[2]}
-                title={t(
-                  session.recover
-                    ? "AgentJoin.step2.titleRecover"
-                    : unattended
-                      ? "AgentJoin.step2.titleUnattended"
-                      : "AgentJoin.step2.title",
-                )}
-                summary={step2Summary}
-                t={t}
-              >
-                {/* 明文 token 的安全警告：
-                    - 与分支解耦——interactive 与 unattended 的命令里都带 token，只挂一支会漏；
-                    - 排在命令块**之前**——无人值守是一段长脚本，放在后面会被推出视野，等于没警告
-                    （codex stop-time review on fc1aa5c / 2518fbe）。recover 不带 token，不渲染。 */}
-                {session.token !== null && (
-                  // 可见告警：给看得见的人。**播报交给常驻的 live region**（见 liveNote）——
-                  // 这块 banner 是随 token 一起挂载的，把 role="status" 挂在它身上并不可靠。
-                  <div className="banner banner--yellow agent-join-tokenbanner">
-                    <p className="agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
-                    <p className="agent-join-warn">{t("AgentJoin.tokenWarn")}</p>
-                  </div>
-                )}
-                {session.recover ? (
-                  <>
-                    <p className="agent-join-hint">{t("AgentJoin.step2.recoverHint")}</p>
-                    <CommandBlock
-                      id="join"
-                      command={session.command ?? `party recover ${slug}`}
-                      copied={copiedKey === "join"}
-                      onCopy={() => void copy("join", session.command ?? `party recover ${slug}`)}
-                      t={t}
-                    />
-                  </>
-                ) : session.command === null ? (
-                  // 关掉再打开：明文 token 已丢（只出现一次）——只能重新生成一枚。
-                  <div className="agent-join-regen">
-                    <p className="agent-join-hint">{t("AgentJoin.step2.tokenHidden")}</p>
+              {/* 明文 token 的安全警告：只挂一次、排在**所有**命令之前（无人值守是长脚本，放后面会被推出视野）。 */}
+              {anyCommandCarriesToken && (
+                <div className="banner banner--yellow agent-join-tokenbanner">
+                  <p className="agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
+                  <p className="agent-join-warn">{t("AgentJoin.tokenWarn")}</p>
+                </div>
+              )}
+
+              {session.recover ? (
+                <CommandBlock
+                  id="join"
+                  command={mainCommand}
+                  copied={copiedKey === "join"}
+                  onCopy={() => void copy("join", mainCommand)}
+                  t={t}
+                />
+              ) : session.command === null ? (
+                // 关掉再打开：明文 token 已丢（只出现一次）——只能重新生成一枚。
+                <div className="agent-join-regen">
+                  <p className="agent-join-hint">{t("AgentJoin.step2.tokenHidden")}</p>
+                  <button
+                    type="button"
+                    className="d-btn agent-join-regen-btn"
+                    disabled={rotateState === "busy"}
+                    onClick={() => void regenerate()}
+                  >
+                    {t(rotateState === "busy" ? "AgentJoin.step2.regenerating" : "AgentJoin.step2.regenerate")}
+                  </button>
+                  {rotateState === "error" && (
+                    <p className="banner banner--red" role="alert">{t("AgentJoin.errRotate")}</p>
+                  )}
+                </div>
+              ) : unattended ? (
+                desktopDetect() ? (
+                  // 桌面：选工作目录 + 直接就地运行（不复制接入包）。手动命令收进折叠作后备。
+                  <div className="agent-join-adopt">
+                    <p className="agent-join-hint">{t("AgentJoin.doneLeadUnattended")}</p>
                     <button
                       type="button"
-                      className="d-btn agent-join-regen-btn"
-                      disabled={rotateState === "busy"}
-                      onClick={() => void regenerate()}
+                      className="d-btn d-btn--primary agent-join-adopt-btn"
+                      disabled={adoptState === "busy" || adoptState === "done"}
+                      onClick={() => void adopt()}
                     >
-                      {t(rotateState === "busy" ? "AgentJoin.step2.regenerating" : "AgentJoin.step2.regenerate")}
-                    </button>
-                    {rotateState === "error" && (
-                      <p className="banner banner--red" role="alert">{t("AgentJoin.errRotate")}</p>
-                    )}
-                  </div>
-                ) : unattended ? (
-                  desktopDetect() ? (
-                    // 桌面：选工作目录 + 直接就地运行（不复制接入包）。手动命令收进折叠作后备。
-                    <div className="agent-join-adopt">
-                      <p className="agent-join-hint">{t("AgentJoin.doneLeadUnattended")}</p>
-                      <button
-                        type="button"
-                        className="d-btn d-btn--primary agent-join-adopt-btn"
-                        disabled={adoptState === "busy" || adoptState === "done"}
-                        onClick={() => void adopt()}
-                      >
-                        {t(
-                          adoptState === "busy"
-                            ? "AgentJoin.adoptBusy"
-                            : adoptState === "done"
-                              ? "AgentJoin.adoptDone"
-                              : "AgentJoin.adoptButton",
-                        )}
-                      </button>
-                      {adoptDir !== null && <span className="agent-join-hint t-mono agent-join-adopt-dir">{adoptDir}</span>}
-                      <span className="agent-join-hint t-mono">
-                        {adoptState === "done" ? t("AgentJoin.adoptDoneHint") : t("AgentJoin.adoptHint")}
-                      </span>
-                      {adoptState === "error" && adoptError !== null && (
-                        <p className="banner banner--red" role="alert">{adoptError}</p>
+                      {t(
+                        adoptState === "busy"
+                          ? "AgentJoin.adoptBusy"
+                          : adoptState === "done"
+                            ? "AgentJoin.adoptDone"
+                            : "AgentJoin.adoptButton",
                       )}
-                      <details className="agent-join-manual">
-                        <summary>{t("AgentJoin.manualSummary")}</summary>
-                        <CommandBlock
-                          id="join"
-                          command={session.command}
-                          copied={copiedKey === "join"}
-                          onCopy={() => void copy("join", session.command ?? "")}
-                          t={t}
-                        />
-                      </details>
-                    </div>
-                  ) : (
-                    // web：无人值守首选桌面版（选目录一键常驻）；没装则给手动贴命令的教程。
-                    <>
-                      <div className="agent-join-install-desktop">
-                        <p className="agent-join-lead">{t("AgentJoin.installDesktopLead")}</p>
-                        <DesktopInstallButton
-                          className="d-btn d-btn--primary agent-join-install-btn"
-                          label={t("AgentJoin.installDesktopBtn")}
-                        />
-                      </div>
-                      <p className="agent-join-hint">{t("AgentJoin.manualWebLead")}</p>
+                    </button>
+                    {adoptDir !== null && <span className="agent-join-hint t-mono agent-join-adopt-dir">{adoptDir}</span>}
+                    <span className="agent-join-hint t-mono">
+                      {adoptState === "done" ? t("AgentJoin.adoptDoneHint") : t("AgentJoin.adoptHint")}
+                    </span>
+                    {adoptState === "error" && adoptError !== null && (
+                      <p className="banner banner--red" role="alert">{adoptError}</p>
+                    )}
+                    <details className="agent-join-manual">
+                      <summary>{t("AgentJoin.manualSummary")}</summary>
                       <CommandBlock
                         id="join"
                         command={session.command}
@@ -1052,12 +1086,19 @@ export function AgentJoin({
                         onCopy={() => void copy("join", session.command ?? "")}
                         t={t}
                       />
-                    </>
-                  )
+                    </details>
+                  </div>
                 ) : (
-                  // interactive：复制接入命令，贴进 agent 自己的 harness。
+                  // web：无人值守首选桌面版（选目录一键常驻）；没装则给手动贴命令的教程。
                   <>
-                    <p className="agent-join-hint">{t("AgentJoin.step2.runHint")}</p>
+                    <div className="agent-join-install-desktop">
+                      <p className="agent-join-lead">{t("AgentJoin.installDesktopLead")}</p>
+                      <DesktopInstallButton
+                        className="d-btn d-btn--primary agent-join-install-btn"
+                        label={t("AgentJoin.installDesktopBtn")}
+                      />
+                    </div>
+                    <p className="agent-join-hint">{t("AgentJoin.manualWebLead")}</p>
                     <CommandBlock
                       id="join"
                       command={session.command}
@@ -1066,89 +1107,114 @@ export function AgentJoin({
                       t={t}
                     />
                   </>
-                )}
-                {copyErr && (
-                  <p className="banner banner--red agent-join-copyerr" role="alert">
-                    {t("AgentJoin.errCopy")}
-                  </p>
-                )}
-              </StepCard>
+                )
+              ) : (
+                // interactive：复制接入命令，贴进 agent 自己的 harness。
+                <CommandBlock
+                  id="join"
+                  command={mainCommand}
+                  copied={copiedKey === "join"}
+                  onCopy={() => void copy("join", mainCommand)}
+                  t={t}
+                />
+              )}
 
-              {/* ③ 起一个可唤醒的会话：presence live 且可被 @ 唤醒（party who 同口径）；unattended = serve 已挂上。 */}
-              <StepCard
-                id={3}
-                status={statuses[3]}
-                title={t(unattended ? "AgentJoin.step3.titleUnattended" : "AgentJoin.step3.title")}
-                summary={step3Summary}
-                t={t}
-              >
-                {unattended ? (
-                  <>
-                    <p className="agent-join-hint">{t("AgentJoin.step3.hintUnattended")}</p>
-                    {/* 常驻档每次唤醒都带 --resume（serve.ts），上下文跨唤醒连续——这点得说，
-                        否则人会以为每次唤醒都是白纸一张。 */}
-                    <p className="agent-join-hint">{t("AgentJoin.step3.resumeUnattended")}</p>
-                  </>
-                ) : (
-                  <>
-                    <p className="agent-join-hint">
-                      {t(
-                        session.harness === "claude"
-                          ? "AgentJoin.step3.hintClaude"
-                          : session.harness === "codex"
-                            ? "AgentJoin.step3.hintCodex"
-                            : "AgentJoin.step3.hintOther",
-                      )}
-                    </p>
-                    {/* 交互档起的是**新对话**，与常驻档相反——不写清楚，人会拿着"接着上次干"
-                        的预期去跑，然后发现上下文没了；也会去试图把已经在跑的会话接上（做不到：
-                        武装与否是进程启动那一刻按环境定的）。 */}
-                    {session.harness === "claude" && (
-                      <p className="agent-join-hint">{t("AgentJoin.step3.resumeClaude")}</p>
+              {/* interactive 接入的第二条：起一个能被唤醒的会话。以前藏在第 ③ 步等报到才露出来——
+                  现在直接给，人可以一次把两条都复制走。 */}
+              {showSessionCommand && (
+                <>
+                  <p className="agent-join-hint">
+                    {t("AgentJoin.plan.thenSession")}{" "}
+                    {t(
+                      session.harness === "claude"
+                        ? "AgentJoin.step3.hintClaude"
+                        : session.harness === "codex"
+                          ? "AgentJoin.step3.hintCodex"
+                          : "AgentJoin.step3.hintOther",
                     )}
-                    {/* #1029：这条命令现在可能带明文 token，安全警告必须与第 ② 步同形、
-                        且排在命令块**之前**（理由见第 ② 步那处注释）。 */}
-                    {wakeableCommandCarriesToken(session.harness, session.token) && (
-                      <div className="banner banner--yellow agent-join-tokenbanner">
-                        <p className="agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
-                        <p className="agent-join-warn">{t("AgentJoin.tokenWarn")}</p>
+                  </p>
+                  <CommandBlock
+                    id="session"
+                    command={sessionCommand}
+                    copied={copiedKey === "session"}
+                    onCopy={() => void copy("session", sessionCommand)}
+                    t={t}
+                  />
+                </>
+              )}
+
+              {!unattended && (session.recover || session.command !== null) && (
+                <label className="agent-join-plan-install t-mono">
+                  <input
+                    type="checkbox"
+                    checked={includeInstall}
+                    onChange={(e) => setIncludeInstall(e.target.checked)}
+                  />
+                  <span>{t("AgentJoin.plan.install")}</span>
+                </label>
+              )}
+              {copyErr && (
+                <p className="banner banner--red agent-join-copyerr" role="alert">
+                  {t("AgentJoin.errCopy")}
+                </p>
+              )}
+            </section>
+
+            {/* 三盏灯：报到 / 能被唤醒 / 回了测试 @——只按 presence/历史亮，不按「命令复制过了」。
+                data-step 沿用 2/3/4，判据与从前的 ②③④ 一字不差。 */}
+            <ol className="agent-join-lights">
+              {LIGHTS.map(({ id, key }) => {
+                const status = statuses[id];
+                const summary = id === 2 ? step2Summary : id === 3 ? step3Summary : step4Summary;
+                return (
+                  <li
+                    key={key}
+                    className={`agent-join-light agent-join-light--${status}`}
+                    data-step={id}
+                    data-light={key}
+                    data-status={status}
+                  >
+                    <div className="agent-join-step-head">
+                      <span className={`t-mono agent-join-step-mark agent-join-step-mark--${status}`} aria-hidden="true">
+                        {status === "done" ? "✓" : status === "active" ? "●" : "○"}
+                      </span>
+                      <span className="agent-join-step-title">{t(`AgentJoin.light.${key}`)}</span>
+                      {status === "done" && summary !== null ? (
+                        <span className="agent-join-step-status agent-join-step-status--done t-mono" role="status">{summary}</span>
+                      ) : status === "active" && summary !== null ? (
+                        <span className="agent-join-step-status t-mono" role="status">{summary}</span>
+                      ) : (
+                        <span className="agent-join-step-status t-mono">{t("AgentJoin.light.pending")}</span>
+                      )}
+                    </div>
+                    {key === "verified" && (
+                      <div className="agent-join-step-body">
+                        <p className="agent-join-hint">
+                          {t("AgentJoin.step4.hint")} <code>party wake verify {slug}</code>
+                          {sendMessage !== undefined ? ` ${t("AgentJoin.step4.or")}` : ""}
+                        </p>
+                        {sendMessage !== undefined ? (
+                          <div className="agent-join-probe">
+                            <button
+                              type="button"
+                              className="d-btn d-btn--primary agent-join-probe-btn"
+                              disabled={probe !== null && !probeTimedOut}
+                              onClick={sendProbe}
+                            >
+                              {t(probe !== null && probeTimedOut ? "AgentJoin.step4.retry" : "AgentJoin.step4.probe", { name: session.name })}
+                            </button>
+                            {sendErr && (
+                              <p className="banner banner--red agent-join-senderr" role="alert">{t("AgentJoin.step4.sendFailed")}</p>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="agent-join-hint t-mono">{t("AgentJoin.stepper.sendUnavailable")}</p>
+                        )}
                       </div>
                     )}
-                    <CommandBlock
-                      id="session"
-                      command={wakeableSessionCommand(slug, session.harness, session.token)}
-                      copied={copiedKey === "session"}
-                      onCopy={() => void copy("session", wakeableSessionCommand(slug, session.harness, session.token))}
-                      t={t}
-                    />
-                  </>
-                )}
-              </StepCard>
-
-              {/* ④ 验证：会话里 party wake verify，或从这里以当前用户身份发一条普通 @ 等回帖。 */}
-              <StepCard id={4} status={statuses[4]} title={t("AgentJoin.step4.title")} summary={step4Summary} t={t}>
-                <p className="agent-join-hint">
-                  {t("AgentJoin.step4.hint")} <code>party wake verify {slug}</code>
-                  {sendMessage !== undefined ? ` ${t("AgentJoin.step4.or")}` : ""}
-                </p>
-                {sendMessage !== undefined ? (
-                  <div className="agent-join-probe">
-                    <button
-                      type="button"
-                      className="d-btn d-btn--primary agent-join-probe-btn"
-                      disabled={probe !== null && !probeTimedOut}
-                      onClick={sendProbe}
-                    >
-                      {t(probe !== null && probeTimedOut ? "AgentJoin.step4.retry" : "AgentJoin.step4.probe", { name: session.name })}
-                    </button>
-                    {sendErr && (
-                      <p className="banner banner--red agent-join-senderr" role="alert">{t("AgentJoin.step4.sendFailed")}</p>
-                    )}
-                  </div>
-                ) : (
-                  <p className="agent-join-hint t-mono">{t("AgentJoin.stepper.sendUnavailable")}</p>
-                )}
-              </StepCard>
+                  </li>
+                );
+              })}
             </ol>
 
             {complete && (
