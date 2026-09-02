@@ -202,6 +202,38 @@ describe("Composer Escape handling (#357)", () => {
     act(() => r!.unmount());
   });
 
+  test("模块⑤：两个不同的不透明账号相邻时只画一个「其他 agent」标题", () => {
+    const candidates = [
+      { name: "bot-a", display: "bot-a", kind: "agent" as const, tier: "online" as const, group: "lark:on_aaa", account: "lark:on_aaa" },
+      { name: "bot-b", display: "bot-b", kind: "agent" as const, tier: "online" as const, group: "github:4242", account: "github:4242" },
+      { name: "bot-c", display: "bot-c", kind: "agent" as const, tier: "recent" as const, group: "unowned agents" },
+    ];
+    let r: ReactTestRenderer | undefined;
+    act(() => {
+      r = create(
+        <LocaleProvider>
+          <Composer
+            draft="@bot"
+            setDraft={() => undefined}
+            onSend={() => undefined}
+            ready
+            candidates={candidates}
+            mentionStatuses={[]}
+          />
+        </LocaleProvider>,
+      );
+    });
+    const textarea = r!.root.findByProps({ className: "composer-input t-mono" });
+    act(() => textarea.props.onClick({ currentTarget: { value: "@bot", selectionStart: 4 } }));
+
+    expect(r!.root.findAllByProps({ role: "option" })).toHaveLength(3);
+    expect(r!.root.findAllByProps({ className: "mention-group" }).map((node) => node.children[0])).toEqual([
+      "other agents",
+      "agents without an owner",
+    ]);
+    act(() => r!.unmount());
+  });
+
   test("focuses and reveals the composer when reply mode starts", () => {
     const focus = mock(() => undefined);
     const scrollIntoView = mock(() => undefined);
