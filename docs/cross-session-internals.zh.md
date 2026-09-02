@@ -1,5 +1,7 @@
 # Cross-session：闸、Hook 与验收内部规则
 
+English: [cross-session-internals.md](cross-session-internals.md)
+
 `party bridge claude` 背后的证据规则。先读
 [把在线 Claude session 接进来](../README.zh.md#把在线-claude-session-接进来)——这一页是 fail-closed 的
 规格说明，不是上手指南。

@@ -1,5 +1,7 @@
 # Claude plugin: launcher, opt-ins, and verifiers
 
+中文版：[claude-plugin.zh.md](claude-plugin.zh.md)
+
 How `party claude` and the Marketplace plugin actually behave. The README only covers installing
 them; this page is the contract.
 
