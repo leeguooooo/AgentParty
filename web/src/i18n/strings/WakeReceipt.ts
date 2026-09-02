@@ -5,7 +5,12 @@ export const WakeReceiptStrings: LocaleDict = {
   en: {
     // 发送前预览：@ 目标当前能不能落地
     "WakeReceipt.pre.online": "online · will see it live",
-    "WakeReceipt.pre.wakeable": "wakeable ({kind}) · @ will wake it",
+    "WakeReceipt.pre.wakeable": "wakeable · {kind} · @ will wake it",
+    "WakeKind.serve": "standing by",
+    "WakeKind.watch": "watching for @",
+    "WakeKind.daemon": "background daemon",
+    "WakeKind.webhook": "webhook",
+    "WakeKind.none": "no wake channel",
     "WakeReceipt.pre.offline": "offline · not wakeable — won't reach until it reconnects",
     "WakeReceipt.pre.label": "reach",
     // 发送后回执
@@ -60,7 +65,12 @@ export const WakeReceiptStrings: LocaleDict = {
   },
   zh: {
     "WakeReceipt.pre.online": "在线 · 会实时看到",
-    "WakeReceipt.pre.wakeable": "可唤醒({kind}) · @ 会拉起",
+    "WakeReceipt.pre.wakeable": "可唤醒 · {kind} · @ 会拉起",
+    "WakeKind.serve": "常驻待命",
+    "WakeKind.watch": "守候 @ 中",
+    "WakeKind.daemon": "后台守护",
+    "WakeKind.webhook": "回调唤醒",
+    "WakeKind.none": "没有唤醒通道",
     "WakeReceipt.pre.offline": "离线·不可唤醒 · 重连前收不到",
     "WakeReceipt.pre.label": "能否送达",
     "WakeReceipt.state.replied": "已回复 {detail}",

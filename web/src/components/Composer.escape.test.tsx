@@ -234,6 +234,29 @@ describe("Composer Escape handling (#357)", () => {
     act(() => r!.unmount());
   });
 
+  test("模块⑥：送达提示把 wakeKind=serve 显示成「standing by」，不露实现名", () => {
+    let r: ReactTestRenderer | undefined;
+    act(() => {
+      r = create(
+        <LocaleProvider>
+          <Composer
+            draft="@evan hi"
+            setDraft={() => undefined}
+            onSend={() => undefined}
+            ready
+            candidates={[]}
+            mentionStatuses={[{ name: "evan", display: "evan", tier: "wakeable", wakeKind: "serve" }]}
+          />
+        </LocaleProvider>,
+      );
+    });
+    const labels = r!.root.findAllByProps({ className: "composer-reach-label" }).map((n) => String(n.children.join("")));
+    expect(labels).toHaveLength(1);
+    expect(labels[0]).toContain("standing by");
+    expect(labels[0]).not.toMatch(/\bserve\b/);
+    act(() => r!.unmount());
+  });
+
   test("focuses and reveals the composer when reply mode starts", () => {
     const focus = mock(() => undefined);
     const scrollIntoView = mock(() => undefined);
