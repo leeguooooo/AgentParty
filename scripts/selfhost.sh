@@ -34,15 +34,15 @@ node_major() {
 }
 
 preflight() {
-  command -v node >/dev/null 2>&1 || die "找不到 node。需要 Node >= $MIN_NODE_MAJOR（wrangler 的 engines 要求）。"
+  command -v node >/dev/null 2>&1 || die "找不到 node。需要 Node >= ${MIN_NODE_MAJOR}（wrangler 的 engines 要求）。"
   raw="$(node -v 2>/dev/null || echo '')"
   major="$(node_major "$raw")"
   case "$major" in
-    ''|*[!0-9]*) die "读不出 node 版本（node -v 输出：'$raw'）。需要 Node >= $MIN_NODE_MAJOR。" ;;
+    ''|*[!0-9]*) die "读不出 node 版本（node -v 输出：'$raw'）。需要 Node >= ${MIN_NODE_MAJOR}。" ;;
   esac
   if [ "$major" -lt "$MIN_NODE_MAJOR" ]; then
     cat >&2 <<EOF
-selfhost: Node 版本太低：$raw（需要 >= v$MIN_NODE_MAJOR.0.0）
+selfhost: Node 版本太低：${raw}（需要 >= v$MIN_NODE_MAJOR.0.0）
 
   这不是「可能会有问题」——真机实测的表现是：
     服务照常启动、端口照常 LISTEN、TCP 照常连上，
@@ -58,7 +58,7 @@ EOF
     exit 1
   fi
   [ -f "$REPO/web/dist/index.html" ] || die "web 还没构建：先跑 \`cd web && bunx vite build\`（旧 Node 上用 \`bun --bun x vite build\`）。"
-  note "预检通过：node $raw，web 产物已就绪"
+  note "预检通过：node ${raw}，web 产物已就绪"
 }
 
 wrangler_js() {
@@ -73,26 +73,40 @@ wrangler_js() {
 
 migrate() {
   preflight
-  mkdir -p "$DATA_DIR"
+  ( umask 077; mkdir -p "$DATA_DIR" )
+  chmod 700 "$DATA_DIR"
   note "应用 D1 迁移到 $DATA_DIR"
   ( cd "$REPO/worker" && node "$(wrangler_js)" d1 migrations apply agentparty --local --persist-to "$DATA_DIR" )
 }
 
 start() {
   preflight
-  mkdir -p "$DATA_DIR"
+  # D1 里存着**所有 token**，DO 存储里是频道全部内容：只给属主（真机实测改之前是 0755/0644）。
+  ( umask 077; mkdir -p "$DATA_DIR" )
+  chmod 700 "$DATA_DIR"
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
     die "已经在跑了（pid $(cat "$PIDFILE")）。先 \`$0 stop\`。"
   fi
   [ -n "${AGENTPARTY_ADMIN_SECRET:-}" ] || die "必须设 AGENTPARTY_ADMIN_SECRET —— 自部署没有任何登录方式，第一个 token 只能靠它铸出来（见 docs/self-host-intranet.md）。"
   migrate
-  note "启动 workerd（$HOST:$PORT，数据在 $DATA_DIR）"
-  ( cd "$REPO/worker" && setsid node "$(wrangler_js)" dev --local \
-      --ip "$HOST" --port "$PORT" --persist-to "$DATA_DIR" \
-      --var HOSTED_MEMBERSHIP_GATING:false \
-      --var "ADMIN_SECRET:$AGENTPARTY_ADMIN_SECRET" \
-      >"$LOG" 2>&1 </dev/null & echo $! > "$PIDFILE" )
-  note "pid $(cat "$PIDFILE")，日志 $LOG"
+  # 凭据**绝不进 argv**：`ps -axww` 同机任何用户都看得见（真机实测：改之前那里明文躺着
+  # ADMIN_SECRET，而它能铸任意 token）。改用 wrangler 的 .dev.vars，0600 只给属主。
+  vars="$REPO/worker/.dev.vars"
+  ( umask 077; printf 'HOSTED_MEMBERSHIP_GATING=false\nADMIN_SECRET=%s\n' "$AGENTPARTY_ADMIN_SECRET" > "$vars" )
+  chmod 600 "$vars"
+  note "启动 workerd（$HOST:${PORT}，数据在 ${DATA_DIR}）"
+  # pid 必须是 **worker 自己的**。写成 `( ... & echo $! )` 记下的是这条子 shell 的 pid：
+  # setsid 会把 node 放进新的会话组，于是 `kill -- -$pid` 根本够不到它——旧版 stop 因此
+  # 「打印已停、删掉 pidfile，而 worker 还在跑」，是静默失败（真机实测撞到）。
+  # 让子进程先把自己的 $$ 写下来再 exec：exec 之后这个 pid 就是 node 的 pid。
+  W="$(wrangler_js)"
+  rm -f "$PIDFILE"
+  ( cd "$REPO/worker" && setsid sh -c 'echo $$ > "$1"; shift; exec "$@"' _ "$PIDFILE" \
+      node "$W" dev --local --ip "$HOST" --port "$PORT" --persist-to "$DATA_DIR" \
+      >"$LOG" 2>&1 </dev/null & )
+  i=0; while [ ! -s "$PIDFILE" ] && [ "$i" -lt 50 ]; do i=$((i + 1)); sleep 0.2; done
+  [ -s "$PIDFILE" ] || die "启动后没拿到 pid，看日志：${LOG}"
+  note "pid $(cat "$PIDFILE")，日志 ${LOG}"
   note "等它就绪…"
   i=0
   while [ "$i" -lt 60 ]; do
@@ -105,10 +119,27 @@ start() {
   die "60 秒内没就绪，看日志：$LOG"
 }
 
+# 这个 pid 是不是我们起的那个？pid 会被系统复用——认错了就是杀掉别人的进程。
+# 判据：命令行里同时有 wrangler 和我们这次的端口。宁可不杀，也不错杀。
+ours() {
+  cmd="$(ps -o command= -p "$1" 2>/dev/null || true)"
+  case "$cmd" in
+    *wrangler*"$PORT"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 stop() {
   [ -f "$PIDFILE" ] || { note "没在跑"; return 0; }
   pid="$(cat "$PIDFILE")"
-  # 只杀自己这棵进程树，绝不 pkill -f workerd —— 同机可能有别人的 workerd。
+  case "$pid" in ''|*[!0-9]*) rm -f "$PIDFILE"; die "pidfile 内容不是 pid：'$pid'（已清掉，没有杀任何进程）" ;; esac
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$PIDFILE"; note "进程已不在（pid ${pid}），清掉 pidfile"; return 0
+  fi
+  if ! ours "$pid"; then
+    die "pid $pid 已经不是我们起的 wrangler 了（pid 被复用）。没有杀任何进程；确认后手工处理并删掉 $PIDFILE"
+  fi
+  # 只杀自己这棵进程树，绝不 pkill —— 同机可能有别人的 workerd。
   kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
   rm -f "$PIDFILE"
   note "已停"

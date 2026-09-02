@@ -90,10 +90,28 @@ node <wrangler> d1 migrations apply agentparty --local --persist-to "$DATA"
 `ADMIN_SECRET` 校验的是 `x-admin-secret` 头。用 `Authorization: Bearer` 会得到
 `invalid admin secret`，很容易误判成 secret 配错了。
 
-### 4. 停服务不要 `pkill -f workerd`
+### 4. 凭据不要进命令行
+
+`ps -axww` 是公共表面：同机任何用户都读得到。第一版把 `ADMIN_SECRET` 用 `--var` 传给
+wrangler，真机上 `ps` 里就明文躺着它——**而它能铸任意 token**。现在写进 `worker/.dev.vars`（0600）。
+
+同理，数据目录默认是 0755、D1 库 0644，**而 D1 里存着所有 token**。现在建目录就 `umask 077` + `chmod 700`。
+
+### 5. 停服务不要 `pkill -f workerd`
 
 同机可能有别人的 workerd。`selfhost.sh stop` 只杀自己 pidfile 里那棵进程树。
 （顺带：`pkill -f <关键词>` 会匹配到你自己那条命令行——我在部署过程中把自己的 ssh 会话杀过两次。）
+
+`stop` 还会先确认 pidfile 里那个 pid **现在仍然是我们起的 wrangler**（pid 会被系统复用），
+不是就拒绝并且一个进程都不杀。这条检查上线当天就抓到一个更早的 bug：pidfile 里存的曾是脚本
+自己的子 shell，而 `setsid` 把 node 放进了新会话组——于是旧 `stop` 打印「已停」、删掉 pidfile，
+**worker 其实还在跑**。静默失败。
+
+### 6. 中文脚本里 `$VAR` 后面紧跟全角字符会炸
+
+`"（pid $pid），"` 里的全角括号会被 shell 吃进变量名，配上 `set -u` 就是 `unbound variable`，
+而且只有走到那条分支时才炸。这类隐患一共修了 11 处（4 处在 smoke 里，一直没被触发）。
+统一写成 `${pid}`，并加了守卫扫描。
 
 ## 现在的边界，别当成生产级
 

@@ -18,7 +18,7 @@ fail() { printf 'smoke: ✗ %s\n' "$*" >&2; exit 1; }
 ok() { printf 'smoke: ✓ %s\n' "$*"; }
 
 # 1) 活着
-curl -fsS --max-time 10 "$BASE/api/health" >/dev/null 2>&1 || fail "/api/health 不通（$BASE）"
+curl -fsS --max-time 10 "$BASE/api/health" >/dev/null 2>&1 || fail "/api/health 不通（${BASE}）"
 ok "health"
 
 # 每次跑用唯一名字：smoke 要能反复跑。第一版复用固定名字，第二次就撞重名，
@@ -40,8 +40,8 @@ case "$code" in
   200|201) : ;;
   401) fail "ADMIN_SECRET 不匹配（注意请求头是 x-admin-secret，不是 Authorization）" ;;
   500) fail "服务端 500 —— 多半是 D1 迁移没跑：先 scripts/selfhost.sh migrate" ;;
-  000) fail "连不上 $BASE（服务没起？端口不对？）" ;;
-  *) fail "铸 token 失败（HTTP $code）：$human" ;;
+  000) fail "连不上 ${BASE}（服务没起？端口不对？）" ;;
+  *) fail "铸 token 失败（HTTP ${code}）：$human" ;;
 esac
 HT="$(printf '%s' "$human" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
 [ -n "$HT" ] || fail "铸出来了但解析不出 token"
@@ -54,7 +54,7 @@ case "$code" in
   200|201) ok "建频道 #$CHANNEL" ;;
   # 复跑时频道已存在是**正常**，不是失败——smoke 必须能反复跑
   409|422) ok "频道 #$CHANNEL 已存在（复跑）" ;;
-  *) fail "建频道失败（HTTP $code）：$(body_of "$r")" ;;
+  *) fail "建频道失败（HTTP ${code}）：$(body_of "$r")" ;;
 esac
 
 # 4) 铸 agent token（走的是「human 账号自助铸」那条路，与 bootstrap 不同）
