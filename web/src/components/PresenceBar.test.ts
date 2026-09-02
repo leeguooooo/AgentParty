@@ -611,6 +611,19 @@ describe("presence live roster dialog (#484)", () => {
     expect(String(dup?.props.title)).toMatch(/token|连接/);
   });
 
+  // CodeRabbit on #1044：presenceRank 会把「在线但叫不醒」排在「离线但可唤醒」之前，堆叠顺序必须以可达性优先。
+  test("avatar stack orders wakeable before online-only before offline", () => {
+    const now = Date.now();
+    const presence: Record<string, PresenceEntry> = {
+      watcher: { name: "watcher", kind: "agent", state: "online", note: null, ts: now, last_seen: now, live: true, wake: { kind: "none" }, residency: "bare" } as PresenceEntry,
+      sleeper: { name: "sleeper", kind: "agent", state: "offline", note: null, ts: now - 60_000, last_seen: now - 60_000, wake: { kind: "webhook", verified_at: now - 1000 } } as PresenceEntry,
+      gone: { name: "gone", kind: "agent", state: "offline", note: null, ts: now - 86_400_000, last_seen: now - 86_400_000 } as PresenceEntry,
+    };
+    const r = create(createElement(LocaleProvider, null, createElement(PresenceBar, { presence, participants: [{ name: "watcher", kind: "agent" } as Sender], status: "open" })));
+    const order = nodesWithClass(r, "presence-ava").filter((n) => n.props["data-name"] !== undefined).map((n) => `${n.props["data-name"]}:${n.props["data-reach"]}`);
+    expect(order).toEqual(["sleeper:wakeable", "watcher:online", "gone:offline"]);
+  });
+
   test("avatar stack: humans round, agents square, ring = reachability, ×N for duplicate connections", () => {
     const r = renderWith(busyEntry({ connection_count: 2 }), { party: true });
     const avatars = nodesWithClass(r, "presence-ava").filter((n) => n.props["data-name"] !== undefined);

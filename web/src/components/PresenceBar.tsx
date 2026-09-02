@@ -319,6 +319,8 @@ export function avatarReach(item: Item, now: number): AvatarReach {
 
 /** 头像堆叠最多露几张；其余折成 +N。 */
 export const PRESENCE_STACK_MAX = 6;
+/** 堆叠排序：能被 @ 叫到的（人在线 / agent 可唤醒）> 在线只看 > 离开。 */
+export const AVATAR_REACH_ORDER: Record<AvatarReach, number> = { present: 0, wakeable: 0, online: 1, offline: 2 };
 
 // #666：不可唤醒/未监听徽章。仅当 agent 既非在线、也非可唤醒待命（tier=recent）时显式标注：
 // 它的 watch 已退出或从未验证可唤醒，@ 只会进历史、可能不被处理。paused 是人主动设的有意状态、
@@ -567,8 +569,14 @@ export function PresenceBar({
   const busyCount = items.filter((it) => it.busy).length;
   const duplicateCount = items.filter((it) => it.connectionCount > 1).length;
   const unhandledMentionCount = items.reduce((sum, item) => sum + item.unhandledMentionCount, 0);
-  // #1044 头像堆叠：按可达性排序（能唤醒 > 在线 > 离开），只露前几张。
-  const rankedItems = [...items].sort((a, b) => presenceRank(a, now) - presenceRank(b, now) || a.display.localeCompare(b.display));
+  // #1044 头像堆叠：先按可达性（绿 > 蓝 > 灰），同档内再按 presenceRank，只露前几张。
+  // presenceRank 会把任意在线项排在「离线但可唤醒」之前——那会让蓝头像跑到绿头像前面（CodeRabbit）。
+  const rankedItems = [...items].sort(
+    (a, b) =>
+      AVATAR_REACH_ORDER[avatarReach(a, now)] - AVATAR_REACH_ORDER[avatarReach(b, now)] ||
+      presenceRank(a, now) - presenceRank(b, now) ||
+      a.display.localeCompare(b.display),
+  );
   const stackItems = rankedItems.slice(0, PRESENCE_STACK_MAX);
   const hiddenStack = Math.max(0, rankedItems.length - stackItems.length);
   // 折叠态下 chip 不在 DOM 里，popover 也不该跟着冒出来。
@@ -1096,7 +1104,14 @@ export function PresenceBar({
         {headerControls !== undefined && headerControls !== null && (
           <div className="presence-channel-controls">{headerControls}</div>
         )}
-        <span className="conn t-mono" data-s={status} role="status" aria-live="polite" title={status === "open" ? t("PresenceBar.conn.open") : status}>
+        <span
+          className="conn t-mono"
+          data-s={status}
+          role="status"
+          aria-live="polite"
+          aria-label={status === "open" ? t("PresenceBar.conn.open") : status}
+          title={status === "open" ? t("PresenceBar.conn.open") : status}
+        >
           {status === "open" ? "●" : `◌ ${status}…`}
         </span>
       </div>

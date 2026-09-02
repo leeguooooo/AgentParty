@@ -8664,6 +8664,7 @@ button.org-person-name {
 .presence-ava {
   --ah: 200;
   --reach: var(--t-faint);
+
   position: relative;
   display: inline-flex;
   align-items: center;
