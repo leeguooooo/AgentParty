@@ -169,7 +169,7 @@ function ScopedChannelList({ channels, active, error, onOpen, onRetry }: ScopedP
         <ChannelPill key={c.slug} c={c} active={active} onOpen={onOpen} />
       ))}
       {live !== null && live.length === 0 && archived.length === 0 && (
-        <p className="side-note t-mono">$ party channel create</p>
+        <p className="side-note t-mono">{t("Home.channelsEmpty")}</p>
       )}
       {category !== "all" && filteredLive !== null && filteredLive.length === 0 && live !== null && live.length > 0 && (
         <p className="side-note t-mono">{t(CATEGORY_EMPTY_KEY[category])}</p>

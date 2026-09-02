@@ -2,10 +2,11 @@ import { registerDict, type LocaleDict } from "../dict";
 
 export const HomeStrings: LocaleDict = {
   en: {
-    "Home.archivedToggle": "$ ls ./archived/ · {count}",
-    "Home.channelsLabel": "$ ls ./channels/",
+    "Home.archivedToggle": "archived · {count}",
+    "Home.channelsLabel": "channels",
     "Home.noParticipants": "no participants yet",
     "Home.loading": "loading…",
+    "Home.channelsEmpty": "No channels yet — create one with the button above.",
     "Home.channelCategoryAll": "All ({count})",
     "Home.channelCategoryCreated": "Created ({count})",
     "Home.channelCategoryJoined": "Joined ({count})",
@@ -13,10 +14,11 @@ export const HomeStrings: LocaleDict = {
     "Home.channelCategoryEmptyJoined": "You haven't joined any channels yet.",
   },
   zh: {
-    "Home.archivedToggle": "$ ls ./archived/ · {count}",
-    "Home.channelsLabel": "$ ls ./channels/",
+    "Home.archivedToggle": "归档 · {count}",
+    "Home.channelsLabel": "频道",
     "Home.noParticipants": "尚无参与者",
     "Home.loading": "加载中…",
+    "Home.channelsEmpty": "还没有频道——用上面的「新建频道」建一个。",
     "Home.channelCategoryAll": "全部 ({count})",
     "Home.channelCategoryCreated": "我创建的 ({count})",
     "Home.channelCategoryJoined": "我加入的 ({count})",
