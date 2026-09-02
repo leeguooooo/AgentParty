@@ -1069,7 +1069,12 @@ export function AgentJoin({
                   )}
                 </div>
               ) : unattended ? (
-                desktopDetect() ? (
+                <>
+                  <p className="agent-join-hint">{t("AgentJoin.step3.hintUnattended")}</p>
+                  {/* 常驻档每次唤醒都带 --resume（serve.ts），上下文跨唤醒连续——这点得说，
+                      否则人会以为每次唤醒都是白纸一张。 */}
+                  <p className="agent-join-hint">{t("AgentJoin.step3.resumeUnattended")}</p>
+                  {desktopDetect() ? (
                   // 桌面：选工作目录 + 直接就地运行（不复制接入包）。手动命令收进折叠作后备。
                   <div className="agent-join-adopt">
                     <p className="agent-join-hint">{t("AgentJoin.doneLeadUnattended")}</p>
@@ -1124,7 +1129,8 @@ export function AgentJoin({
                       t={t}
                     />
                   </>
-                )
+                )}
+                </>
               ) : (
                 // interactive：复制接入命令，贴进 agent 自己的 harness。
                 <CommandBlock
@@ -1150,6 +1156,12 @@ export function AgentJoin({
                           : "AgentJoin.step3.hintOther",
                     )}
                   </p>
+                  {/* 交互档起的是**新对话**，与常驻档相反——不写清楚，人会拿着"接着上次干"
+                      的预期去跑，然后发现上下文没了；也会去试图把已经在跑的会话接上（做不到：
+                      武装与否是进程启动那一刻按环境定的）。 */}
+                  {session.harness === "claude" && (
+                    <p className="agent-join-hint">{t("AgentJoin.step3.resumeClaude")}</p>
+                  )}
                   <CommandBlock
                     id="session"
                     command={sessionCommand}
