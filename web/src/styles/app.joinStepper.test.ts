@@ -15,15 +15,22 @@ const component = readFileSync(
  * 这一组钉的是「组件用到的每个 stepper 类名，样式表里都有对应规则」——漏一个就红。
  */
 describe("接入引导的样式必须存在（#1005）", () => {
+  // #1040：四步卡片改成「命令区 + 三盏灯」后，类名跟着换；step-head/mark/title/status/body 沿用。
   const stepperClasses = [
-    "agent-join-steps",
-    "agent-join-step",
+    "agent-join-lights",
+    "agent-join-light",
+    "agent-join-plan",
+    "agent-join-plan-options",
+    "agent-join-plan-option",
+    "agent-join-plan-option--on",
+    "agent-join-plan-option-title",
+    "agent-join-plan-option-desc",
+    "agent-join-plan-install",
     "agent-join-step-head",
     "agent-join-step-mark",
     "agent-join-step-title",
     "agent-join-step-status",
     "agent-join-step-body",
-    "agent-join-step-wait",
     "agent-join-probe-btn",
     "agent-join-complete",
     "agent-join-regen",
@@ -36,11 +43,11 @@ describe("接入引导的样式必须存在（#1005）", () => {
     expect(missing).toEqual([]);
   });
 
-  test("步骤列表关掉浏览器默认编号——序号由 ①②③④/✓ 自己画，不许出现 1. 2. 3.", () => {
-    const block = /\.agent-join-steps\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+  test("灯列表关掉浏览器默认编号——记号由 ✓/●/○ 自己画，不许出现 1. 2. 3.", () => {
+    const block = /\.agent-join-lights\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
     expect(block).toContain("list-style: none");
     // 组件确实是用 ol 渲染的（换成 ul 就不需要这条，但也不会漏判）。
-    expect(component).toContain('<ol className="agent-join-steps">');
+    expect(component).toContain('<ol className="agent-join-lights">');
   });
 
   test("「等上一步完成」这类状态句与标题拉开距离，不糊成一句话", () => {
