@@ -8,11 +8,11 @@
 //   - 未知目标 404；同 (target, subscriber) 幂等；
 //   - 订阅方触发时不在线 ⇒ 下次 hello 补投。
 // 把「触发即删行」改成每次翻转都发，「恰好一条」用例必须红。
-import { env, runInDurableObject } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import type { IdleNoticeFrame, PresenceEntry, ServerFrame } from "@agentparty/shared";
 import { describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
-import { WsClient, api, createChannel, seedToken } from "./helpers";
+import { ADMIN_HEADERS, WsClient, api, createChannel, seedToken, uniq } from "./helpers";
 
 async function openHello(slug: string, token: string): Promise<WsClient> {
   const ws = await WsClient.open(slug, token);
@@ -264,5 +264,42 @@ describe("notify_when_idle（#1052）", () => {
     expect(await idleNoticesWithin(again, 500)).toEqual([]);
     again.close();
     targetWs.close();
+  });
+});
+
+// 私有频道的访问闸（pr_agent review）：非成员连「某人忙闲翻转」都不该订阅得到——与读历史同一道闸。
+// 把 canAccessLoadedChannel 那几行删掉，这条必须红。
+describe("notify_when_idle · 私有频道访问控制", () => {
+  async function humanSession(owner: string): Promise<string> {
+    const res = await SELF.fetch("http://ap.test/api/tokens", {
+      method: "POST",
+      headers: { ...ADMIN_HEADERS, "content-type": "application/json" },
+      body: JSON.stringify({ name: uniq("human"), role: "human", owner }),
+    });
+    if (res.status !== 201) throw new Error(`human session mint failed: ${res.status}`);
+    return ((await res.json()) as { token: string }).token;
+  }
+
+  it("非成员对私有频道里的人订阅 ⇒ 403，成员 ⇒ 放行", async () => {
+    const owner = await humanSession("owner@leeguoo.com");
+    const outsider = await humanSession("outsider@leeguoo.com");
+    const slug = uniq("priv");
+    const created = await api("/api/channels", owner, {
+      method: "POST",
+      body: JSON.stringify({ slug, kind: "standing", visibility: "private" }),
+    });
+    expect(created.status).toBe(201);
+    const target = await seedToken("agent", uniq("target"), { owner: "owner@leeguoo.com" });
+    const targetWs = await openHello(slug, target.token);
+    try {
+      await sendStatus(targetWs, {}); // 等 presence 行真落下，订阅才有目标可找
+      const denied = await subscribe(slug, outsider, target.name);
+      expect(denied.status).toBe(403);
+      expect(((await denied.json()) as { error: { message: string } }).error.message).toBe("not allowed in this channel");
+      const allowed = await subscribe(slug, owner, target.name);
+      expect([200, 201]).toContain(allowed.status);
+    } finally {
+      targetWs.close();
+    }
   });
 });

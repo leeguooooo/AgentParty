@@ -9593,6 +9593,10 @@ app.post("/api/channels/:slug/presence/:name/notify-when-idle", async (c) => {
   const channel = await loadChannel(c.env.DB, slug);
   if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
   const identity = c.get("identity");
+  // 私有频道：非成员连对方的忙闲翻转都不该看到（与读历史同一道闸）
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
   const name = c.req.param("name");
   if (!name || name.length > 256) {
     return c.json(errorBody("bad_request", "valid name required"), 400);
