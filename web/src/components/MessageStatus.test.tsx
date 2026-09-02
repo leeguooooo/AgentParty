@@ -76,6 +76,38 @@ afterEach(() => {
   }
 });
 
+describe("模块⑥：唤醒方式给用户看时用人话", () => {
+  test("pending_wake 的回执把 serve 显示成「常驻待命」，不露实现名", () => {
+    act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <MessageStatus
+            receipts={[{ name: "evan", state: "pending_wake", detail: "serve", at: null }]}
+            readers={[]}
+            unread={[]}
+            deliveries={[]}
+            display={(name) => name}
+          />
+        </LocaleProvider>,
+      );
+    });
+    act(() => renderer!.root.findByProps({ "aria-label": "展开消息送达详情" }).props.onClick());
+    const texts: string[] = [];
+    const titles: string[] = [];
+    const walk = (node: unknown): void => {
+      if (typeof node === "string") { texts.push(node); return; }
+      if (!node || typeof node !== "object") return;
+      const n = node as { props?: Record<string, unknown>; children?: unknown[] };
+      if (typeof n.props?.title === "string") titles.push(n.props.title);
+      for (const child of n.children ?? []) walk(child);
+    };
+    walk(renderer!.toJSON());
+    const all = texts.join(" ") + " " + titles.join(" ");
+    expect(all).toContain("常驻待命");
+    expect(all).not.toMatch(/\bserve\b/);
+  });
+});
+
 describe("MessageStatus delivery diagnostics (#806)", () => {
   test("collapsed state prioritizes the actionable count without repeating every target", () => {
     const r = renderStatus([

@@ -2,6 +2,7 @@
 // readonly / archived 时由页面层直接不渲染本组件（错误内联为条幅）。
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { isOpaqueAccount } from "@agentparty/shared/identity";
+import { wakeKindLabel } from "../lib/wakeKindLabel";
 import type { ChangeEvent, ClipboardEvent, CSSProperties, DragEvent, KeyboardEvent } from "react";
 import type { Attachment } from "@agentparty/shared";
 import { formatSize, isImageAttachment, useAttachmentBlobUrl } from "./AttachmentList";
@@ -155,7 +156,7 @@ export function Composer({
   const reachLabel = (s: DraftMentionStatus): string => {
     const reach = REACH_TIER[s.tier];
     if (reach === "online") return t("WakeReceipt.pre.online");
-    if (reach === "wakeable") return t("WakeReceipt.pre.wakeable", { kind: s.wakeKind ?? "wake" });
+    if (reach === "wakeable") return t("WakeReceipt.pre.wakeable", { kind: wakeKindLabel(s.wakeKind, t) || t("WakeKind.serve") });
     return t("WakeReceipt.pre.offline");
   };
   const taRef = useRef<HTMLTextAreaElement | null>(null);

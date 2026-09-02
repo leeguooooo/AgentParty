@@ -4,6 +4,7 @@
 //   · @ 提及送达 = 事件驱动 agent(webhook/watch --once)的唤醒回执——它们不逐条读频道，只被 @ 唤醒
 // 不把事件驱动 agent 混进「已读」假装它逐条读了。
 import type { DirectedDeliveryState, PublicDirectedDelivery } from "@agentparty/shared";
+import { wakeKindLabel } from "../lib/wakeKindLabel";
 import { useMemo, useState } from "react";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/WakeReceipt";
@@ -62,12 +63,15 @@ export function MessageStatus({
   const hasDetails = hasRead || visibleReceipts.length > 0 || deliveries.length > 0;
   if (!hasDetails) return null;
 
+  // pending_wake 的 detail 是唤醒方式（serve/watch…），给用户看要过一遍人话；其余状态的 detail 是 #seq / HTTP 码，原样。
+  const receiptDetail = (r: MentionReceipt): string =>
+    r.state === "pending_wake" ? wakeKindLabel(r.detail, t) : (r.detail ?? "");
   const receiptText = (r: MentionReceipt): string => {
-    const base = t(`WakeReceipt.state.${r.state}`, { detail: r.detail ?? "" });
+    const base = t(`WakeReceipt.state.${r.state}`, { detail: receiptDetail(r) });
     return r.state === "woke" && r.at !== null ? `${base} ${fmtTime(r.at)}` : base;
   };
   const receiptTitle = (r: MentionReceipt): string =>
-    t(`WakeReceipt.title.${r.state}`, { name: display(r.name), detail: r.detail ?? "" });
+    t(`WakeReceipt.title.${r.state}`, { name: display(r.name), detail: receiptDetail(r) });
   // #667：终态 failed 若带 undelivered（排队超时/对端无唤醒通道），用「未送达」独立文案，与「跑了但失败」区分。
   const deliveryStateKey = (delivery: PublicDirectedDelivery): string =>
     delivery.state === "failed" && delivery.undelivered === true ? "undelivered" : delivery.state;
