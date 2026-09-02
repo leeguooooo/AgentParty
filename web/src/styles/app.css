@@ -8665,7 +8665,7 @@ button.org-person-name {
   --ah: 200;
   --reach: var(--t-faint);
   /* 「在线只看」的蓝：集中在一处，主题要换只改这里 */
-  --reach-online: #2b6cb0;
+  --reach-online: var(--d-blue, #2b6cb0);
 
   position: relative;
   display: inline-flex;
