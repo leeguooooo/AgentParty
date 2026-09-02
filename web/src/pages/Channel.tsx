@@ -128,6 +128,7 @@ import { ChannelToolstrip } from "../components/ChannelToolstrip";
 import "../i18n/strings/Channel";
 import "../i18n/strings/Composer";
 import "../i18n/strings/WakeReceipt";
+import { presenceStateLabel, residencyLabel } from "../lib/presenceLabels";
 
 const EMPTY_RECENT_MESSAGES: MsgFrame[] = [];
 const SCREEN_READER_ONLY_STYLE: CSSProperties = {
@@ -1764,7 +1765,11 @@ export function TeamPanel({ teams }: { teams: TeamSummary[] }) {
                   className={"t-mono team-front" + (front?.active ? " is-active" : "")}
                   title={front === null
                     ? t("Channel.team.front", { name: team.rootAgent })
-                    : t("Channel.team.frontTitle", { name: front.name, state: front.state, residency: front.residency })}
+                    : t("Channel.team.frontTitle", {
+                        name: front.name,
+                        state: presenceStateLabel(front.state, t),
+                        residency: residencyLabel(front.residency, t),
+                      })}
                 >
                   <span className={`d-dot d-dot--${front?.active ? front.state : "offline"}`} />
                   {t("Channel.team.front", { name: front?.name ?? team.rootAgent })}
@@ -1773,7 +1778,7 @@ export function TeamPanel({ teams }: { teams: TeamSummary[] }) {
                   {t("Channel.team.active", { active: team.activeCount, total: team.memberCount })}
                 </span>
                 <span className={`t-mono team-residency team-residency--${team.residency}`}>
-                  {team.residency === "human_driven" ? t("Channel.team.manual") : team.residency}
+                  {residencyLabel(team.residency, t)}
                 </span>
               </div>
               <div className="t-mono team-meta">{meta.join(" · ")}</div>
@@ -1784,8 +1789,8 @@ export function TeamPanel({ teams }: { teams: TeamSummary[] }) {
                     t("Channel.team.memberTitle", {
                       name: member.name,
                       parent: member.parentAgent,
-                      state: member.state,
-                      residency: member.residency,
+                      state: presenceStateLabel(member.state, t),
+                      residency: residencyLabel(member.residency, t),
                     }),
                     member.expiresAt !== null ? t("Channel.team.meta.expires", { time: fmtTime(member.expiresAt) }) : null,
                     member.lastSeen !== null ? t("Channel.team.meta.seen", { time: fmtTime(member.lastSeen) }) : null,

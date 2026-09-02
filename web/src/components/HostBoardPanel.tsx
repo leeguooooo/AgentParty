@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import "../i18n/strings/WakeReceipt";
+import { hostLeaseLabel, presenceStateLabel, residencyLabel } from "../lib/presenceLabels";
+import { wakeKindLabel } from "../lib/wakeKindLabel";
 import type { HostBoard, RecommendedAction } from "@agentparty/shared";
 import { useT } from "../i18n/useT";
 import {
@@ -187,11 +190,15 @@ export function HostBoardPanel({
               key={host.name}
               className={`t-mono host-board-host host-board-host--${host.lease}`}
               title={[
-                t("Channel.hostBoard.hostTitle", { state: host.state, residency: host.residency, wake: host.wake_kind }),
+                t("Channel.hostBoard.hostTitle", {
+                  state: presenceStateLabel(host.state, t),
+                  residency: residencyLabel(host.residency, t),
+                  wake: wakeKindLabel(host.wake_kind, t) || host.wake_kind,
+                }),
                 host.stale_reason !== null ? t("Channel.hostBoard.reason", { reason: host.stale_reason }) : null,
               ].filter((part): part is string => part !== null).join("\n")}
             >
-              {host.name} · {host.lease}
+              {host.name} · {hostLeaseLabel(host.lease, t)}
             </span>
           ))}
         </div>
