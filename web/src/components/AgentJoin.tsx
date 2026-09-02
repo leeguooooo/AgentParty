@@ -239,19 +239,28 @@ export function recoverCommand(
   resume: ResumeTarget | null,
   token?: string | null,
 ): string {
-  if (plan === "diagnose") return `party recover ${slug}`;
-  if (plan === "fresh") return wakeableSessionCommand(slug, harness, token);
+  // 目录状态不能丢（codex stop-time review）：Claude 的会话按项目目录存放，换个目录
+  // `--resume <id>` 找不到、`--continue` 会接到别的项目；join-binding 也按目录记，
+  // `party recover` / `party claude` 换目录会解析不出身份。presence 记了 cwd 就先 cd 回去。
+  const cd = resume !== null && resume.cwd !== null ? `cd ${shellQuote(resume.cwd)} && ` : "";
+  if (plan === "diagnose") return `${cd}party recover ${slug}`;
+  if (plan === "fresh") return `${cd}${wakeableSessionCommand(slug, harness, token)}`;
   if (harness === "claude") {
     const safe = typeof token === "string" && /^[A-Za-z0-9_-]+$/.test(token) ? token : null;
     const prefix = safe === null ? "" : `AGENTPARTY_TOKEN='${safe}' `;
     const tail = resume !== null && resume.harness === "claude" ? `--resume ${resume.sessionId}` : "--continue";
-    return `${prefix}party claude ${slug} -- ${tail}`;
+    return `${cd}${prefix}party claude ${slug} -- ${tail}`;
   }
   if (harness === "codex") {
     const tail = resume !== null && resume.harness !== "claude" ? `--resume ${resume.sessionId}` : "--resume-last";
-    return `party bridge codex ${slug} ${tail}`;
+    return `${cd}party bridge codex ${slug} ${tail}`;
   }
-  return `party recover ${slug}`;
+  return `${cd}party recover ${slug}`;
+}
+
+/** POSIX 单引号转义：目录名里任何字符都不许逃出引号（含单引号本身）。 */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 /** 勾了「那台机器还没装」：把安装命令并在前面，一次复制。 */

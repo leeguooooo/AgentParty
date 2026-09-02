@@ -962,13 +962,13 @@ describe("AgentJoin 分步引导 (#1005)", () => {
       messages: [],
       now: () => NOW,
     });
-    expect(joinCmd(r)).toBe("party claude demo -- --resume 8aff5437-4afc-4be7-997c-a8c64584927d");
+    expect(joinCmd(r)).toBe("cd '/work/demo' && party claude demo -- --resume 8aff5437-4afc-4be7-997c-a8c64584927d");
     const on = r.root.find((n) => String(n.props.className ?? "").includes("agent-join-plan-option--on"));
     expect(on.props["data-plan"]).toBe("resume");
     const toggle = r.root.find((n) => n.props.type === "checkbox" && typeof n.props.onChange === "function");
     act(() => toggle.props.onChange({ target: { checked: true } }));
     expect(joinCmd(r)).toBe(
-      "curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh && party claude demo -- --resume 8aff5437-4afc-4be7-997c-a8c64584927d",
+      "curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh && cd '/work/demo' && party claude demo -- --resume 8aff5437-4afc-4be7-997c-a8c64584927d",
     );
   });
 
@@ -996,6 +996,16 @@ describe("recoverCommand（#1040 重连三档）", () => {
     expect(recoverCommand("fresh", "ludo", "claude", claudeResume)).toBe("party claude ludo");
     expect(recoverCommand("diagnose", "ludo", "claude", claudeResume)).toBe("party recover ludo");
   });
+  // codex stop-time review：Claude 会话按目录存放，丢了目录 --resume 找不到、--continue 接错项目。
+  test("presence 记了 cwd ⇒ 三档命令都先 cd 回那个目录；目录名单引号安全转义", () => {
+    const at = { harness: "claude" as const, sessionId: "sid-1", cwd: "/Users/leo/my proj" };
+    expect(recoverCommand("resume", "ludo", "claude", at)).toBe("cd '/Users/leo/my proj' && party claude ludo -- --resume sid-1");
+    expect(recoverCommand("fresh", "ludo", "claude", at)).toBe("cd '/Users/leo/my proj' && party claude ludo");
+    expect(recoverCommand("diagnose", "ludo", "claude", at)).toBe("cd '/Users/leo/my proj' && party recover ludo");
+    expect(recoverCommand("resume", "ludo", "claude", { ...at, cwd: "/tmp/it's" })).toBe("cd '/tmp/it'\\''s' && party claude ludo -- --resume sid-1");
+    expect(recoverCommand("resume", "ludo", "claude", { ...at, cwd: null })).toBe("party claude ludo -- --resume sid-1");
+  });
+
   test("presence 的 codex-sdk 会话按 codex 处理；harness 以上次会话为准", () => {
     expect(recoverHarness("other", { harness: "codex-sdk", sessionId: "t", cwd: null })).toBe("codex");
     expect(recoverHarness("codex", { harness: "claude", sessionId: "s", cwd: null })).toBe("claude");
