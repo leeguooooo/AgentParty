@@ -1,17 +1,24 @@
-// #1003：唤醒注入文案的内容与语言。
+// #1003：唤醒注入文案的内容与语言；#1052 起为 wake protocol v2（与 open-cross-session 共用的骨架）。
 //
-// 钉四件事：① 语言判定的优先级（config 覆盖 > 接收者历史 > 触发消息 > LANG > en）——把 detectWakeLang 短路成恒 en，
-// 「接收者中文 ⇒ zh」那条必须红；② 512B 预算——预览按剩余字节动态截、末尾 …、from-id 行永不被挤掉，把截断去掉，
-// 长正文用例必须红；③ 接收者历史按 (server, channel, identity) 进程内缓存、拉取失败不缓存；④ 文案集中在 t()。
+// 钉五件事：① 语言判定的优先级（config 覆盖 > 接收者历史 > 触发消息 > LANG > en）——把 detectWakeLang 短路成恒 en，
+// 「接收者中文 ⇒ zh」那条必须红；② v2 骨架——正文 ≤4096B 逐字内联、超长只内联前 512B（字符边界）+ 总字节数、
+// `Reply:` / `Thread:` 两行永不砍、from-id 行永不被挤掉、整条 ≤5120B：把 4096 改成 40 / 删掉 Reply 行，对应用例必须红；
+// ③ 接收者历史按 (server, channel, identity) 进程内缓存、拉取失败不缓存；④ 文案集中在 t()；⑤ 空闲通知三句逐字对齐规范 §2。
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import {
   WAKE_LANG_CACHE_TTL_MS,
+  WAKE_NOTE_BODY_INLINE_MAX_BYTES,
+  WAKE_NOTE_BODY_PREFIX_BYTES,
   WAKE_NOTE_MAX_BYTES,
+  WAKE_NOTE_SKELETON_MAX_BYTES,
+  buildIdleNotice,
   buildWakeNote,
   cjkRatio,
   clampPreview,
+  cutOnCharBoundary,
   detectWakeLang,
+  formatDuration,
   langFromEnv,
   normalizeWakeLang,
   receiverRecentBodies,
@@ -21,6 +28,7 @@ import {
   t,
   textsLang,
   wakeNoteFromId,
+  wakeReplyCommand,
 } from "../src/wake-note-i18n";
 
 const NOW = Date.parse("2026-08-28T10:02:00Z");
@@ -89,8 +97,10 @@ describe("语言判定 detectWakeLang（#1003）", () => {
   });
 });
 
-describe("buildWakeNote：内容与 512B 预算（#1003）", () => {
-  test("中文样例：发信人 / 频道 / seq / 相对时间 / 预览 / 读全文命令 / from-id，逐字符合 issue 目标", () => {
+describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", () => {
+  const bytesOf = (note: string) => Buffer.byteLength(note, "utf8");
+
+  test("中文骨架：头行（发信人 / 频道 / seq / 相对时间）+ 空行 + 正文逐字 + 空行 + 回复 / 线程 / from-id，逐字符合规范 §1", () => {
     const note = buildWakeNote({
       lang: "zh",
       channel: "pwtk",
@@ -102,16 +112,19 @@ describe("buildWakeNote：内容与 512B 预算（#1003）", () => {
       fromId: "lark-ad72b3f9749e",
     });
     expect(note).toBe(
-      "AgentParty 唤醒：leo 在 #pwtk 提到了你（seq 42，2 分钟前）\n" +
-        `「${ZH_BODY}」\n` +
-        "以上是预览，正文以频道为准：party history pwtk --seq 42\n" +
+      "[AgentParty 唤醒] leo 在 #pwtk 提到了你（seq 42，2 分钟前）\n" +
+        "\n" +
+        `${ZH_BODY}\n` +
+        "\n" +
+        '回复：party send "<你的回复>" --channel pwtk --reply-to 42\n' +
+        "线程：party history pwtk --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
     expect(wakeNoteFromId(note)).toBe("lark-ad72b3f9749e");
-    expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
+    expect(bytesOf(note)).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
   });
 
-  test("英文样例：同样的字段，英文措辞，seq=N 形式保持可 grep", () => {
+  test("英文骨架：带 reply_to 时头行写「reply to seq M」，Reply 行填好 channel 与 --reply-to，Thread 行是 party history --seq", () => {
     const note = buildWakeNote({
       lang: "en",
       channel: "pwtk",
@@ -120,135 +133,204 @@ describe("buildWakeNote：内容与 512B 预算（#1003）", () => {
       ts: NOW - 2 * 60_000,
       now: NOW,
       body: "is our injected note a bit too thin? the language should follow the agent",
+      replyTo: 40,
       fromId: "lark-ad72b3f9749e",
     });
     expect(note).toBe(
-      "AgentParty wake: leo mentioned you in #pwtk (seq=42, 2 min ago)\n" +
-        "“is our injected note a bit too thin? the language should follow the agent”\n" +
-        "Preview only; the channel is the single source of truth: party history pwtk --seq 42\n" +
+      "[AgentParty wake] leo mentioned you in #pwtk (seq 42, reply to seq 40, 2 min ago)\n" +
+        "\n" +
+        "is our injected note a bit too thin? the language should follow the agent\n" +
+        "\n" +
+        'Reply: party send "<your reply>" --channel pwtk --reply-to 42\n' +
+        "Thread: party history pwtk --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
   });
 
-  test("中文长正文：预览截到预算内、整条 ≤512B、末尾 …、from-id 行不丢", () => {
-    const body = "这是一段很长的中文正文，用来把预算撑爆。".repeat(40);
-    const note = buildWakeNote({
-      lang: "zh",
-      channel: "pwtk",
-      seq: 42,
-      sender: "leo",
-      ts: NOW - 5_000,
-      now: NOW,
-      body,
-      fromId: "lark-ad72b3f9749e",
-    });
-    expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
-    // 预算要用足：截断后离上限不超过一个汉字（3B）——「取前 N 字符」的 N 是按字节动态算的，不是拍脑袋的常量。
-    expect(Buffer.byteLength(note, "utf8")).toBeGreaterThan(WAKE_NOTE_MAX_BYTES - 4);
-    const lines = note.split("\n");
-    expect(lines[0]).toBe("AgentParty 唤醒：leo 在 #pwtk 提到了你（seq 42，刚刚）");
-    expect(lines[1]!.startsWith("「这是一段很长的中文正文")).toBe(true);
-    expect(lines[1]!.endsWith("…」")).toBe(true);
-    expect(lines[2]).toBe("以上是预览，正文以频道为准：party history pwtk --seq 42");
-    expect(lines[3]).toBe("from-id: lark-ad72b3f9749e");
-    expect(wakeNoteFromId(note)).toBe("lark-ad72b3f9749e");
-  });
-
-  test("英文长正文同理：≤512B、末尾 …、from-id 可读回", () => {
+  test("接收方身份来自显式 AGENTPARTY_CONFIG ⇒ Reply 行带 `AGENTPARTY_CONFIG=<path> ` 前缀，复制即用", () => {
     const note = buildWakeNote({
       lang: "en",
       channel: "pwtk",
       seq: 42,
       sender: "leo",
-      body: "word ".repeat(300),
-      fromId: "lark-ad72b3f9749e",
+      body: "hi",
+      configPath: "/Users/me/.agentparty/agents/super-admin.json",
       now: NOW,
     });
-    expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
-    expect(Buffer.byteLength(note, "utf8")).toBeGreaterThan(WAKE_NOTE_MAX_BYTES - 4);
-    const lines = note.split("\n");
-    expect(lines[1]!.endsWith("…”")).toBe(true);
-    expect(lines.at(-1)).toBe("from-id: lark-ad72b3f9749e");
-    expect(wakeNoteFromId(note)).toBe("lark-ad72b3f9749e");
+    expect(note).toContain(
+      'Reply: AGENTPARTY_CONFIG=/Users/me/.agentparty/agents/super-admin.json party send "<your reply>" --channel pwtk --reply-to 42',
+    );
+    // 路径里有空格 ⇒ 单引号包裹，仍是一条合法 shell 命令。
+    expect(wakeReplyCommand("en", "pwtk", 42, "/tmp/my dir/a.json")).toBe(
+      "AGENTPARTY_CONFIG='/tmp/my dir/a.json' party send \"<your reply>\" --channel pwtk --reply-to 42",
+    );
+    expect(wakeReplyCommand("zh", "pwtk", 42, null)).toBe('party send "<你的回复>" --channel pwtk --reply-to 42');
   });
 
-  test("最长 channel + 最长 identity + 长友好名 + siblings + 长正文齐上仍 ≤512B，siblings=N 与 from-id 都在", () => {
+  test("300B 正文逐字内联：换行、缩进、引号、反引号一个字都不动，也不加引号", () => {
+    const head = "line 1: `code`\n  indented \"quoted\" line\n\n";
+    const body = head + "x".repeat(300 - bytesOf(head));
+    expect(bytesOf(body)).toBe(300);
+    const note = buildWakeNote({ lang: "en", channel: "dev", seq: 7, sender: "leo", body, now: NOW, fromId: "id" });
+    const lines = note.split("\n");
+    expect(lines[0]).toBe("[AgentParty wake] leo mentioned you in #dev (seq 7)");
+    expect(lines[1]).toBe("");
+    expect(note).toContain(`\n\n${body}\n\n`);
+    expect(lines.at(-3)).toBe('Reply: party send "<your reply>" --channel dev --reply-to 7');
+    expect(lines.at(-2)).toBe("Thread: party history dev --seq 7");
+    expect(lines.at(-1)).toBe("from-id: id");
+  });
+
+  test("≤4096B 的正文整段内联（恰好 4096B 也内联）；4097B 起只内联前 512B + 总字节数 + 读线程命令", () => {
+    const exact = "y".repeat(WAKE_NOTE_BODY_INLINE_MAX_BYTES);
+    const inlined = buildWakeNote({ lang: "en", channel: "dev", seq: 7, sender: "leo", body: exact, now: NOW });
+    expect(inlined).toContain(`\n\n${exact}\n\n`);
+    expect(inlined).not.toContain("bytes total");
+    expect(bytesOf(inlined)).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
+
+    const over = "z".repeat(WAKE_NOTE_BODY_INLINE_MAX_BYTES + 1);
+    const cut = buildWakeNote({ lang: "en", channel: "dev", seq: 7, sender: "leo", body: over, now: NOW });
+    expect(cut).toContain(`\n\n${"z".repeat(WAKE_NOTE_BODY_PREFIX_BYTES)}\n… (4097 bytes total; full text: party history dev --seq 7)\n\n`);
+    expect(cut).not.toContain("z".repeat(WAKE_NOTE_BODY_PREFIX_BYTES + 1));
+  });
+
+  test("6000B 中文正文：前缀恰在字符边界截断（≤512B 且不切开汉字）+ 总字节数行；中英骨架都 ≤5120B", () => {
+    // 每个汉字 3B：2000 个汉字 = 6000B；512 不是 3 的倍数，边界必须落在 510B（170 个字）而不是切开第 171 个字。
+    const body = "跨".repeat(2000);
+    expect(bytesOf(body)).toBe(6000);
+    for (const lang of ["zh", "en"] as const) {
+      const note = buildWakeNote({ lang, channel: "dev", seq: 9, sender: "leo", body, now: NOW, fromId: "id" });
+      const lines = note.split("\n");
+      const prefix = lines[2]!;
+      expect(prefix).toBe("跨".repeat(170));
+      expect(bytesOf(prefix)).toBe(510);
+      expect(bytesOf(prefix)).toBeLessThanOrEqual(WAKE_NOTE_BODY_PREFIX_BYTES);
+      expect(lines[3]).toBe("… (6000 bytes total; full text: party history dev --seq 9)");
+      expect(lines[4]).toBe("");
+      expect(bytesOf(note)).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
+      expect(wakeNoteFromId(note)).toBe("id");
+    }
+    // 代理对（emoji，4B）同样不被切开。
+    const emoji = "😀".repeat(1500);
+    const cut = cutOnCharBoundary(emoji, WAKE_NOTE_BODY_PREFIX_BYTES);
+    expect(cut).toBe("😀".repeat(128));
+    expect(bytesOf(cut)).toBe(512);
+    expect(cutOnCharBoundary("abc", 10)).toBe("abc");
+  });
+
+  test("最长 channel + 最长 identity + 长友好名 + siblings + 长 config 路径 + 4096B 正文齐上仍 ≤5120B，骨架 ≤1024B", () => {
     for (const lang of ["zh", "en"] as const) {
       const note = buildWakeNote({
         lang,
         channel: "a".repeat(64),
         seq: Number.MAX_SAFE_INTEGER,
         sender: "郭立 lee · agentparty · 一个特别特别长的显示名字".repeat(2),
-        // 发信人按字节封顶（48B），长昵称截成「郭立 lee · agentparty · 一…」这类，不会把预算吃光。
         ts: NOW - 3 * 24 * 3_600_000,
         now: NOW,
-        body: "正文".repeat(300),
+        body: "正文".repeat(682) + "正", // 4095B
+        replyTo: Number.MAX_SAFE_INTEGER - 1,
+        configPath: `/Users/${"u".repeat(40)}/.agentparty/agents/${"n".repeat(40)}.json`,
         fromId: "b".repeat(64),
         siblings: 99,
       });
-      expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
+      expect(bytesOf(note)).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
       expect(note).toContain("siblings=99");
       expect(note).toContain(`#${"a".repeat(64)}`);
+      expect(note).toContain(`--reply-to ${Number.MAX_SAFE_INTEGER}`);
+      expect(note).toContain(`party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
       expect(wakeNoteFromId(note)).toBe("b".repeat(64));
+      // 骨架 = 整条 − 正文。
+      expect(bytesOf(note) - bytesOf("正文".repeat(682) + "正")).toBeLessThanOrEqual(WAKE_NOTE_SKELETON_MAX_BYTES);
     }
   });
 
-  test("预算装不下预览时整行不给（不留半个引号）；再不够就 siblings 裸 → 去发信人；指针与 from-id 永不让步", () => {
+  test("骨架超预算按阶梯让步：siblings 裸 → 去 ago → 去发信人 → 去 AGENTPARTY_CONFIG 前缀；Reply / Thread / from-id 永不砍", () => {
     const base = {
       lang: "zh" as const,
       channel: "a".repeat(64),
       seq: Number.MAX_SAFE_INTEGER,
       sender: "x".repeat(40),
+      ts: NOW - 2 * 60_000,
+      now: NOW,
       body: "正文正文正文正文正文正文正文正文正文正文",
       fromId: "b".repeat(64),
       siblings: 99,
+      configPath: "/tmp/agents/x.json",
     };
-    const bytesOf = (note: string) => Buffer.byteLength(note, "utf8");
-    // 完整骨架（无预览）刚好装得下、预览装不下 ⇒ 只去预览，发信人与 siblings 说明都保留。
-    const fullSkeleton = buildWakeNote({ ...base, body: "" });
-    const noPreview = buildWakeNote({ ...base, maxBytes: bytesOf(fullSkeleton) + 5 });
-    expect(noPreview).toBe(fullSkeleton);
-    expect(noPreview).not.toContain("「");
-    expect(noPreview).toContain(`${"x".repeat(40)} 在 #`);
-    expect(noPreview).toContain("siblings=99：");
-    // 完整骨架都装不下 ⇒ siblings 行退成裸 `siblings=99`，发信人还在。
-    const bareSiblings = buildWakeNote({ ...base, maxBytes: bytesOf(fullSkeleton) - 1 });
-    expect(bytesOf(bareSiblings)).toBeLessThanOrEqual(bytesOf(fullSkeleton) - 1);
-    expect(bareSiblings).toContain("siblings=99\n");
-    expect(bareSiblings).toContain(`${"x".repeat(40)} 在 #`);
-    // 再不够 ⇒ 去发信人（「有人提到了你」）。
-    const bareSkeleton = buildWakeNote({ ...base, body: "", maxBytes: bytesOf(fullSkeleton) - 1 });
-    const anon = buildWakeNote({ ...base, maxBytes: bytesOf(bareSkeleton) - 1 });
-    expect(bytesOf(anon)).toBeLessThanOrEqual(bytesOf(bareSkeleton) - 1);
+    const full = buildWakeNote(base);
+    const skeletonOf = (note: string) => bytesOf(note) - bytesOf(base.body);
+    expect(full).toContain("siblings=99：");
+    expect(full).toContain("2 分钟前");
+    // 完整骨架装不下一字节 ⇒ siblings 行退成裸 `siblings=99`；发信人与时间还在。
+    const bare = buildWakeNote({ ...base, skeletonMaxBytes: skeletonOf(full) - 1 });
+    expect(bare).toContain("siblings=99\n");
+    expect(bare).toContain(`${"x".repeat(40)} 在 #`);
+    expect(bare).toContain("2 分钟前");
+    // 再不够 ⇒ 先砍 ago（规范：先砍 <ago>、再砍 sender）。
+    const noAgo = buildWakeNote({ ...base, skeletonMaxBytes: skeletonOf(bare) - 1 });
+    expect(noAgo).not.toContain("2 分钟前");
+    expect(noAgo).toContain(`${"x".repeat(40)} 在 #`);
+    // 再不够 ⇒ 砍发信人（「有人提到了你」）。
+    const anon = buildWakeNote({ ...base, skeletonMaxBytes: skeletonOf(noAgo) - 1 });
     expect(anon).toContain("有人在 #");
     expect(anon).not.toContain("x".repeat(40));
-    for (const note of [noPreview, bareSiblings, anon]) {
-      expect(note).toContain(`party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
+    for (const note of [full, bare, noAgo, anon]) {
+      expect(note).toContain(`回复：AGENTPARTY_CONFIG=/tmp/agents/x.json party send "<你的回复>" --channel ${"a".repeat(64)} --reply-to ${Number.MAX_SAFE_INTEGER}`);
+      expect(note).toContain(`线程：party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
       expect(wakeNoteFromId(note)).toBe("b".repeat(64));
     }
-    // 连指针 + from-id 都装不下 ⇒ 程序错误，抛而不是静默截坏。
+    // 最后一档：去掉 AGENTPARTY_CONFIG 前缀，Reply 行本身仍在。一格一格往下压，途中每一档 Reply / Thread / from-id 都在。
+    let limit = skeletonOf(anon) - 1;
+    let noPrefix: string | null = null;
+    for (; limit > 0 && noPrefix === null; limit -= 1) {
+      const note = buildWakeNote({ ...base, skeletonMaxBytes: limit });
+      expect(note).toContain(`线程：party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
+      expect(note).toMatch(/回复：(AGENTPARTY_CONFIG=\S+ )?party send "<你的回复>" --channel a+ --reply-to \d+/);
+      expect(wakeNoteFromId(note)).toBe("b".repeat(64));
+      if (!note.includes("AGENTPARTY_CONFIG=")) noPrefix = note;
+    }
+    expect(noPrefix).not.toBeNull();
+    expect(noPrefix).toContain(`回复：party send "<你的回复>" --channel ${"a".repeat(64)} --reply-to ${Number.MAX_SAFE_INTEGER}`);
+    // 连 Reply + Thread + from-id 都装不下 ⇒ 程序错误，抛而不是静默截坏。
     expect(() => buildWakeNote({ ...base, maxBytes: 120 })).toThrow(/exceeds 120 bytes/);
   });
 
-  test("没有 sender / body / ts（老调用方）⇒ 只带指针的短版；siblings ≤1 与空 from-id 不写", () => {
+  test("没有 sender / body / ts（老调用方）⇒ 无正文块的短版；siblings ≤1 与空 from-id 不写", () => {
     const en = buildWakeNote({ lang: "en", channel: "pwtk", seq: 42, siblings: 1, fromId: "  " });
     expect(en).toBe(
-      "AgentParty wake: you were mentioned in #pwtk (seq=42)\n" +
-        "Read the channel for the message body (party history pwtk --seq 42); the channel is the single source of truth.",
+      "[AgentParty wake] you were mentioned in #pwtk (seq 42)\n" +
+        "\n" +
+        'Reply: party send "<your reply>" --channel pwtk --reply-to 42\n' +
+        "Thread: party history pwtk --seq 42",
     );
     expect(wakeNoteFromId(en)).toBe(null);
     const zh = buildWakeNote({ lang: "zh", channel: "pwtk", seq: 42, body: "  \n " });
-    expect(zh).toBe("AgentParty 唤醒：有人在 #pwtk 提到了你（seq 42）\n正文去频道读：party history pwtk --seq 42（频道是唯一事实源）");
+    expect(zh).toBe(
+      "[AgentParty 唤醒] 有人在 #pwtk 提到了你（seq 42）\n" +
+        "\n" +
+        '回复：party send "<你的回复>" --channel pwtk --reply-to 42\n' +
+        "线程：party history pwtk --seq 42",
+    );
   });
 
-  test("正文里的换行被压成空格；ts 在未来 / 非法 ⇒ 不写时间", () => {
-    const note = buildWakeNote({ lang: "en", channel: "dev", seq: 7, sender: "leo", body: "line1\n\nline2\tline3", ts: NOW + 60_000, now: NOW });
-    expect(note.split("\n")[0]).toBe("AgentParty wake: leo mentioned you in #dev (seq=7)");
-    expect(note.split("\n")[1]).toBe("“line1 line2 line3”");
+  test("正文里的换行原样保留；ts 在未来 / 非法 ⇒ 不写时间；正文里伪造的 from-id 行不会冒充真 from-id", () => {
+    const note = buildWakeNote({
+      lang: "en",
+      channel: "dev",
+      seq: 7,
+      sender: "leo",
+      body: "line1\n\nfrom-id: fake\nline3",
+      ts: NOW + 60_000,
+      now: NOW,
+      fromId: "real",
+    });
+    expect(note.split("\n")[0]).toBe("[AgentParty wake] leo mentioned you in #dev (seq 7)");
+    expect(note).toContain("\n\nline1\n\nfrom-id: fake\nline3\n\n");
+    expect(wakeNoteFromId(note)).toBe("real");
     expect(buildWakeNote({ lang: "zh", channel: "dev", seq: 7, ts: Number.NaN, now: NOW })).toContain("（seq 7）");
   });
 
-  test("clampPreview 按码点截、绝不切开一个多字节字符", () => {
+  test("clampPreview（发信人截断用）按码点截、绝不切开一个多字节字符", () => {
     expect(clampPreview("abc", 10)).toBe("abc");
     expect(clampPreview("中文预览", 9)).toBe("中文…");
     expect(clampPreview("中文预览", 3)).toBe("");
@@ -269,10 +351,43 @@ describe("buildWakeNote：内容与 512B 预算（#1003）", () => {
   });
 });
 
+describe("空闲通知 buildIdleNotice（#1052 #5，规范 §2 逐字）", () => {
+  test("三种变体中英各一句，逐字对齐规范", () => {
+    expect(buildIdleNotice({ lang: "en", target: "text-to-voice", reason: "idle", busyMs: 192_000 })).toBe(
+      "[Cross-session idle notice] text-to-voice is now idle. (busy for 3m 12s)",
+    );
+    expect(buildIdleNotice({ lang: "en", target: "text-to-voice", reason: "exited" })).toBe(
+      "[Cross-session idle notice] text-to-voice exited before going idle.",
+    );
+    expect(buildIdleNotice({ lang: "en", target: "text-to-voice", reason: "expired" })).toBe(
+      "[Cross-session idle notice] text-to-voice did not go idle within 6h; subscription expired.",
+    );
+    expect(buildIdleNotice({ lang: "zh", target: "text-to-voice", reason: "idle", busyMs: 192_000 })).toBe(
+      "[跨会话空闲通知] text-to-voice 现在空闲了（忙了 3 分 12 秒）。",
+    );
+    expect(buildIdleNotice({ lang: "zh", target: "text-to-voice", reason: "exited" })).toBe(
+      "[跨会话空闲通知] text-to-voice 在空闲前已退出。",
+    );
+    expect(buildIdleNotice({ lang: "zh", target: "text-to-voice", reason: "expired" })).toBe(
+      "[跨会话空闲通知] text-to-voice 6 小时内没有空闲，订阅已过期。",
+    );
+  });
+
+  test("时长：秒 / 分秒 / 时分；负数与 NaN 当 0", () => {
+    expect(formatDuration("en", 0)).toBe("0s");
+    expect(formatDuration("en", 45_000)).toBe("45s");
+    expect(formatDuration("en", 3_600_000 + 120_000)).toBe("1h 2m");
+    expect(formatDuration("zh", 59_999)).toBe("59 秒");
+    expect(formatDuration("zh", 2 * 3_600_000)).toBe("2 小时 0 分");
+    expect(formatDuration("en", -5)).toBe("0s");
+    expect(formatDuration("en", Number.NaN)).toBe("0s");
+  });
+});
+
 describe("文案表 t()", () => {
   test("占位符替换；未知 key 直接抛（别把 key 本身吐给模型）", () => {
     expect(t("zh", "wake.ago.min", { n: 5 })).toBe("5 分钟前");
-    expect(t("en", "wake.footer.preview", { channel: "pwtk", seq: 42 })).toContain("party history pwtk --seq 42");
+    expect(t("en", "wake.thread", { cmd: "party history pwtk --seq 42" })).toBe("Thread: party history pwtk --seq 42");
     expect(() => t("en", "nope.missing")).toThrow(/unknown key/);
   });
 

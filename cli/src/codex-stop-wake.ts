@@ -44,7 +44,7 @@ import { join } from "node:path";
 import { atomicWriteJson } from "./atomic-json";
 import type { StuckWake } from "./config";
 import { isSlug } from "./validation";
-import { t, type WakeLang } from "./wake-note-i18n";
+import { t, wakeReplyCommand, type WakeLang } from "./wake-note-i18n";
 
 /** seen 集合的落盘目录，与 #893 的 marker 目录并列。 */
 export const CODEX_STOP_WAKE_SEEN_DIR = "codex-stop-wake";
@@ -269,15 +269,19 @@ export function codexStopWakeReason(pointer: CodexStopWakePointer, lang: WakeLan
       CODEX_STOP_WAKE_REASON_MAX_BYTES,
     );
   }
-  return clampUtf8(
-    t(lang, scopedHistory === null ? "codex.stop.single" : "codex.stop.single.scoped", {
-      channel: pointer.channel,
-      seq: pointer.seq,
-      since: Math.max(0, pointer.seq - 1),
-      history: scopedHistory ?? `party history ${pointer.channel} --since ${Math.max(0, pointer.seq - 1)}`,
-    }),
-    CODEX_STOP_WAKE_REASON_MAX_BYTES,
-  );
+  const single = t(lang, scopedHistory === null ? "codex.stop.single" : "codex.stop.single.scoped", {
+    channel: pointer.channel,
+    seq: pointer.seq,
+    since: Math.max(0, pointer.seq - 1),
+    history: scopedHistory ?? `party history ${pointer.channel} --since ${Math.max(0, pointer.seq - 1)}`,
+  });
+  // #1052（wake protocol v2）：载体上限不变（512B），装得下就把可复制执行的回复命令也带上——
+  // 与 UDS 注入的 `Reply:` 行同源（wakeReplyCommand）。scoped 变体要复用 --config-b64 身份，不给裸 party send。
+  if (scopedHistory === null) {
+    const withReply = single + t(lang, "codex.stop.reply", { cmd: wakeReplyCommand(lang, pointer.channel, pointer.seq) });
+    if (Buffer.byteLength(withReply, "utf8") <= CODEX_STOP_WAKE_REASON_MAX_BYTES) return withReply;
+  }
+  return clampUtf8(single, CODEX_STOP_WAKE_REASON_MAX_BYTES);
 }
 
 export type CodexStopWakeSkip =

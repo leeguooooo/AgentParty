@@ -1418,6 +1418,30 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/presence/{name}/notify-when-idle": {
+      post: {
+        summary: "subscribe once to an agent's next busy→idle transition (notify_when_idle, #1052)",
+        description:
+          "One-shot subscription by the bearer identity. When {name} next flips from busy to idle (or goes offline) " +
+          "the subscriber's live connections receive a single `idle_notice` frame; nothing is posted to the channel. " +
+          "If {name} is already idle/offline the notice is delivered immediately. Expires after 6h with an `expired` notice. " +
+          "Idempotent per (target, subscriber).",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "name", in: "path", required: true, schema: { type: "string" }, description: "target agent name" },
+        ],
+        responses: {
+          "200": {
+            description:
+              "{ok, target, subscriber, outcome: subscribed|fired|existing, fired?: idle|exited, expires_at?}",
+          },
+          "400": { description: "self-subscription" },
+          "403": { description: "readonly token / scoped to another channel" },
+          "404": { description: "channel or target not found" },
+        },
+      },
+    },
     "/api/channels/{slug}/reset-guard": {
       post: {
         summary: "reset the loop guard counter",

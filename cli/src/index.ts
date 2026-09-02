@@ -25,7 +25,8 @@ commands:
   join      --server URL --channel SLUG --as NAME [--harness H] [--yes]   AGENTPARTY_TOKEN=… one command: config+rules, dedupe, bind, register MCP, install+approve codex hook, check in, self-check (#944)
   recover   <channel> [--harness H] [--yes]          recover/reconnect an identity this dir already joined: find the binding, verify the token, align versions, re-arm the session, verify (#991)
   up        [channel-url|slug] [--runner claude|codex|codex-sdk]   one idempotent command: token → bind → resident serve (self-heal, #837)
-  send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
+  send      <text|-> [--channel C] [--mention name]... [--reply-to seq] [--notify-when-idle]
+  notify-when-idle <agent> [--channel C]                 one-shot: get an idle notice when <agent> finishes (no message sent, #1052)
   complete  <text|-> --kickoff-seq seq [--channel C] [--replies n] [--timeout] [--issue n]... [--pr n]...
   review    approve|reject <seq> [-m reason] [--channel C] [--json]
   receipt   <seq> [--reason not_in_turn|queued|seen] [-m note]   mark received without replying (#828)
@@ -156,6 +157,8 @@ async function dispatch(argv: string[]): Promise<number> {
       return (await import("./commands/up")).run(rest);
     case "send":
       return (await import("./commands/send")).run(rest);
+    case "notify-when-idle":
+      return (await import("./commands/notify-when-idle")).run(rest);
     case "complete":
       return (await import("./commands/complete")).run(rest);
     case "review":

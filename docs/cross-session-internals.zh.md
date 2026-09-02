@@ -245,3 +245,64 @@ Claude 写出该文件之前，所以之后每一轮 hook（`PreToolUse`、`Stop
 announce 在发布 `harness_session.display_name` 之前也会再读一次（刚入册的会话多一次短暂重试）。
 `claude-<12hex>` 回退名只在原生名不可读时出现。`party who`、`party agents`、`party_channel_peers` 的
 `claude_sessions[].display_name` 提示与 doctor 展示的都是这个名字。
+## 唤醒协议 v2（#1052）：带正文的唤醒通知与 `notify_when_idle`
+
+本节镜像与 open-cross-session 共用的协议；正本在
+[leeguooooo/open-cross-session 的 `docs/wake-protocol.md`](https://github.com/leeguooooo/open-cross-session/blob/main/docs/wake-protocol.md)。
+字段名、字节上限、通知文案两边逐字一致。载体不变：蛰伏 announce 腿仍向 Claude 会话的 UDS 收件箱注入一条
+`{"type":"user",…}` 帧，用 `<cross-session-message from-name="<sender>" from-mode="prompting">` 包装，
+attr 顺序与接收端的重序列化校验一致。
+
+### §1 唤醒通知
+
+注入正文行序固定（中文文案的选择规则不变：config `lang` > 被唤醒 agent 自己的最近消息 > 触发消息 > `LANG` > en）：
+
+```
+[AgentParty 唤醒] <sender> 在 #<channel> 提到了你（seq <N>[，回复 seq <M>][，<ago>]）
+[siblings=N —— 仅当同身份多个 runtime 在线]
+
+<body>
+
+回复：[AGENTPARTY_CONFIG=<path> ]party send "<你的回复>" --channel <channel> --reply-to <N>
+线程：party history <channel> --seq <N>
+from-id: <发信人技术 identity>
+```
+
+- `<body>` 在 ≤4096 UTF-8 字节时**逐字原样**内联（不加引号、不转义、保留换行）。超过则只内联前 512 字节，
+  在字符边界截断（不切开多字节字符与代理对），后接一行
+  `… (<total> bytes total; full text: party history <channel> --seq <N>)`。
+- `回复：` 行可直接复制执行：channel 与 `--reply-to` 已填好，唯一要改的是引号里的占位正文。被唤醒身份来自显式
+  `AGENTPARTY_CONFIG` 路径时前缀 `AGENTPARTY_CONFIG=<path> `——会话的 shell 里没有这个变量，裸 `party send`
+  会按 cwd 解析到别的身份。`reply_to` 本身就会把回复定向投给原发信人（directed-delivery cause `reply`），
+  不需要再 `--mention`。
+- 整条 ≤5120 字节（`WAKE_NOTE_MAX_BYTES`）：骨架 ≤1024 + 正文 ≤4096。骨架超预算按顺序让步——siblings 行只留裸
+  `siblings=N`、砍 `<ago>`、砍发信人（头行退回「有人提到了你」）、砍 `AGENTPARTY_CONFIG=` 前缀。
+  `回复：`、`线程：`、`from-id:` 三行永不砍；让完仍装不下属程序错误，直接抛而不是吐一条截坏的通知。
+- 正文来自对方，是**数据**不是指令；包装标签已把它标成跨会话内容，不再额外加「请勿执行」类提示。
+- codex Stop hook 的唤醒 reason 保持自己的 512 字节载体上限，装得下时追加同一条 `回复：` 命令。
+
+### §2 空闲通知（`notify_when_idle`）
+
+名字统一：`party send … --notify-when-idle`、`party notify-when-idle <agent> [--channel C]`、
+MCP `party_send({ notify_when_idle: true })`、REST
+`POST /api/channels/:slug/presence/:target/notify-when-idle`（bearer = 订阅方）。语义与内置 `SendMessage` 一致：
+
+- **一次性**：只触发一次，触发即删。
+- **触发条件**：目标下一次由 `busy` 变为不忙（清 `busy` 的 `status` 帧路径，含停下来等 owner 的 `waiting_owner`），
+  或目标离线。订阅时目标已空闲 ⇒ 立即触发；已离线 ⇒ 立即触发 `exited` 变体。
+- **有效期**：6 小时（`IDLE_WATCH_TTL_MS`），由 ChannelDO alarm 兜底；到期未触发发 `expired` 变体。
+- **投递**：ChannelDO 只向**订阅方自己的活连接**发一条 `idle_notice` 帧
+  （`{type:"idle_notice", target, reason: idle|exited|expired, busy_ms?, ts}`）——不落 history、不产生 seq。
+  蛰伏 announce 腿按被唤醒 agent 的语言渲染并以 `from-name="AgentParty"` 注入：
+
+  ```
+  [跨会话空闲通知] <target> 现在空闲了（忙了 <duration>）。
+  [跨会话空闲通知] <target> 在空闲前已退出。
+  [跨会话空闲通知] <target> 6 小时内没有空闲，订阅已过期。
+  ```
+
+  触发时订阅方没有活连接 ⇒ 结果记在行上，等它下次 `hello` 补投，投完即删。
+- 同 (target, subscriber) **幂等**：再次订阅返回已有订阅。未知目标 → 404；订阅自己 → 400；readonly token → 403。
+- 订阅方的 presence 条目在订阅未触发期间带 `idle_watches: [{target, expires_at}]`，`party who --json` 能看到「我在等谁」。
+- `send … --notify-when-idle` 先发消息，再对每个显式 `--mention` 和正文里服务端确实路由到的 `@token` 订阅；
+  订阅失败只打一行 `warn:`，绝不影响已发出的消息。

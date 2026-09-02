@@ -46,6 +46,7 @@ import {
   postMessage,
   postReceipt,
   spawnAgent,
+  subscribeIdleNotice,
   taskStateFromReportedStatus,
   updateTask,
   type Identity,
@@ -54,7 +55,7 @@ import { serverVersionUpgradeNotice, upgradeNotice, type UpgradeDeps } from "../
 import { isName, isSlug } from "../validation";
 import { AUTHZ_PROSE_WARNING, DECISION_APPROVAL_LEDGER_NOTE, checkAuthz, isValidAuthzAction } from "../authz";
 import { askDecision } from "./decision";
-import { uploadAttachmentPaths } from "./send";
+import { subscribeIdleNotices, uploadAttachmentPaths } from "./send";
 import { buildContext } from "./status";
 import {
   describeDeniedLease,
@@ -608,9 +609,19 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           .array(z.string())
           .optional()
           .describe("Local file paths to upload as attachments (max 25MB each). Body may be empty only when attaching."),
+        // #1052 #5：与 Claude Code 内置 SendMessage 的 notify_when_idle 同名同义——一次性订阅每个 @ 到的
+        // agent 的下一次忙→闲（或退出），通知注入本会话、不进频道。
+        notify_when_idle: z
+          .boolean()
+          .optional()
+          .describe(
+            "After sending, subscribe ONCE to each mentioned agent: when it next goes from busy to idle (or exits) " +
+              "you receive one '[Cross-session idle notice]' in your own session — no polling, nothing posted to the channel. " +
+              "Fires immediately if the target is already idle; expires after 6h with a notice. Same semantics as the built-in SendMessage notify_when_idle.",
+          ),
       },
     },
-    async ({ channel, body, mentions, reply_to, also_resolves, attach }) => {
+    async ({ channel, body, mentions, reply_to, also_resolves, attach, notify_when_idle }) => {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
@@ -636,6 +647,10 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
         });
         advanceCursorPastOwnMessage(resolved, seq);
+        // #1052：先发再订阅；订阅失败只回报，不影响已发成功的消息。
+        const idleWatches = notify_when_idle === true && normalizedMentions.length > 0
+          ? await subscribeIdleNotices(cfg.server, cfg.token, resolved, normalizedMentions, subscribeIdleNotice)
+          : [];
         return ok({
           type: "send",
           channel: resolved,
@@ -643,6 +658,13 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           // #663：正文里未能路由的 @token（如自然语言「@我」）已按文本原样发出；回执告知调用方，绝不阻断发送。
           ...(unresolved_mentions !== undefined && unresolved_mentions.length > 0
             ? { unresolved_mentions }
+            : {}),
+          ...(notify_when_idle === true
+            ? {
+                notify_when_idle: normalizedMentions.length === 0
+                  ? "ignored: no explicit mentions to subscribe to (pass mentions: [...])"
+                  : idleWatches.map(({ target, ok: subscribed, line }) => ({ target, ok: subscribed, detail: line })),
+              }
             : {}),
           ...(attachments !== undefined
             ? { attachments: attachments.map((a) => ({ filename: a.filename, size: a.size, url: a.url })) }

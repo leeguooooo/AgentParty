@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WAKE_VERIFY_PREFIX, type ServerFrame } from "@agentparty/shared";
+import { CLAUDE_NATIVE_SESSIONS_DIR_ENV, CROSS_SESSION_TAG } from "../src/claude-inbox-inject";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
-import { CLAUDE_NATIVE_SESSIONS_DIR_ENV } from "../src/claude-inbox-inject";
 import { wakeProxyNoteFromId } from "../src/serve-wake-proxy";
 import { resetWakeLangCache } from "../src/wake-note-i18n";
 import {
+  IDLE_NOTICE_FROM_NAME,
   dormantAnnounceDisplayName,
   dormantAnnounceMentionHit,
   dormantAnnounceIsReplayFrame,
@@ -537,7 +539,8 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     expect(calls[0]!.fromName).toBe("leo@example.com");
     // 技术 ID 挪到正文 from-id 行，仍可读回。
     expect(wakeProxyNoteFromId(calls[0]!.body)).toBe("leo");
-    expect(calls[0]!.body).toContain("seq=13");
+    expect(calls[0]!.body).toContain("seq 13");
+    expect(calls[0]!.body).toContain('Reply: party send "<your reply>" --channel dev --reply-to 13');
     expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
     // 注入路径不改变 P2 不变式：只本地 ack，绝不发客户端帧、绝不推进持久化游标。
     expect(connections[0]!.acked).toEqual([11, 12, 13]);
@@ -847,9 +850,9 @@ describe("同身份多 runtime 的 @ 唤醒（issue #963）", () => {
     runtimes[0]!.connections[0]!.push(msg(37, [SELF]));
     await tick(40);
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.body).toContain("seq=37");
+    expect(calls[0]!.body).toContain("seq 37");
     expect(calls[0]!.body).toContain("siblings=3");
-    expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
+    expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(5120);
     abort.abort();
     await done;
   });
@@ -992,57 +995,164 @@ describe("注入正文的内容与语言（#1003）", () => {
     await done;
   }
 
-  test("接收者最近消息是中文 ⇒ 注入中文：发信人 / 频道 / seq / 相对时间 / 预览 / 读全文命令 / from-id（issue 样例）", async () => {
+  test("接收者最近消息是中文 ⇒ 注入中文 v2 骨架：头行 / 正文逐字 / 回复 / 线程 / from-id（issue 样例）", async () => {
     const { deps, connections, calls } = setup({ fetchReceiverBodies: async () => ["收到，我看看", "已经修好了，PR 在路上"] });
     await runOne(deps, connections, [frameWith(42, ZH_BODY, NOW - 2 * 60_000)]);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.body).toBe(
-      "AgentParty 唤醒：leo 在 #dev 提到了你（seq 42，2 分钟前）\n" +
-        `「${ZH_BODY}」\n` +
-        "以上是预览，正文以频道为准：party history dev --seq 42\n" +
+      "[AgentParty 唤醒] leo 在 #dev 提到了你（seq 42，2 分钟前）\n" +
+        "\n" +
+        `${ZH_BODY}\n` +
+        "\n" +
+        '回复：party send "<你的回复>" --channel dev --reply-to 42\n' +
+        "线程：party history dev --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
     expect(calls[0]!.fromName).toBe("leo");
     expect(wakeProxyNoteFromId(calls[0]!.body)).toBe("lark-ad72b3f9749e");
-    expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
+    expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(5120);
   });
 
-  test("没有历史但触发消息是中文 ⇒ zh；接收者历史与触发消息都英文 ⇒ en", async () => {
+  test("没有历史但触发消息是中文 ⇒ zh；接收者历史与触发消息都英文 ⇒ en（带 reply_to 时头行写 reply to seq）", async () => {
     const zh = setup({ fetchReceiverBodies: async () => [] });
     await runOne(zh.deps, zh.connections, [frameWith(43, ZH_BODY, NOW - 60_000)]);
-    expect(zh.calls[0]!.body.startsWith("AgentParty 唤醒：leo 在 #dev 提到了你（seq 43，1 分钟前）")).toBe(true);
+    expect(zh.calls[0]!.body.startsWith("[AgentParty 唤醒] leo 在 #dev 提到了你（seq 43，1 分钟前）")).toBe(true);
 
     const en = setup({ fetchReceiverBodies: async () => ["on it", "merged"] });
-    await runOne(en.deps, en.connections, [frameWith(44, "please review the failing job", NOW - 3 * 3_600_000)]);
+    const frame = { ...(frameWith(44, "please review the failing job", NOW - 3 * 3_600_000) as unknown as Record<string, unknown>), reply_to: 40 } as unknown as ServerFrame;
+    await runOne(en.deps, en.connections, [frame]);
     expect(en.calls[0]!.body).toBe(
-      "AgentParty wake: leo mentioned you in #dev (seq=44, 3 h ago)\n" +
-        "“please review the failing job”\n" +
-        "Preview only; the channel is the single source of truth: party history dev --seq 44\n" +
+      "[AgentParty wake] leo mentioned you in #dev (seq 44, reply to seq 40, 3 h ago)\n" +
+        "\n" +
+        "please review the failing job\n" +
+        "\n" +
+        'Reply: party send "<your reply>" --channel dev --reply-to 44\n' +
+        "Thread: party history dev --seq 44\n" +
         "from-id: lark-ad72b3f9749e",
     );
+  });
+
+  test("身份来自显式 AGENTPARTY_CONFIG（resolveAuth 报 config.kind=explicit）⇒ Reply 行带 AGENTPARTY_CONFIG=<path> 前缀", async () => {
+    const { deps, connections, calls } = setup({
+      fetchReceiverBodies: async () => ["on it"],
+      resolveAuth: async () => ({ server: SERVER, token: "tok", config: { kind: "explicit", path: "/Users/me/.agentparty/agents/super-admin.json" } }),
+    });
+    await runOne(deps, connections, [frameWith(50, "ping", NOW - 60_000)]);
+    expect(calls[0]!.body).toContain(
+      'Reply: AGENTPARTY_CONFIG=/Users/me/.agentparty/agents/super-admin.json party send "<your reply>" --channel dev --reply-to 50',
+    );
+    // workspace / global 来源 ⇒ 不加前缀（裸 party send 在同一 cwd 下就能解析到同一身份）。
+    const plain = setup({
+      fetchReceiverBodies: async () => ["on it"],
+      resolveAuth: async () => ({ server: SERVER, token: "tok", config: { kind: "workspace", path: "/x/config.json" } }),
+    });
+    await runOne(plain.deps, plain.connections, [frameWith(51, "ping", NOW - 60_000)]);
+    expect(plain.calls[0]!.body).toContain('Reply: party send "<your reply>" --channel dev --reply-to 51');
+    expect(plain.calls[0]!.body).not.toContain("AGENTPARTY_CONFIG=");
   });
 
   test("config lang 覆盖优先：历史与触发消息全中文也注入英文", async () => {
     const { deps, connections, calls } = setup({ fetchReceiverBodies: async () => ["全中文历史"], langOverride: () => "en" });
     await runOne(deps, connections, [frameWith(45, ZH_BODY, NOW - 60_000)]);
-    expect(calls[0]!.body.startsWith("AgentParty wake: leo mentioned you in #dev (seq=45, 1 min ago)")).toBe(true);
+    expect(calls[0]!.body.startsWith("[AgentParty wake] leo mentioned you in #dev (seq 45, 1 min ago)")).toBe(true);
   });
 
   test("历史与触发消息都没有字母信号 ⇒ LANG=zh_CN.UTF-8 兜底成中文", async () => {
     const { deps, connections, calls } = setup({ fetchReceiverBodies: async () => [], env: { LANG: "zh_CN.UTF-8" } });
     await runOne(deps, connections, [frameWith(46, `@${SELF} 👀 42`, NOW - 60_000)]);
-    expect(calls[0]!.body.startsWith("AgentParty 唤醒：leo 在 #dev 提到了你（seq 46，1 分钟前）")).toBe(true);
+    expect(calls[0]!.body.startsWith("[AgentParty 唤醒] leo 在 #dev 提到了你（seq 46，1 分钟前）")).toBe(true);
   });
 
-  test("中文长正文 ⇒ 预览被截到预算内、整条 ≤512B、末尾 …、from-id 行不丢", async () => {
+  test("6000B 中文正文 ⇒ 只内联前 512B（字符边界，不切开汉字）+ 总字节数 + 读线程命令，整条 ≤5120B、from-id 不丢", async () => {
     const { deps, connections, calls } = setup({ fetchReceiverBodies: async () => ["中文历史"] });
-    await runOne(deps, connections, [frameWith(47, "这是一段很长的中文正文，用来把预算撑爆。".repeat(40), NOW - 60_000)]);
-    const body = calls[0]!.body;
-    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(512);
-    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(508);
-    expect(body.split("\n")[1]!.endsWith("…」")).toBe(true);
-    expect(body.split("\n").at(-1)).toBe("from-id: lark-ad72b3f9749e");
-    expect(wakeProxyNoteFromId(body)).toBe("lark-ad72b3f9749e");
+    const body = "跨".repeat(2000);
+    await runOne(deps, connections, [frameWith(47, body, NOW - 60_000)]);
+    const note = calls[0]!.body;
+    expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(5120);
+    const lines = note.split("\n");
+    expect(lines[2]).toBe("跨".repeat(170));
+    expect(Buffer.byteLength(lines[2]!, "utf8")).toBe(510);
+    expect(lines[3]).toBe("… (6000 bytes total; full text: party history dev --seq 47)");
+    expect(lines.at(-3)).toBe('回复：party send "<你的回复>" --channel dev --reply-to 47');
+    expect(lines.at(-2)).toBe("线程：party history dev --seq 47");
+    expect(lines.at(-1)).toBe("from-id: lark-ad72b3f9749e");
+    expect(wakeProxyNoteFromId(note)).toBe("lark-ad72b3f9749e");
+  });
+
+  test("300B 正文经真实 injectChannelMessage 写进 UDS：帧里的正文逐字内联，Reply / Thread 行紧随其后", async () => {
+    // 真实寻址层 + 真实 socket（同 claude-inbox-inject-by-pid.test.ts 的手法）：临时 sessions 目录，绝不碰 ~/.claude。
+    const dir = mkdtempSync(join(tmpdir(), "ap-dormant-uds-"));
+    const sockPath = join(dir, "inbox.sock");
+    const received: string[] = [];
+    const server = createServer((socket) => {
+      socket.on("data", (chunk) => received.push(chunk.toString("utf8")));
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+    writeFileSync(
+      join(dir, `${process.ppid}.json`),
+      JSON.stringify({
+        pid: process.ppid,
+        sessionId: "11111111-1111-4111-8111-111111111111",
+        name: "agentparty-d4",
+        status: "idle",
+        kind: "interactive",
+        messagingSocketPath: sockPath,
+      }),
+      { mode: 0o600 },
+    );
+    const previous = process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV];
+    process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV] = dir;
+    try {
+      resetWakeLangCache();
+      const { deps, connections } = makeDeps({ now: () => NOW, fetchReceiverBodies: async () => ["on it"] });
+      const head = "please run the acceptance:\n  1. `bun test`\n  2. paste the \"injected\" frame\n\n";
+      const body = head + "x".repeat(300 - Buffer.byteLength(head, "utf8"));
+      expect(Buffer.byteLength(body, "utf8")).toBe(300);
+      await runOne(deps, connections, [frameWith(60, body, NOW - 60_000)]);
+      await tick(50);
+      const lines = received.join("").split("\n").filter((line) => line !== "");
+      const user = lines.map((line) => JSON.parse(line) as Record<string, unknown>).find((frame) => frame.type === "user");
+      expect(user).toBeDefined();
+      const content = (user!.message as { content: string }).content;
+      expect(content.startsWith(`<${CROSS_SESSION_TAG} from-name="leo" from-mode="prompting">\n`)).toBe(true);
+      expect(content.endsWith(`\n</${CROSS_SESSION_TAG}>`)).toBe(true);
+      expect(content).toContain(
+        "[AgentParty wake] leo mentioned you in #dev (seq 60, 1 min ago)\n" +
+          "\n" +
+          `${body}\n` +
+          "\n" +
+          'Reply: party send "<your reply>" --channel dev --reply-to 60\n' +
+          "Thread: party history dev --seq 60\n" +
+          "from-id: lark-ad72b3f9749e",
+      );
+    } finally {
+      if (previous === undefined) delete process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV];
+      else process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV] = previous;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("idle_notice 帧 ⇒ 按本身份语言注入规范 §2 的一行，from-name 固定 AgentParty，不带 from-id（#1052 #5）", async () => {
+    const en = setup({ fetchReceiverBodies: async () => ["on it"] });
+    await runOne(en.deps, en.connections, [
+      { type: "idle_notice", target: "text-to-voice", reason: "idle", busy_ms: 192_000, ts: NOW } as ServerFrame,
+      { type: "idle_notice", target: "text-to-voice", reason: "exited", ts: NOW } as ServerFrame,
+      { type: "idle_notice", target: "text-to-voice", reason: "expired", ts: NOW } as ServerFrame,
+    ]);
+    expect(en.calls.map((call) => call.body)).toEqual([
+      "[Cross-session idle notice] text-to-voice is now idle. (busy for 3m 12s)",
+      "[Cross-session idle notice] text-to-voice exited before going idle.",
+      "[Cross-session idle notice] text-to-voice did not go idle within 6h; subscription expired.",
+    ]);
+    expect(en.calls.every((call) => call.fromName === IDLE_NOTICE_FROM_NAME)).toBe(true);
+    expect(en.connections[0]!.acked).toEqual([]);
+
+    const zh = setup({ fetchReceiverBodies: async () => ["收到，我看看"] });
+    await runOne(zh.deps, zh.connections, [
+      { type: "idle_notice", target: "text-to-voice", reason: "idle", busy_ms: 192_000, ts: NOW } as ServerFrame,
+    ]);
+    expect(zh.calls[0]!.body).toBe("[跨会话空闲通知] text-to-voice 现在空闲了（忙了 3 分 12 秒）。");
   });
 
   test("接收者历史按 (server, channel, identity) 缓存：两次注入只拉一次历史", async () => {
@@ -1057,6 +1167,6 @@ describe("注入正文的内容与语言（#1003）", () => {
     await runOne(deps, connections, [frameWith(48, "first", NOW - 60_000), frameWith(49, "second", NOW - 30_000)]);
     expect(calls).toHaveLength(2);
     expect(fetches).toBe(1);
-    expect(calls.every((call) => call.body.startsWith("AgentParty 唤醒："))).toBe(true);
+    expect(calls.every((call) => call.body.startsWith("[AgentParty 唤醒]"))).toBe(true);
   });
 });

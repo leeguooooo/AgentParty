@@ -21,6 +21,7 @@ import {
   type PresenceEntry,
   type RuntimePeerDiscovery,
   type ServerFrame,
+  type IdleNoticeFrame,
 } from "@agentparty/shared";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -56,6 +57,7 @@ import {
 } from "../mention-wake-claim";
 import { senderInjectFromName, wakeProxyNote, type InjectSenderLike } from "../serve-wake-proxy";
 import {
+  buildIdleNotice,
   detectWakeLang,
   receiverRecentBodies,
   t,
@@ -534,9 +536,20 @@ export function selectDormantAnnounceEntry(
   return matching.reduce((a, b) => (b.registered_at >= a.registered_at ? b : a));
 }
 
+/** 空闲通知注入时的 from-name（wake protocol v2 §2：`from-name` 为产品名）。 */
+export const IDLE_NOTICE_FROM_NAME = "AgentParty";
+
 export interface DormantAnnounceDeps {
   listSessions: () => ClaudeSessionRegistryEntry[];
-  resolveAuth: () => Promise<{ server?: string | null; token?: string | null }>;
+  /**
+   * auth 解析（生产为 resolveAuthDetailed）。可选的 `config` 是身份来源：kind=explicit 时 path 即
+   * `AGENTPARTY_CONFIG` 的显式路径，唤醒通知的 Reply 行会带上它当前缀（#1052）。
+   */
+  resolveAuth: () => Promise<{
+    server?: string | null;
+    token?: string | null;
+    config?: { kind: string; path: string | null } | null;
+  }>;
   connect: typeof connect;
   buildTopology: typeof buildRuntimeTopology;
   /**
@@ -810,6 +823,11 @@ export async function runDormantClaudeSessionAnnounce(
     if (signal.aborted) return;
     const authServer = auth.server;
     const authToken = auth.token;
+    // #1052：身份来自显式 AGENTPARTY_CONFIG 路径 ⇒ 注入的 Reply 行要带 `AGENTPARTY_CONFIG=<path> ` 前缀，
+    // 复制即用——宿主会话的 shell 里没有这个变量，裸 `party send` 会按 cwd 解析到别的身份。
+    const explicitConfigPath = auth.config?.kind === "explicit" && typeof auth.config.path === "string" && auth.config.path !== ""
+      ? auth.config.path
+      : null;
     // 「叫我」的判据＝本机频道身份（不是宣告名，见上方三命名空间注释）。#906 起它同时
     // 是**选注入目标**的判据，所以必须先于选目标解析：解析失败（无缓存且 /api/me 不通）
     // ⇒ 一个条目都不该匹配，本轮不建连。
@@ -967,7 +985,9 @@ export async function runDormantClaudeSessionAnnounce(
               sessionId: entry.session_id,
               name: hostAnnounceName,
               // #986：技术 identity 进正文末行 `from-id:`（防冒充字段不丢，可读回）。
-              // #1003：带上发信人/正文/时间——头行写友好名与相对时间，正文按剩余预算截成预览，整条仍 ≤512B。
+              // #1003：带上发信人/正文/时间——头行写友好名与相对时间。
+              // #1052（wake protocol v2）：正文 ≤4096B 逐字内联（超长截前 512B + 总字节数）、头行带 reply_to、
+              // 尾部给出可复制执行的 Reply / Thread 命令；整条 ≤5120B。
               body: wakeProxyNote({
                 channel,
                 server: authServer,
@@ -977,6 +997,8 @@ export async function runDormantClaudeSessionAnnounce(
                 sender,
                 body: typeof (frame as { body?: unknown } | null)?.body === "string" ? (frame as { body: string }).body : null,
                 ts: typeof (frame as { ts?: unknown } | null)?.ts === "number" ? (frame as { ts: number }).ts : null,
+                replyTo: typeof (frame as { reply_to?: unknown } | null)?.reply_to === "number" ? (frame as { reply_to: number }).reply_to : null,
+                configPath: explicitConfigPath,
                 lang,
                 now: now(),
               }),
@@ -1011,6 +1033,45 @@ export async function runDormantClaudeSessionAnnounce(
         }
       } catch {
         // 静默降级：注入不可用时行为等同改动前（只 ack）。
+      }
+    };
+    const injectIdleNotice = async (frame: IdleNoticeFrame) => {
+      try {
+        const bodies = await receiverRecentBodies(
+          { server: authServer, token: authToken, channel, identity: selfName },
+          { ...(deps.fetchReceiverBodies === undefined ? {} : { fetch: deps.fetchReceiverBodies }), now: now() },
+        );
+        const lang = detectWakeLang({
+          override: langOverride(),
+          receiverRecentBodies: bodies,
+          triggerBody: null,
+          env: deps.env ?? process.env,
+        });
+        const body = buildIdleNotice({ lang, target: frame.target, reason: frame.reason, busyMs: frame.busy_ms ?? 0 });
+        for (let attempt = 1; attempt <= 3 && !signal.aborted; attempt += 1) {
+          let result: Awaited<ReturnType<typeof inject>> | null = null;
+          try {
+            result = await inject({
+              pid: entry.pid,
+              sessionId: entry.session_id,
+              name: hostAnnounceName,
+              body,
+              fromName: IDLE_NOTICE_FROM_NAME,
+            });
+          } catch {
+            // 与结构化 ok:false 统一走有界重试。
+          }
+          if (result?.ok === true) return;
+          if (attempt < 3) await abortableSleep(injectRetryDelayMs, signal);
+        }
+        if (!signal.aborted) {
+          logOnce(
+            `claude-channel: 空闲通知注入连续 3 次未成功（channel=${channel} target=${frame.target} ` +
+              `reason=${frame.reason} session=${entry.session_id}）`,
+          );
+        }
+      } catch {
+        // 静默降级：通知丢失不影响 announce 主流程。
       }
     };
     let connectionClosed = false;
@@ -1057,6 +1118,9 @@ export async function runDormantClaudeSessionAnnounce(
           // claim delivery，见上方 P2 不变式），注入失败也不该影响 ack。
           if (frame.type === "msg") await maybeInject(frame.seq, frame.mentions, frame.sender, frame);
         }
+        // #1052 #5：空闲通知只发给订阅方自己的连接（不落 history、无 seq），这里直接按本身份的语言渲染
+        // 成规范 §2 的一行并注入宿主会话；from-name 固定 `AgentParty`。没有 seq，不进去重表——服务端触发即删行。
+        if (frame.type === "idle_notice") await injectIdleNotice(frame);
         if (frame.type === "error") {
           // 只有明确的瞬时服务端故障才重连。鉴权/归档/协议错误重试也不会自愈，
           // 保持原有终止语义，避免每 5s 空转。

@@ -112,6 +112,10 @@ import {
   type WakeKind,
   type WebhookFilter,
   type WorkflowKind,
+  IDLE_WATCH_TTL_MS,
+  type IdleNoticeFrame,
+  type IdleNoticeReason,
+  type IdleWatchRef,
 } from "@agentparty/shared";
 import {
   extractMentionTokens,
@@ -233,6 +237,8 @@ interface AtomicDeliveryEffects {
   deliveryStateIds: Set<string>;
   presenceTargets: Set<string>;
   dispatchTargets: Set<string>;
+  /** #1052：事务内观测到的 busy 1→0 翻转，事务提交后才给订阅方投空闲通知。 */
+  idleFires: Array<{ target: string; at: number }>;
 }
 
 type DeliveryTerminalReason =
@@ -2096,6 +2102,22 @@ export class ChannelDO extends Server<Env> {
       ack_seq INTEGER,
       resume_seq INTEGER
     )`);
+    // #1052 notify_when_idle：一次性空闲订阅。target 下一次由忙转闲 / 离线时给 subscriber 投一条
+    // idle_notice 帧（只投订阅方连接，不落 messages）。触发时订阅方没有活连接 ⇒ fired_* 记下结果，
+    // 等它下次 hello 补投；到期（expires_at）未触发 ⇒ 投 expired 变体。触发即删行（一次性）。
+    sql.exec(`CREATE TABLE IF NOT EXISTS idle_watch (
+      id TEXT PRIMARY KEY,
+      target TEXT NOT NULL,
+      subscriber TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      busy_since INTEGER,
+      fired_at INTEGER,
+      fired_reason TEXT,
+      fired_busy_ms INTEGER
+    )`);
+    sql.exec("CREATE INDEX IF NOT EXISTS idle_watch_target ON idle_watch (target, fired_at)");
+    sql.exec("CREATE INDEX IF NOT EXISTS idle_watch_subscriber ON idle_watch (subscriber, fired_at)");
     // #551：聊天历史的 read cursor 只表示“读过”，不能承担 agent work 的可靠投递。
     // 定向投递单独持久化并引用原消息 seq；正文仍只有 messages 一份，避免复制与修订漂移。
     sql.exec(`CREATE TABLE IF NOT EXISTS directed_deliveries (
@@ -2918,6 +2940,8 @@ export class ChannelDO extends Server<Env> {
         helloPending: false,
         helloExpired: false,
       }) ?? st;
+      // #1052：订阅方离线期间触发过的空闲通知，在它回来完成 hello 后补投（一次性，投完即删）。
+      if (st.name !== undefined) this.flushPendingIdleNotices(st.name, connection);
       // Topology lives only on authenticated live connection state. It is read
       // through the comparison endpoint and never broadcast as presence.
       const sinceRev =
@@ -3236,6 +3260,7 @@ export class ChannelDO extends Server<Env> {
     this.failStaleQueuedDeliveries(now);
     const scan = this.scanPresence(now);
     this.resumeDuePauses(now);
+    this.expireIdleWatches(now);
     await this.retryWebhooks(now);
     await this.checkTempArchive(now);
     await this.pruneStorage(now);
@@ -4036,6 +4061,9 @@ export class ChannelDO extends Server<Env> {
       .exec("SELECT MIN(paused_resume_at) AS t FROM presence WHERE paused_resume_at IS NOT NULL")
       .one();
     if (nextResume.t !== null) candidates.push(Number(nextResume.t));
+    // #1052：空闲订阅到期（未触发 ⇒ expired 通知；已触发未投出 ⇒ 到期清理）。
+    const nextIdleWatch = this.nextIdleWatchAlarmAt();
+    if (nextIdleWatch !== null) candidates.push(nextIdleWatch);
     if (this.getMeta("archive_pending_at") !== null) candidates.push(now + 60_000);
     if (this.getMeta("ckind") === "temp" && !this.isArchived()) {
       const basis = this.lastActivityTs();
@@ -4080,6 +4108,189 @@ export class ChannelDO extends Server<Env> {
     const frame: PresenceFrame = { type: "presence", name, state: "offline", note: null, ts };
     const entry = this.presenceFor(name);
     this.broadcastFrame(entry ? { type: "presence", ...entry } : frame);
+    // #1052：目标整个身份离线（所有 session 都 offline）⇒ 空闲订阅按「在空闲前已退出」触发。
+    if (entry === null || entry.state === "offline") this.fireIdleWatches(name, "exited", ts);
+  }
+
+  // ---- notify_when_idle（#1052 #5，wake protocol v2 §2） ----
+
+  /** 按 presence 名解析订阅目标：先精确匹配，再按 mentionMatchKey 归一化匹配；没有 presence 行 ⇒ null（404）。 */
+  private idleWatchTargetName(raw: string): string | null {
+    const rows = this.ctx.storage.sql.exec("SELECT DISTINCT name FROM presence").toArray().map((row) => String(row.name));
+    const exact = rows.find((name) => name === raw);
+    if (exact !== undefined) return exact;
+    const wanted = mentionMatchKey(raw);
+    return rows.find((name) => mentionMatchKey(name) === wanted) ?? null;
+  }
+
+  /**
+   * 挂一次性空闲订阅。目标此刻已离线 ⇒ 立即按 exited 触发；不忙 ⇒ 立即按 idle 触发；否则落行等翻转。
+   * 同 (target, subscriber) 已有未触发的行 ⇒ 幂等返回它。
+   */
+  private subscribeIdleWatch(targetRaw: string, subscriber: string, now: number): Response {
+    const target = this.idleWatchTargetName(targetRaw);
+    if (target === null) {
+      return Response.json({ error: { code: "not_found", message: `unknown target ${targetRaw}` } }, { status: 404 });
+    }
+    if (mentionMatchKey(target) === mentionMatchKey(subscriber)) {
+      return Response.json({ error: { code: "bad_request", message: "cannot subscribe to your own idle state" } }, { status: 400 });
+    }
+    const sql = this.ctx.storage.sql;
+    const existing = sql
+      .exec("SELECT * FROM idle_watch WHERE target = ? AND subscriber = ? AND fired_at IS NULL LIMIT 1", target, subscriber)
+      .toArray()[0];
+    if (existing !== undefined) {
+      return Response.json({ ok: true, target, subscriber, outcome: "existing", expires_at: Number(existing.expires_at) });
+    }
+    const entry = this.presenceFor(target);
+    const id = crypto.randomUUID();
+    const expiresAt = now + IDLE_WATCH_TTL_MS;
+    // busy_since：目标当前任务的起点（有心跳时）；否则从订阅时刻起算——「忙了多久」按订阅方能观测到的口径。
+    const busySince = entry?.task_started_at ?? now;
+    sql.exec(
+      `INSERT INTO idle_watch (id, target, subscriber, created_at, expires_at, busy_since)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      id,
+      target,
+      subscriber,
+      now,
+      expiresAt,
+      busySince,
+    );
+    const row = sql.exec("SELECT * FROM idle_watch WHERE id = ?", id).toArray()[0];
+    if (row === undefined) throw new Error("idle_watch insert lost");
+    if (entry === null || entry.state === "offline") {
+      this.fireIdleWatchRow(row, "exited", now);
+      return Response.json({ ok: true, target, subscriber, outcome: "fired", fired: "exited" });
+    }
+    if (entry.busy !== true) {
+      this.fireIdleWatchRow(row, "idle", now);
+      return Response.json({ ok: true, target, subscriber, outcome: "fired", fired: "idle" });
+    }
+    this.ctx.waitUntil(this.ensureAlarmAt(expiresAt));
+    this.broadcastPresenceFor(subscriber);
+    return Response.json({ ok: true, target, subscriber, outcome: "subscribed", expires_at: expiresAt });
+  }
+
+  private idleNoticeFrame(target: string, reason: IdleNoticeReason, ts: number, busyMs?: number): IdleNoticeFrame {
+    return {
+      type: "idle_notice",
+      target,
+      reason,
+      ...(reason === "idle" ? { busy_ms: Math.max(0, Math.floor(busyMs ?? 0)) } : {}),
+      ts,
+    };
+  }
+
+  /** 只投给订阅方自己的活连接（已完成 hello、未撤权）；返回是否至少投出一条。 */
+  private deliverIdleNotice(subscriber: string, frame: IdleNoticeFrame): boolean {
+    let delivered = false;
+    for (const connection of this.getConnections<ConnState>()) {
+      const st = connection.state;
+      if (st?.name !== subscriber || st.authorizationRevoked === true || st.helloPending === true) continue;
+      this.sendFrame(connection, frame);
+      delivered = true;
+    }
+    return delivered;
+  }
+
+  /** target 的所有未触发订阅按 reason 触发（一次性：触发即删行 / 转为待补投）。 */
+  private fireIdleWatches(target: string, reason: IdleNoticeReason, now: number) {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT * FROM idle_watch WHERE target = ? AND fired_at IS NULL", target)
+      .toArray();
+    for (const row of rows) this.fireIdleWatchRow(row, reason, now);
+  }
+
+  private fireIdleWatchRow(row: Record<string, unknown>, reason: IdleNoticeReason, now: number) {
+    const subscriber = String(row.subscriber);
+    const target = String(row.target);
+    const busyMs = reason === "idle" ? Math.max(0, now - Number(row.busy_since ?? row.created_at)) : undefined;
+    const frame = this.idleNoticeFrame(target, reason, now, busyMs);
+    if (this.deliverIdleNotice(subscriber, frame)) {
+      this.ctx.storage.sql.exec("DELETE FROM idle_watch WHERE id = ?", String(row.id));
+    } else {
+      // 订阅方此刻没有活连接（会话在重连 / 已关）：记下触发结果，等它下次 hello 补投；超过 TTL 仍没人来就清掉。
+      this.ctx.storage.sql.exec(
+        "UPDATE idle_watch SET fired_at = ?, fired_reason = ?, fired_busy_ms = ? WHERE id = ?",
+        now,
+        reason,
+        busyMs ?? null,
+        String(row.id),
+      );
+      this.ctx.waitUntil(this.ensureAlarmAt(now + IDLE_WATCH_TTL_MS));
+    }
+    this.broadcastPresenceFor(subscriber);
+  }
+
+  /** 订阅方 hello 完成后补投它离线期间触发过的通知。 */
+  private flushPendingIdleNotices(subscriber: string, connection: Connection<ConnState>) {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT * FROM idle_watch WHERE subscriber = ? AND fired_at IS NOT NULL ORDER BY fired_at", subscriber)
+      .toArray();
+    for (const row of rows) {
+      const reason = String(row.fired_reason) as IdleNoticeReason;
+      this.sendFrame(
+        connection,
+        this.idleNoticeFrame(
+          String(row.target),
+          reason,
+          Number(row.fired_at),
+          row.fired_busy_ms === null || row.fired_busy_ms === undefined ? undefined : Number(row.fired_busy_ms),
+        ),
+      );
+      this.ctx.storage.sql.exec("DELETE FROM idle_watch WHERE id = ?", String(row.id));
+    }
+  }
+
+  /** presence 写入前后调用：busy 由 1 变 0 ⇒ 触发该目标的空闲订阅（事务内则延后到提交后）。 */
+  private noteBusyTransition(name: string, wasBusy: boolean, now: number) {
+    if (!wasBusy) return;
+    if (this.presenceFor(name)?.busy === true) return;
+    if (this.atomicDeliveryEffects !== null) {
+      this.atomicDeliveryEffects.idleFires.push({ target: name, at: now });
+      return;
+    }
+    this.fireIdleWatches(name, "idle", now);
+  }
+
+  /** alarm：到期未触发 ⇒ expired 通知；已触发但订阅方一直没回来 ⇒ 超 TTL 清理。 */
+  private expireIdleWatches(now: number) {
+    const due = this.ctx.storage.sql
+      .exec("SELECT * FROM idle_watch WHERE fired_at IS NULL AND expires_at <= ?", now)
+      .toArray();
+    for (const row of due) this.fireIdleWatchRow(row, "expired", now);
+    this.ctx.storage.sql.exec("DELETE FROM idle_watch WHERE fired_at IS NOT NULL AND fired_at <= ?", now - IDLE_WATCH_TTL_MS);
+  }
+
+  private nextIdleWatchAlarmAt(): number | null {
+    const row = this.ctx.storage.sql
+      .exec(
+        `SELECT MIN(CASE WHEN fired_at IS NULL THEN expires_at ELSE fired_at + ? END) AS t FROM idle_watch`,
+        IDLE_WATCH_TTL_MS,
+      )
+      .one();
+    return row.t === null || row.t === undefined ? null : Number(row.t);
+  }
+
+  /** 每个订阅方挂着的未触发订阅（presence 输出的 idle_watches 字段）。 */
+  private idleWatchesBySubscriber(): Map<string, IdleWatchRef[]> {
+    const out = new Map<string, IdleWatchRef[]>();
+    const rows = this.ctx.storage.sql
+      .exec("SELECT subscriber, target, expires_at FROM idle_watch WHERE fired_at IS NULL ORDER BY created_at")
+      .toArray();
+    for (const row of rows) {
+      const subscriber = String(row.subscriber);
+      const list = out.get(subscriber) ?? [];
+      list.push({ target: String(row.target), expires_at: Number(row.expires_at) });
+      out.set(subscriber, list);
+    }
+    return out;
+  }
+
+  private withIdleWatches(entry: PresenceEntry, watches: Map<string, IdleWatchRef[]>): PresenceEntry {
+    const list = watches.get(entry.name);
+    return list === undefined || list.length === 0 ? entry : { ...entry, idle_watches: list };
   }
 
   private materializeConnectionPresence(identity: ConnState, sessionId: string, ts: number) {
@@ -7654,6 +7865,17 @@ export class ChannelDO extends Server<Env> {
       this.broadcastFrame(frame);
       return Response.json({ ok: true, removal: frame, broadcasted: true });
     }
+    // 一次性空闲订阅（#1052 notify_when_idle）：bearer 身份（worker 侧已判）订阅 :name 的下一次忙→闲。
+    const notifyIdleMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/notify-when-idle$/);
+    if (notifyIdleMatch && request.method === "POST") {
+      const target = decodeURIComponent(notifyIdleMatch[1] ?? "");
+      const body = (await request.json().catch(() => null)) as { subscriber?: unknown } | null;
+      const subscriber = typeof body?.subscriber === "string" ? body.subscriber.trim() : "";
+      if (!target || !subscriber) {
+        return Response.json({ error: { code: "bad_request", message: "target and subscriber required" } }, { status: 400 });
+      }
+      return this.subscribeIdleWatch(target, subscriber, Date.now());
+    }
     // 交互 lane 活动直报（issue #615）：不跑 serve 的 Claude Code session 经 REST 自报活动。
     // 授权在 worker 侧已判（agent 只准自报），do 只落状态。presence 无行则无从附着，静默吞。
     const activityMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/activity$/);
@@ -9134,6 +9356,7 @@ export class ChannelDO extends Server<Env> {
       // waiting_owner is durable parked work, not a running/busy model task. Clear only the
       // heartbeat that points at this exact origin; unrelated sessions/tasks for the same identity
       // are left alone. The CLI's later clear heartbeat remains idempotent.
+      const wasBusyBeforePark = this.presenceFor(identity.name)?.busy === true;
       this.ctx.storage.sql.exec(
         `UPDATE presence
             SET busy = 0, current_task = NULL, task_started_at = NULL, heartbeat_at = NULL, activity_json = NULL
@@ -9141,6 +9364,8 @@ export class ChannelDO extends Server<Env> {
         identity.name,
         activeDecision.lineage.origin_seq,
       );
+      // #1052：停下来等 owner 也是「不再忙」——订阅方等的就是这一刻。
+      this.noteBusyTransition(identity.name, wasBusyBeforePark, now);
       waitingOwnerPresence = this.presenceFor(identity.name);
     }
     let replacedUpdate: MessageUpdateFrame | undefined;
@@ -9216,6 +9441,8 @@ export class ChannelDO extends Server<Env> {
     if (workflowGuardFrame !== undefined) frames.push(workflowGuardFrame);
     if (frame.kind === "status") {
       const wakeProvided = frame.wake !== undefined ? 1 : 0;
+      // #1052：status 帧是 busy 翻转的落点——写前记住聚合后的 busy，写后比对，1→0 即触发空闲订阅。
+      const wasBusy = this.presenceFor(identity.name)?.busy === true;
       sql.exec(
         `INSERT INTO presence (
            name, session_id, kind, account, handle, display_name, avatar_url, avatar_thumb,
@@ -9288,6 +9515,7 @@ export class ChannelDO extends Server<Env> {
         wakeProvided,
         wakeProvided,
       );
+      this.noteBusyTransition(identity.name, wasBusy, now);
       const entry = this.presenceFor(identity.name);
       frames.push(entry ? { type: "presence", ...entry } : { type: "presence", name: identity.name, state: frame.state, note: frame.note, ts: now });
     }
@@ -10145,6 +10373,8 @@ export class ChannelDO extends Server<Env> {
       );
       wake_ledger_deleted = countOne("SELECT COUNT(*) AS n FROM wake_delivery_ledger WHERE target_name = ?", name);
       sql.exec("DELETE FROM wake_delivery_ledger WHERE target_name = ?", name);
+      // #1052：空闲订阅不论作为目标还是订阅方，一并清掉。
+      sql.exec("DELETE FROM idle_watch WHERE target = ? OR subscriber = ?", name, name);
       webhook_payloads_deleted = countOne(
         `SELECT
            (SELECT COUNT(*) FROM webhook_queue
@@ -10543,6 +10773,7 @@ export class ChannelDO extends Server<Env> {
       deliveryStateIds: new Set<string>(),
       presenceTargets: new Set<string>(),
       dispatchTargets: new Set<string>(),
+      idleFires: [],
     };
     this.atomicDeliveryEffects = effects;
     try {
@@ -10560,6 +10791,8 @@ export class ChannelDO extends Server<Env> {
       if (row !== undefined) this.broadcastDirectedDelivery(row);
     }
     for (const targetName of effects.presenceTargets) this.broadcastPresenceFor(targetName);
+    // #1052：忙→闲翻转的空闲通知在事务提交后投——投递本身是 WS 写，不该夹在 SQLite 事务里。
+    for (const fire of effects.idleFires) this.fireIdleWatches(fire.target, "idle", fire.at);
     await Promise.all(
       [...effects.dispatchTargets].map((targetName) => this.dispatchNextDirectedDelivery(targetName)),
     );
@@ -12323,16 +12556,20 @@ export class ChannelDO extends Server<Env> {
       grouped.set(name, group);
     }
     const listeningStreaks = this.listeningStreaks();
+    const idleWatches = this.idleWatchesBySubscriber();
     return [...grouped.entries()]
       .map(([name, group]) =>
-        this.withLivePresence(
-          this.presenceRowToEntry(this.aggregatePresenceRow(name, group, liveSessions)),
-          liveCounts,
-          serveCounts,
-          waitingOwnerCounts,
-          listeningStreaks,
-          unhandledMentionDebt,
-          receiptMarks,
+        this.withIdleWatches(
+          this.withLivePresence(
+            this.presenceRowToEntry(this.aggregatePresenceRow(name, group, liveSessions)),
+            liveCounts,
+            serveCounts,
+            waitingOwnerCounts,
+            listeningStreaks,
+            unhandledMentionDebt,
+            receiptMarks,
+          ),
+          idleWatches,
         ),
       )
       // 只回执过、从没建过 presence 行的身份补进来（#828）——否则 episodic agent 在 who 里完全不存在。
@@ -12351,14 +12588,17 @@ export class ChannelDO extends Server<Env> {
       .exec(`SELECT ${ChannelDO.PRESENCE_COLUMNS} FROM presence WHERE name = ?`, name)
       .toArray();
     if (rows.length > 0) {
-      return this.withLivePresence(
-        this.presenceRowToEntry(this.aggregatePresenceRow(name, rows, liveSessions)),
-        liveCounts,
-        serveCounts,
-        waitingOwnerCounts,
-        this.listeningStreaks(),
-        unhandledMentionDebt,
-        receiptMarks,
+      return this.withIdleWatches(
+        this.withLivePresence(
+          this.presenceRowToEntry(this.aggregatePresenceRow(name, rows, liveSessions)),
+          liveCounts,
+          serveCounts,
+          waitingOwnerCounts,
+          this.listeningStreaks(),
+          unhandledMentionDebt,
+          receiptMarks,
+        ),
+        this.idleWatchesBySubscriber(),
       );
     }
     // 没有 presence 行但回执过：合成 offline 条目，别让 episodic agent 的回执无处安放（#828）。
