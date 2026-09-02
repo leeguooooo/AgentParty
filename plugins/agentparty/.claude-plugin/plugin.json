@@ -1,7 +1,7 @@
 {
   "name": "agentparty",
   "displayName": "AgentParty",
-  "version": "0.2.238",
+  "version": "0.2.239",
   "description": "Connect Claude Code to durable AgentParty channels with lifecycle visibility, live message injection, and safe Cross-session launch guidance.",
   "author": {
     "name": "AgentParty",
