@@ -5712,14 +5712,17 @@ export function ChannelPage({
           >
             <span className="ap-sprite ap-sprite--announcement" aria-hidden="true" />
             <span>{t("Channel.tools.charter")}</span>
-            {charter !== null && <span className="t-mono chan-tool-badge">{t("Channel.charter.rev", { rev: charter.charter_rev })}</span>}
+            {/* #1044：「版本 0」没有信息量——只有改过（rev>0）才挂版本徽章 */}
+            {charter !== null && charter.charter_rev > 0 && <span className="t-mono chan-tool-badge">{t("Channel.charter.rev", { rev: charter.charter_rev })}</span>}
             {charterUpdated && <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tools.updated")}</span>}
           </button>
           {/* Team 只承接成员、正式分工与工作视图；消息筛选/完成记录/Host 告警各回到所属模块。 */}
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("team")}>
             <span className="ap-sprite ap-sprite--division" aria-hidden="true" />
             <span>{t("Channel.tools.team")}</span>
-            <span className="t-mono chan-tool-badge">{structuredRoleCount}</span>
+            {structuredRoleCount > 0 && (
+              <span className="t-mono chan-tool-badge">{t("Channel.team.rolesBadge", { count: String(structuredRoleCount) })}</span>
+            )}
             <span className="t-mono chan-tool-badge">{t("Channel.team.onlineBadge", { count: String(onlineMemberCount) })}</span>
           </button>
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("tasks")}>
@@ -5790,7 +5793,7 @@ export function ChannelPage({
                     <span className="ap-sprite ap-sprite--settings" aria-hidden="true" />
                     <span>{t("Channel.tools.manage")}</span>
                     <span className="t-mono chan-tool-badge">
-                      {localVisibility}
+                      {t(`Channel.visibility.${localVisibility}`)}
                     </span>
                   </button>
                 </div>
