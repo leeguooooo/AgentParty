@@ -13,15 +13,37 @@ import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, 
 import { advanceCursorPastOwnMessage, resolveChannel, type Config } from "../config";
 import { stripTerminalControls } from "../format";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
-import { fetchMe, fetchPresence, handleRestError, postMessage, RestError, uploadAttachment } from "../rest";
+import {
+  fetchMe,
+  fetchPresence,
+  handleRestError,
+  postMessage,
+  RestError,
+  subscribeIdleNotice,
+  uploadAttachment,
+  type IdleWatchSubscribeResult,
+} from "../rest";
 import { buildPullWakeLookup, type PullWakeLookup } from "../pull-wake";
 import { deferredOf, formatDeferred, formatReachLine, formatUnreachable, reachOf, unreachableOf } from "../reach";
 import { localStatuslineBase, statuslinePreview, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
-export const sendSpec = { repeatable: ["mention", "attach"], booleans: ["debug-auth", "reach", "no-reach", "require-wakeable"] };
-const SEND_FLAGS = ["channel", "reply-to", "mention", "attach", "debug-auth", "reach", "no-reach", "require-wakeable"];
-const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--reply-to seq[,seq...]] [--debug-auth]
+export const sendSpec = {
+  repeatable: ["mention", "attach"],
+  booleans: ["debug-auth", "reach", "no-reach", "require-wakeable", "notify-when-idle"],
+};
+const SEND_FLAGS = [
+  "channel",
+  "reply-to",
+  "mention",
+  "attach",
+  "debug-auth",
+  "reach",
+  "no-reach",
+  "require-wakeable",
+  "notify-when-idle",
+];
+const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--reply-to seq[,seq...]] [--notify-when-idle] [--debug-auth]
 
 Send one message to a channel. Use "-" as the body to read stdin.
 Positional text decodes \\n as a line break; use \\\\n for a literal \\n, or stdin for exact bytes.
@@ -64,6 +86,13 @@ Options:
   --require-wakeable  exit non-zero if any mentioned target is not auto-wakeable
                       (the message is still sent; the warn line always prints —
                       this overrides --no-reach's silencing of the warn line)
+  --notify-when-idle  after sending, subscribe once to every @-mentioned agent: the
+                      next time it goes from busy to idle (or exits) you get ONE
+                      "[Cross-session idle notice]" injected into your session — no
+                      polling, nothing posted to the channel. Fires immediately if
+                      the target is already idle; expires after 6h with a notice.
+                      Same as Claude Code's built-in notify_when_idle. Without a
+                      message, use: party notify-when-idle <agent> [--channel C]
   --debug-auth        print resolved auth/config source to stderr`;
 
 // 附件上限与文件名规则与 worker 侧保持一致（#176）：本地先挡一刀，给出比服务端 413 更贴切的文案。
@@ -112,6 +141,8 @@ export interface SendInput {
   /** #818：这条回复顺带了结的其它 @ seq（`--reply-to A,B` 里 A 之后的部分）。 */
   alsoResolves: number[];
   attachPaths: string[];
+  /** #1052：发完后对每个 @ 到的 agent 挂一次性空闲订阅（`--notify-when-idle`）。 */
+  notifyWhenIdle: boolean;
 }
 
 // #818：`--reply-to 396,398`。一条回复本来就可能同时答掉对方连发的几条 @，而 wake debt 按
@@ -294,6 +325,11 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     seenMentions.add(key);
     bodyMentions.push(mention);
   }
+  const notifyWhenIdle = flags["notify-when-idle"] === true;
+  if (notifyWhenIdle && mentions.length === 0 && bodyMentions.length === 0) {
+    console.error("--notify-when-idle needs at least one @-mention (use --mention name or @name in the body)");
+    return null;
+  }
   return {
     channel,
     body: text,
@@ -302,7 +338,52 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     replyTo: replyTo ?? null,
     alsoResolves,
     attachPaths,
+    notifyWhenIdle,
   };
+}
+
+/** 一条 `--notify-when-idle` 订阅的结果行（stderr）；`fetch` 可注入以便测试。 */
+export interface IdleSubscribeLine {
+  target: string;
+  line: string;
+  ok: boolean;
+}
+
+/**
+ * 发完消息后对 targets 逐个挂空闲订阅（#1052）。任一失败只打一行 warn，绝不影响已发成功的消息；
+ * 返回每个目标的结果行供 CLI / MCP 各自输出。
+ */
+export async function subscribeIdleNotices(
+  server: string,
+  token: string,
+  channel: string,
+  targets: readonly string[],
+  subscribe: typeof subscribeIdleNotice = subscribeIdleNotice,
+): Promise<IdleSubscribeLine[]> {
+  const lines: IdleSubscribeLine[] = [];
+  for (const target of targets) {
+    try {
+      const result = await subscribe(server, token, channel, target);
+      lines.push({ target, ok: true, line: formatIdleSubscribe(result) });
+    } catch (e) {
+      const message = e instanceof RestError ? `${e.message} (${e.code ?? e.status})` : e instanceof Error ? e.message : String(e);
+      lines.push({ target, ok: false, line: `warn: notify-when-idle @${stripTerminalControls(target)}: ${stripTerminalControls(message)}` });
+    }
+  }
+  return lines;
+}
+
+export function formatIdleSubscribe(result: IdleWatchSubscribeResult): string {
+  const target = stripTerminalControls(result.target);
+  if (result.outcome === "fired") {
+    return result.fired === "exited"
+      ? `notify-when-idle: @${target} is offline — exited notice delivered to your session now`
+      : `notify-when-idle: @${target} is already idle — idle notice delivered to your session now`;
+  }
+  const expires = typeof result.expires_at === "number" ? ` (expires ${new Date(result.expires_at).toISOString()})` : "";
+  return result.outcome === "existing"
+    ? `notify-when-idle: @${target} — already subscribed, one notice when it goes idle${expires}`
+    : `notify-when-idle: @${target} — you will get one notice when it goes idle${expires}`;
 }
 
 function formatSize(bytes: number): string {
@@ -311,7 +392,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export async function doSend(cfg: Config, input: SendInput): Promise<number | { seq: number }> {
+export async function doSend(cfg: Config, input: SendInput): Promise<number | { seq: number; unresolvedMentions?: string[] }> {
   // 先把 --attach 的文件上传到 R2，拿到引用；解析/上传任一失败就直接退，不发一条空引用的消息。
   let attachments: Attachment[] | undefined;
   if (input.attachPaths.length > 0) {
@@ -359,7 +440,7 @@ export async function doSend(cfg: Config, input: SendInput): Promise<number | { 
         preview: statuslinePreview(input.body),
       },
     });
-    return { seq };
+    return { seq, ...(unresolved_mentions !== undefined && unresolved_mentions.length > 0 ? { unresolvedMentions: unresolved_mentions } : {}) };
   } catch (e) {
     return handleRestError(e);
   }
@@ -394,6 +475,13 @@ export async function run(argv: string[]): Promise<number> {
   if (typeof result === "number") return result;
   const attachNote = input.attachPaths.length > 0 ? ` (+${input.attachPaths.length} attachment${input.attachPaths.length > 1 ? "s" : ""})` : "";
   console.log(`sent seq=${result.seq}${attachNote}`);
+  // #1052：先发消息再订阅（与规范 §2「send … --notify-when-idle = 先发消息再订阅」一致）。
+  // 订阅目标 = 显式 --mention + 正文里服务端确实路由到的 @token（未解析的已降级为文本，不订阅）。
+  if (input.notifyWhenIdle) {
+    const unresolved = new Set((result.unresolvedMentions ?? []).map((m) => mentionMatchKey(m)));
+    const targets = [...input.mentions, ...input.bodyMentions.filter((m) => !unresolved.has(mentionMatchKey(m)))];
+    for (const { line } of await subscribeIdleNotices(auth.server, auth.token, input.channel, targets)) console.error(line);
+  }
   const { unreachable } = await showReach(auth.server, auth.token, parsed, input, result.seq);
   // #664：--require-wakeable 严格模式——目标不可唤醒时，消息照发（seq 已打），但用独立非零码退出，
   // 让调用方能编程判定「派发未落地」。非严格模式永远返回 0（warning 只提示、不阻断）。

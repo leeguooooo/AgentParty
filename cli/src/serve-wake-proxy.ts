@@ -41,7 +41,10 @@ import {
   type WakeLang,
 } from "./wake-note-i18n";
 
-/** 三不变量之一：唤醒通知只带 channel+seq 指针（#1003 起外加一段按预算截断的正文预览），且总长 ≤512 UTF-8 字节。 */
+/**
+ * 唤醒通知总长上限。#1052（wake protocol v2）起为 5120B：正文 ≤4096B 逐字内联（超长只内联前 512B），
+ * 骨架（头行 / Reply / Thread / from-id）≤1024B。老的「≤512B 只带指针」不变量已被 v2 取代。
+ */
 export const WAKE_PROXY_NOTE_MAX_BYTES: number = WAKE_NOTE_MAX_BYTES;
 
 export interface WakeProxyRef {
@@ -71,12 +74,20 @@ export interface WakeProxyRef {
   lang?: WakeLang;
   /** 当前时刻（相对时间的基准）；省略 ⇒ Date.now()。测试用。 */
   now?: number;
+  /** 触发消息回复的那条 seq（帧 reply_to，#1052）；有 ⇒ 头行写「reply to seq M」。 */
+  replyTo?: number | null;
+  /**
+   * 接收方身份来自显式 `AGENTPARTY_CONFIG` 路径时传入（#1052）：Reply 行前缀 `AGENTPARTY_CONFIG=<path> `，
+   * 复制即用。省略/null ⇒ 不加前缀。
+   */
+  configPath?: string | null;
 }
 
 /**
- * 唤醒通知正文（#1003 起由 wake-note-i18n.buildWakeNote 生成）：发信人 + 频道 + seq + 相对时间 + 按预算截断的
- * 正文预览 + 读全文的命令 + `from-id:` 行；ref 没带 sender/body/ts 时退回只含指针的短版（英文，兼容旧签名）。
- * 超出 512B 属于程序错误（channel ≤64 字符 + seq 数字 + identity ≤64 字符 + 预览按剩余预算截，正常永远不会触发）。
+ * 唤醒通知正文（#1003 起由 wake-note-i18n.buildWakeNote 生成；#1052 起为 wake protocol v2 骨架）：
+ * 头行（发信人 + 频道 + seq [+ reply to seq M] [+ 相对时间]）+ 正文（≤4096B 逐字，超长截前 512B + 总字节数）
+ * + `Reply:` 可复制执行的回复命令 + `Thread:` 读线程命令 + `from-id:` 行；ref 没带 sender/body/ts 时退回
+ * 不含正文块的短版（英文，兼容旧签名）。超出 5120B 属于程序错误（骨架有降级阶梯，正常永远不会触发）。
  */
 export function wakeProxyNote(ref: WakeProxyRef): string {
   return buildWakeNote({
@@ -89,6 +100,8 @@ export function wakeProxyNote(ref: WakeProxyRef): string {
     ...(ref.now === undefined ? {} : { now: ref.now }),
     fromId: ref.fromId ?? null,
     ...(ref.siblings === undefined ? {} : { siblings: ref.siblings }),
+    replyTo: ref.replyTo ?? null,
+    configPath: ref.configPath ?? null,
   });
 }
 
@@ -385,7 +398,7 @@ export async function attemptWakeProxy(
   try {
     const result = normalizeForwardResult(await (deps.forward ?? noWakeProxyForwarder)(target, ref));
     if (result.ok) {
-      log(`serve: 唤醒代理已转投 @${name}（channel=${ref.channel} seq=${ref.seq}，≤512B 指针，正文在频道）`);
+      log(`serve: 唤醒代理已转投 @${name}（channel=${ref.channel} seq=${ref.seq}，正文与回复命令已随通知注入）`);
       return { forwarded: true, target: name, reason: null, detail: null };
     }
     // #867 ①：这行以前恒打「当前无可用转投载体」——那是 #841 时代的实话（默认载体

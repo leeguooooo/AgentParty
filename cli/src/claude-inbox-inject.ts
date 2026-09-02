@@ -57,7 +57,7 @@ const PID_JSON_RE = /^(\d+)\.json$/;
 // key 文件名：`<pid>.<sha256(canonical socket path) 64hex>.key`（native `USd` 正则）。
 const PEER_TOKEN_RE = /^[0-9a-f]{32}$/;
 // cross-session-message 包装标签名（native `ZPe`）。
-const CROSS_SESSION_TAG = "cross-session-message";
+export const CROSS_SESSION_TAG = "cross-session-message";
 // from 允许字符集（native `pSd`）：A-Za-z0-9%:_/.-
 const FROM_ATTR_RE = /^[A-Za-z0-9%:_/.\-]+$/;
 const FROM_MODES = new Set(["prompting", "bypass"]);

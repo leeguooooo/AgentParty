@@ -103,7 +103,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/live/residency/unreachable/pull_wake/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/task_lease/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/live/residency/unreachable/pull_wake/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/idle_watches/agent_session/topology_conflicts/task_lease/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
 
 // 导出仅供单测断言 help 文案与真实行为一致（#859/#860：文档漂移过一次，用断言钉住）。
 export const HELP_TEXT = HELP;
@@ -177,6 +177,8 @@ export interface Row {
   // #926：目标那台机器在 MCP 启动时自检出的「装了但叫不醒」。与 listening/runner_health 的区别是
   // 它**先于任何一条 @** 就存在——那两个都要等 @ 白发一次才派生得出来。
   wake_block?: PresenceEntry["wake_block"];
+  // #1052：这个身份作为订阅方挂着的、未触发的空闲订阅（notify-when-idle）——「我在等谁忙完」。
+  idle_watches?: PresenceEntry["idle_watches"];
   // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
   agent_session?: PresenceEntry["agent_session"];
   // #834 第 3 项：以前这里只有 kind/with/runtime_count——「同一身份跑着两个执行体」和「隔壁
@@ -454,6 +456,7 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     ...(e.listening === "suspect" || e.listening === "deaf" ? { listening: e.listening } : {}),
     ...(e.runner_health === undefined ? {} : { runner_health: e.runner_health }),
     ...(e.wake_block === undefined ? {} : { wake_block: e.wake_block }),
+    ...(Array.isArray(e.idle_watches) && e.idle_watches.length > 0 ? { idle_watches: e.idle_watches } : {}),
     // #823：scope 只在 state != offline 时有意义——已经离线的人不再占着任何东西。
     ...(Array.isArray(e.status?.scope) && e.status.scope.length > 0 && e.state !== "offline"
       ? { scope: e.status.scope }

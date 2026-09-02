@@ -1005,6 +1005,41 @@ export async function reviewCompletion(
  * 残缺文案在这条路径上不可能发生。返回的是**被回执的那条消息**（带上回执元数据），不是新消息：
  * 回执不占 seq、不进正文流、不触发 delivery。
  */
+/** `POST /api/channels/:slug/presence/:target/notify-when-idle` 的回包（#1052 notify_when_idle）。 */
+export interface IdleWatchSubscribeResult {
+  ok: true;
+  /** 被订阅的目标（服务端归一化后的 presence 名）。 */
+  target: string;
+  /** 订阅方（bearer 身份）。 */
+  subscriber: string;
+  /**
+   * subscribed＝已挂上一次性订阅（目标当前忙）；fired＝目标当时就不忙 / 已离线，通知已直接下发；
+   * existing＝同 (target, subscriber) 已有未触发订阅，返回的是它。
+   */
+  outcome: "subscribed" | "fired" | "existing";
+  /** outcome=fired 时：idle（已空闲）或 exited（已离线）。 */
+  fired?: "idle" | "exited";
+  /** 订阅到期时刻（epoch ms）；outcome=fired 时省略。 */
+  expires_at?: number;
+}
+
+/**
+ * 一次性空闲订阅（#1052 #5，wake protocol v2 §2）：目标下一次由忙转闲 / 离线时给订阅方投一条
+ * idle notice（只投订阅方，不落频道）。目标已空闲则立即触发；6 小时到期未触发发过期通知。
+ */
+export async function subscribeIdleNotice(
+  server: string,
+  token: string,
+  slug: string,
+  target: string,
+): Promise<IdleWatchSubscribeResult> {
+  return (await req(
+    server,
+    `/api/channels/${encodeURIComponent(slug)}/presence/${encodeURIComponent(target)}/notify-when-idle`,
+    { method: "POST", headers: bearerJson(token), body: JSON.stringify({}) },
+  )) as IdleWatchSubscribeResult;
+}
+
 export async function postReceipt(
   server: string,
   token: string,

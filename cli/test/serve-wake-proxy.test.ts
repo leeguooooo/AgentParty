@@ -38,14 +38,16 @@ describe("claudeSessionAnnounceName", () => {
 });
 
 describe("wakeProxyNote", () => {
-  test("只带 channel+seq 指针且 ≤512B（含最长 channel）", () => {
+  test("老签名（只有 channel/seq）⇒ 头行 + Reply / Thread 两行，≤5120B（含最长 channel）", () => {
     const note = wakeProxyNote({ channel: "a".repeat(64), server: SERVER_A, seq: Number.MAX_SAFE_INTEGER });
     expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
     expect(note).toContain(`#${"a".repeat(64)}`);
-    expect(note).toContain(`seq=${Number.MAX_SAFE_INTEGER}`);
+    expect(note).toContain(`seq ${Number.MAX_SAFE_INTEGER}`);
+    expect(note).toContain(`Reply: party send "<your reply>" --channel ${"a".repeat(64)} --reply-to ${Number.MAX_SAFE_INTEGER}`);
+    expect(note).toContain(`Thread: party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
   });
 
-  test("最长 channel + 最长 identity + siblings 齐上仍 ≤512B，且 from-id 可读回（#986）", () => {
+  test("最长 channel + 最长 identity + siblings 齐上仍 ≤5120B，且 from-id 可读回（#986）", () => {
     const note = wakeProxyNote({
       channel: "a".repeat(64),
       server: SERVER_A,
@@ -141,7 +143,7 @@ describe("attemptWakeProxy", () => {
     expect(result).toMatchObject({ forwarded: false, target: null });
   });
 
-  test("载体成功 → forwarded=true 且拿到 ≤512B 指针", async () => {
+  test("载体成功 → forwarded=true 且拿到带 Reply 行的通知", async () => {
     let sent = "";
     const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 42 }, {
       listSessions: () => [entry()],
@@ -151,7 +153,8 @@ describe("attemptWakeProxy", () => {
       },
     });
     expect(result.forwarded).toBe(true);
-    expect(sent).toContain("seq=42");
+    expect(sent).toContain("seq 42");
+    expect(sent).toContain("--reply-to 42");
     expect(Buffer.byteLength(sent, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
   });
 
@@ -187,7 +190,7 @@ describe("attemptWakeProxy", () => {
 });
 
 describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
-  test("注入成功 → true；用宣告名寻址、from-name 只带友好名、技术 ID 在正文 from-id、正文≤512B 指针", async () => {
+  test("注入成功 → true；用宣告名寻址、from-name 只带友好名、技术 ID 在正文 from-id、正文≤5120B", async () => {
     let seen: { name: string; body: string; fromName: string; pid?: number; sessionId?: string | null } | null = null;
     const forward = socketWakeProxyForwarder({
       inject: async ({ name, body, fromName, pid, sessionId }) => {
@@ -216,7 +219,7 @@ describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
     // #986：主名只放友好名；技术 ID 挪到正文 from-id 行，仍可读回。
     expect(seen!.fromName).toBe("leo · agentparty");
     expect(wakeProxyNoteFromId(seen!.body)).toBe("lark-ad72b3f97491-agentparty");
-    expect(seen!.body).toContain("seq=42");
+    expect(seen!.body).toContain("seq 42");
     expect(Buffer.byteLength(seen!.body, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
   });
 
@@ -299,11 +302,11 @@ describe("#867 ①：结构化失败原因必须一路透出到降级日志", ()
   });
 });
 
-describe("wakeProxyNote 内容与语言（#1003）", () => {
+describe("wakeProxyNote 内容与语言（#1003 / #1052 wake protocol v2）", () => {
   const NOW = Date.parse("2026-08-28T10:02:00Z");
   const ZH_BODY = "我们的展示信息是不是有点太少了，语言应该根据 ai 使用的语言或者其他的方式，自动改成对应的语言";
 
-  test("带 sender/body/ts/lang=zh ⇒ 发信人友好名 + 频道 + seq + 相对时间 + 预览 + 读全文命令 + from-id", () => {
+  test("带 sender/body/ts/lang=zh ⇒ v2 中文骨架：头行 + 正文逐字 + 回复 / 线程 / from-id", () => {
     const note = wakeProxyNote({
       channel: "pwtk",
       server: "https://party.example",
@@ -316,26 +319,47 @@ describe("wakeProxyNote 内容与语言（#1003）", () => {
       fromId: "lark-ad72b3f9749e",
     });
     expect(note).toBe(
-      "AgentParty 唤醒：leo 在 #pwtk 提到了你（seq 42，2 分钟前）\n" +
-        `「${ZH_BODY}」\n` +
-        "以上是预览，正文以频道为准：party history pwtk --seq 42\n" +
+      "[AgentParty 唤醒] leo 在 #pwtk 提到了你（seq 42，2 分钟前）\n" +
+        "\n" +
+        `${ZH_BODY}\n` +
+        "\n" +
+        '回复：party send "<你的回复>" --channel pwtk --reply-to 42\n' +
+        "线程：party history pwtk --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
     expect(wakeProxyNoteFromId(note)).toBe("lark-ad72b3f9749e");
   });
 
-  test("老签名（只有 channel/seq/fromId）⇒ 英文短版，仍只带指针、from-id 可读回", () => {
+  test("replyTo / configPath 透传：头行「reply to seq M」，Reply 行带 AGENTPARTY_CONFIG 前缀", () => {
+    const note = wakeProxyNote({
+      channel: "pwtk",
+      server: "https://party.example",
+      seq: 42,
+      sender: { name: "lark-ad72b3f9749e", kind: "human", display_name: "leo" },
+      body: "ok",
+      lang: "en",
+      replyTo: 40,
+      configPath: "/tmp/agents/me.json",
+      now: NOW,
+    });
+    expect(note.split("\n")[0]).toBe("[AgentParty wake] leo mentioned you in #pwtk (seq 42, reply to seq 40)");
+    expect(note).toContain('Reply: AGENTPARTY_CONFIG=/tmp/agents/me.json party send "<your reply>" --channel pwtk --reply-to 42');
+  });
+
+  test("老签名（只有 channel/seq/fromId）⇒ 英文短版：无正文块，Reply / Thread / from-id 都在", () => {
     const note = wakeProxyNote({ channel: "pwtk", server: "https://party.example", seq: 42, fromId: "lark-ad72b3f9749e" });
     expect(note).toBe(
-      "AgentParty wake: you were mentioned in #pwtk (seq=42)\n" +
-        "Read the channel for the message body (party history pwtk --seq 42); the channel is the single source of truth.\n" +
+      "[AgentParty wake] you were mentioned in #pwtk (seq 42)\n" +
+        "\n" +
+        'Reply: party send "<your reply>" --channel pwtk --reply-to 42\n' +
+        "Thread: party history pwtk --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
     expect(wakeProxyNoteFromId(note)).toBe("lark-ad72b3f9749e");
   });
 
-  test("长正文（中/英）都被截到 ≤512B、末尾 …、from-id 不丢", () => {
-    for (const [lang, body] of [["zh", "很长的中文正文。".repeat(80)], ["en", "long english body ".repeat(60)]] as const) {
+  test("超长正文（中/英）都只内联前 512B + 总字节数，整条 ≤5120B、from-id 不丢", () => {
+    for (const [lang, body] of [["zh", "很长的中文正文。".repeat(800)], ["en", "long english body ".repeat(600)]] as const) {
       const note = wakeProxyNote({
         channel: "a".repeat(64),
         server: "https://party.example",
@@ -349,7 +373,7 @@ describe("wakeProxyNote 内容与语言（#1003）", () => {
         fromId: "b".repeat(64),
       });
       expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
-      expect(note).toContain("…");
+      expect(note).toContain(`… (${Buffer.byteLength(body, "utf8")} bytes total; full text: party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER})`);
       expect(note).toContain("siblings=3");
       expect(wakeProxyNoteFromId(note)).toBe("b".repeat(64));
     }

@@ -127,6 +127,9 @@ const DELIVERY_STATES = new Set(["queued", "claimed", "running", "waiting_owner"
 // Mirror DirectedDeliveryCause in shared/src/protocol.ts exactly — "mention_edit" (a mention added by
 // editing an existing message) is a real cause; omitting it drops those delivery frames.
 const DELIVERY_CAUSES = new Set(["mention", "mention_edit", "reply", "owner_answer", "retry"]);
+// #1052 notify_when_idle：必须逐字镜像 shared/src/protocol.ts 的 IdleNoticeReason，漏一个词就把那种
+// 空闲通知整帧静默丢掉（#622 的教训）——订阅方永远等不到「对方忙完了」。
+const IDLE_NOTICE_REASONS = new Set(["idle", "exited", "expired"]);
 const ERROR_CODES = new Set([
   "bad_request",
   "unavailable",
@@ -221,6 +224,12 @@ function isPresenceEntry(value: unknown): boolean {
     // 老 CLI 就会静默丢掉整张 presence——把「叫不醒」这条信号连同其余一切一起抹掉，
     // 恰恰是本 PR 要消灭的那种静默失败。真正的取值校验留给使用点（reach/who 各自 parse）。
     (value.wake_block === undefined || isRecord(value.wake_block)) &&
+    // #1052：订阅方挂着的空闲订阅；只做形状检查（同 wake_block 的理由：别让新字段炸掉整张 presence）。
+    (value.idle_watches === undefined ||
+      (Array.isArray(value.idle_watches) &&
+        value.idle_watches.every(
+          (watch) => isRecord(watch) && typeof watch.target === "string" && isFiniteNumber(watch.expires_at),
+        ))) &&
     (value.connection_count === undefined || isPositiveInteger(value.connection_count));
 }
 
@@ -381,6 +390,15 @@ function parseServerFrame(value: unknown): ServerFrame | null {
     case "delivery_state":
       return isPublicDirectedDelivery(value.delivery) &&
         (value.request_id === undefined || typeof value.request_id === "string")
+        ? asServerFrame(value)
+        : null;
+    case "idle_notice":
+      // #1052 #5：只发给订阅方连接的一次性空闲通知（无 seq、不落 history）。
+      return typeof value.target === "string" &&
+        value.target.length > 0 &&
+        IDLE_NOTICE_REASONS.has(String(value.reason)) &&
+        (value.busy_ms === undefined || (isFiniteNumber(value.busy_ms) && value.busy_ms >= 0)) &&
+        isFiniteNumber(value.ts)
         ? asServerFrame(value)
         : null;
     case "delivery_recovery":

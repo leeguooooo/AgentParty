@@ -25,6 +25,11 @@ export interface MockOptions {
   taskLease?: boolean;
   // 覆盖 /token 响应；默认按 grant_type 给确定性 token
   tokenResponse?: (params: Record<string, string>) => Record<string, unknown>;
+  /**
+   * #1052 notify-when-idle mock：列在这里的目标名回 404（unknown target）；名字以 `idle-` 开头的目标
+   * 当「此刻已空闲」回 outcome=fired；其余回 outcome=subscribed + expires_at。
+   */
+  idleWatchUnknown?: string[];
 }
 
 export function startOidcMock(opts: MockOptions = {}): OidcMock {
@@ -264,6 +269,17 @@ export function startOidcMock(opts: MockOptions = {}): OidcMock {
       }
       if (req.method === "POST" && /^\/api\/channels\/[^/]+\/messages$/.test(u.pathname)) {
         return Response.json({ seq: 7 });
+      }
+      const idleMatch = u.pathname.match(/^\/api\/channels\/[^/]+\/presence\/([^/]+)\/notify-when-idle$/);
+      if (idleMatch && req.method === "POST") {
+        const target = decodeURIComponent(idleMatch[1] ?? "");
+        if (opts.idleWatchUnknown?.includes(target)) {
+          return Response.json({ error: { code: "not_found", message: `unknown target ${target}` } }, { status: 404 });
+        }
+        if (target.startsWith("idle-")) {
+          return Response.json({ ok: true, target, subscriber: "me", outcome: "fired", fired: "idle" });
+        }
+        return Response.json({ ok: true, target, subscriber: "me", outcome: "subscribed", expires_at: 1_800_000_000_000 });
       }
       if (req.method === "POST" && /^\/api\/channels\/[^/]+\/tasks\/\d+\/lease$/.test(u.pathname)) {
         // 老服务端：路由压根不存在 → Hono 的默认 404 是**纯文本**，没有 error.code。

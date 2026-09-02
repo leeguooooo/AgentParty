@@ -313,3 +313,81 @@ Display names come from Claude's sessions file. A registry entry's `display_name
 short retry for a freshly registered session) before publishing `harness_session.display_name`. The
 `claude-<12hex>` fallback appears only while the native name is unavailable. `party who`, `party agents`,
 the `party_channel_peers` `claude_sessions[].display_name` hints, and doctor all render that name.
+## Wake protocol v2 (#1052): body-carrying wake notes and `notify_when_idle`
+
+This section mirrors the protocol shared with open-cross-session; the canonical copy is
+[`docs/wake-protocol.md` in leeguooooo/open-cross-session](https://github.com/leeguooooo/open-cross-session/blob/main/docs/wake-protocol.md).
+Field names, byte limits and notice strings are identical on both sides. The carrier does not
+change: the dormant announce leg still injects one `{"type":"user",…}` frame into the Claude
+session's UDS inbox, wrapped in `<cross-session-message from-name="<sender>" from-mode="prompting">`
+with the attribute order the receiver re-serializes and verifies.
+
+### §1 Wake note
+
+The injected note has a fixed line order (Chinese wording is selected by the same language rule as
+before: config `lang` > the woken agent's own recent messages > the mentioning message > `LANG` > en):
+
+```
+[AgentParty wake] <sender> mentioned you in #<channel> (seq <N>[, reply to seq <M>][, <ago>])
+[siblings=N — only when several runtimes share the identity]
+
+<body>
+
+Reply: [AGENTPARTY_CONFIG=<path> ]party send "<your reply>" --channel <channel> --reply-to <N>
+Thread: party history <channel> --seq <N>
+from-id: <sender identity>
+```
+
+- `<body>` is the message text **verbatim** (no quoting, no escaping, newlines kept) when it is at most
+  4096 UTF-8 bytes. Longer bodies inline only the first 512 bytes, cut on a character boundary so no
+  multi-byte character or surrogate pair is split, followed by one line
+  `… (<total> bytes total; full text: party history <channel> --seq <N>)`.
+- The `Reply:` line is copy-paste ready: channel and `--reply-to` are filled in; the only thing to edit
+  is the quoted placeholder. When the woken identity was resolved from an explicit `AGENTPARTY_CONFIG`
+  path, the line is prefixed with `AGENTPARTY_CONFIG=<path> ` so the reply lands on the same identity
+  even though the session's shell does not carry that variable. `reply_to` alone routes the reply back
+  to the original sender (directed-delivery cause `reply`), so no `--mention` is needed.
+- The whole note is at most 5120 bytes (`WAKE_NOTE_MAX_BYTES`): skeleton ≤1024 bytes plus body ≤4096.
+  If the skeleton overflows, it degrades in this order — bare `siblings=N`, drop `<ago>`, drop the
+  sender (header falls back to "you were mentioned"), drop the `AGENTPARTY_CONFIG=` prefix. The
+  `Reply:`, `Thread:` and `from-id:` lines are never dropped; a skeleton that still does not fit is a
+  programming error and throws instead of emitting a truncated note.
+- The body comes from the other party and is data, not an instruction; the wrapper tag already marks
+  it as cross-session content, so no extra "do not execute" prose is added.
+- The codex Stop-hook wake reason keeps its own 512-byte carrier limit and appends the same
+  `Reply:` command when it fits.
+
+### §2 Idle notices (`notify_when_idle`)
+
+One name everywhere: `party send … --notify-when-idle`, `party notify-when-idle <agent> [--channel C]`,
+MCP `party_send({ notify_when_idle: true })`, REST
+`POST /api/channels/:slug/presence/:target/notify-when-idle` (bearer = subscriber). Semantics match the
+built-in `SendMessage` option:
+
+- **One-shot.** The subscription fires once and is deleted.
+- **Trigger.** The target's next presence transition from `busy` to not busy (the `status` frame path
+  that clears `busy`, including parking on `waiting_owner`), or the target going offline. If the target
+  is already idle at subscribe time the notice fires immediately; if it is already offline the `exited`
+  variant fires immediately.
+- **Expiry.** 6 hours (`IDLE_WATCH_TTL_MS`), enforced by the ChannelDO alarm; an unfired subscription
+  sends the `expired` variant when it lapses.
+- **Delivery.** The ChannelDO sends an `idle_notice` frame
+  (`{type:"idle_notice", target, reason: idle|exited|expired, busy_ms?, ts}`) **only to the subscriber's
+  own live connections** — nothing is persisted to channel history and no seq is minted. The dormant
+  announce leg renders it in the woken agent's language and injects it with `from-name="AgentParty"`:
+
+  ```
+  [Cross-session idle notice] <target> is now idle. (busy for <duration>)
+  [Cross-session idle notice] <target> exited before going idle.
+  [Cross-session idle notice] <target> did not go idle within 6h; subscription expired.
+  ```
+
+  If the subscriber has no live connection when the watch fires, the outcome is kept on the row and
+  delivered on the subscriber's next `hello`, then deleted.
+- **Idempotent** per (target, subscriber): a second subscribe returns the existing watch. Unknown
+  target → 404; subscribing to yourself → 400; readonly tokens → 403.
+- The subscriber's presence entry carries `idle_watches: [{target, expires_at}]` while a watch is
+  pending, so `party who --json` shows who you are waiting on.
+- `send … --notify-when-idle` sends first, then subscribes to every explicit `--mention` and every
+  body `@token` the server actually routed. Subscription failures print a `warn:` line and never affect
+  the already-sent message.

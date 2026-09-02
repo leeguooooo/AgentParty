@@ -16,6 +16,7 @@ import {
   MAX_CHANNELS_PER_ACCOUNT,
   MAX_CHANNEL_CREATES_PER_WINDOW,
   MEMBER_ATTACHMENT_SIZE_LIMIT,
+  mentionMatchKey,
   normalizeTier,
   parseRuntimeTopology,
   RESERVED_NAMES,
@@ -9578,6 +9579,39 @@ app.post("/api/channels/:slug/presence/:name/activity", async (c) => {
     new Request(`https://do/internal/presence/${encodeURIComponent(name)}/activity`, {
       method: "POST",
       body: JSON.stringify({ activity: body.activity }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  return mutableFetchResponse(res);
+});
+
+// 一次性空闲订阅（#1052 notify_when_idle，wake protocol v2 §2）：bearer 身份订阅 :name 的下一次
+// 忙→闲（或离线）；触发时只给订阅方自己的连接投一条 idle_notice 帧，不进频道正文。目标已空闲 ⇒ 立即触发；
+// 6 小时到期 ⇒ expired 通知。同 (target, subscriber) 幂等。readonly 不可订阅；scoped token 不许跨频道。
+app.post("/api/channels/:slug/presence/:name/notify-when-idle", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  const name = c.req.param("name");
+  if (!name || name.length > 256) {
+    return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly token cannot subscribe"), 403);
+  }
+  if (identity.channel_scope != null && identity.channel_scope !== slug) {
+    return c.json(errorBody("forbidden", "token is scoped to another channel"), 403);
+  }
+  if (mentionMatchKey(name) === mentionMatchKey(identity.name)) {
+    return c.json(errorBody("bad_request", "cannot subscribe to your own idle state"), 400);
+  }
+  const res = await fetchMutableChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/presence/${encodeURIComponent(name)}/notify-when-idle`, {
+      method: "POST",
+      body: JSON.stringify({ subscriber: identity.name }),
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );

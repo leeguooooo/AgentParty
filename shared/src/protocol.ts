@@ -1132,7 +1132,40 @@ export interface PresenceEntry {
    * 仅在自检判定「叫不醒」时下发；agent 自报 null 即清除（修好后新开会话就会清）。旧客户端忽略。
    */
   wake_block?: WakeBlock;
+  /**
+   * 这个身份作为**订阅方**挂着的、尚未触发的空闲订阅（#1052 notify_when_idle）。
+   * 仅在有未触发订阅时下发；供 `party who` / doctor 展示「我在等谁忙完」。旧客户端忽略。
+   */
+  idle_watches?: IdleWatchRef[];
 }
+
+/** 一条未触发的空闲订阅（#1052）：订阅方在等 `target` 下一次由忙转闲。 */
+export interface IdleWatchRef {
+  target: string;
+  /** 订阅到期时刻（epoch ms）：到期未触发会发一条 expired 通知。 */
+  expires_at: number;
+}
+
+/**
+ * 空闲订阅触发时下发给**订阅方**的一次性通知（#1052 notify_when_idle，wake protocol v2 §2）。
+ * 只发给订阅方自己的连接，不落 history、不产生 seq；接收端（蛰伏 announce 腿）把它按自己的语言
+ * 渲染成 `[Cross-session idle notice] …` 注入宿主会话。
+ */
+export type IdleNoticeReason = "idle" | "exited" | "expired";
+
+export interface IdleNoticeFrame {
+  type: "idle_notice";
+  /** 被订阅的目标身份。 */
+  target: string;
+  /** idle＝目标由忙转闲；exited＝目标在空闲前离线；expired＝6 小时内没等到。 */
+  reason: IdleNoticeReason;
+  /** reason=idle 时：目标这次忙了多久（ms，服务端按订阅时刻 / 任务起点估算）。 */
+  busy_ms?: number;
+  ts: number;
+}
+
+/** 空闲订阅有效期：6 小时（与 Claude Code 内置 notify_when_idle 的语义对齐）。 */
+export const IDLE_WATCH_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * 「叫不醒」的原因码（issue #926）。每一条都必须对应一个**本机可自检、且用户能自己修**的断点——
@@ -2611,4 +2644,5 @@ export type ServerFrame =
   | DeliveryAdapterRegisteredFrame
   | DirectedDeliveryFrame
   | DeliveryStateFrame
-  | DeliveryRecoveryResultFrame;
+  | DeliveryRecoveryResultFrame
+  | IdleNoticeFrame;
