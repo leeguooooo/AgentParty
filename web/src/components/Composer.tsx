@@ -1,6 +1,7 @@
 // 底部插话框：Markdown、@name mention（动态在线列表补全，issue #39）、Cmd/Ctrl+Enter 发送（spec §9 第 4 块）。
 // readonly / archived 时由页面层直接不渲染本组件（错误内联为条幅）。
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { isOpaqueAccount } from "@agentparty/shared/identity";
 import type { ChangeEvent, ClipboardEvent, CSSProperties, DragEvent, KeyboardEvent } from "react";
 import type { Attachment } from "@agentparty/shared";
 import { formatSize, isImageAttachment, useAttachmentBlobUrl } from "./AttachmentList";
@@ -115,7 +116,10 @@ function groupLabel(group: string, t: TFunc, ownerDisplay?: string): string {
   if (group === "human sessions") return t("Composer.group.humanSessions");
   if (group === "unowned agents") return t("Composer.group.unownedAgents");
   if (group === "squads") return t("Composer.group.squads");
-  return ownerDisplay ?? group;
+  // 模块⑤：分组标题只给人能认的名字。归属名缺失或本身是不透明账号 ID（lark:on_xxx / github:123）
+  // 时归到「其他 agent」，不把 ID 当标题抛给用户。
+  const readable = ownerDisplay ?? group;
+  return isOpaqueAccount(readable) ? t("Composer.group.otherAgents") : readable;
 }
 
 export function Composer({
@@ -340,12 +344,17 @@ export function Composer({
         <ul className="mention-menu" role="listbox" aria-label="mention suggestions">
           {menu.items.map((c, i) => {
             const prev = menu.items[i - 1];
-            const showGroup = prev === undefined || prev.group !== c.group;
-            const owner =
+            // 标题是否重画按「显示出来的标题」比，而不是按原始 group：两个不同的不透明账号
+            // 都会归到「其他 agent」，按原始 group 比会连画两个同名标题（CodeRabbit #1053）。
+            const label = groupLabel(c.group, t, c.ownerDisplay);
+            const showGroup = prev === undefined || groupLabel(prev.group, t, prev.ownerDisplay) !== label;
+            // 归属芯片同样只显示可读名字；不透明账号 ID 直接不显示（分组标题已经说明归属）。
+            const ownerRaw =
               c.kind !== "agent"
                 ? null
                 : c.ownerDisplay
                   ?? (c.account && c.account !== c.display ? c.account : null);
+            const owner = ownerRaw !== null && !isOpaqueAccount(ownerRaw) ? ownerRaw : null;
             const title = [
               c.display,
               owner ? t("Composer.owner", { account: owner }) : "",
@@ -359,7 +368,7 @@ export function Composer({
               <li key={c.name} className="mention-row">
                 {showGroup && (
                   <div className="mention-group" aria-hidden="true">
-                    {groupLabel(c.group, t, c.ownerDisplay)}
+                    {label}
                   </div>
                 )}
                 <div
