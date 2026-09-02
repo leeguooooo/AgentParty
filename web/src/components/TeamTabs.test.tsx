@@ -58,8 +58,9 @@ function tabPanels(r: ReactTestRenderer) {
 describe("TeamTabs (#504 博客风页签)", () => {
   test("头部渲染「Team」标题与状态角标（模块④后不再有伪命令提示符）", () => {
     const r = render();
+    const title = r.root.findByProps({ className: "team-blog-name" });
+    expect(String(title.children.join(""))).toBe("Team");
     const text = allText(r);
-    expect(text).toContain("Team");
     expect(text).not.toContain("$ cat");
     expect(text).toContain("10"); // 未认领
     expect(text).toContain("7"); // 离线
