@@ -4,7 +4,7 @@ import { isHelpArg, parseArgs, unknownFlagError } from "../args";
 import { handleRestError, fetchMe, RestError } from "../rest";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { jsonFrame, nowTs } from "../json";
-import { readConfig, resolveChannel, refreshConfigInPlace } from "../config";
+import { configResolutionLabel, readConfig, resolveChannel, refreshConfigInPlace } from "../config";
 import { cachedIdentity, statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
 import { healServerUrl } from "../validation";
 import { stripTerminalControls } from "../format";
@@ -73,6 +73,7 @@ export async function run(argv: string[]): Promise<number> {
       console.log(`server: ${auth.server ?? "none (no config server and no account session)"}`);
       console.log(`account: ${auth.account.present ? `${auth.account.email ?? auth.account.sub ?? "present"} present server=${auth.account.server}` : `absent path=${terminalPath(auth.account.path)}`}`);
       console.log(`config: ${auth.config.path ? `${auth.config.kind} ${terminalPath(auth.config.path)}` : "none"}`);
+      console.log(`config-resolved-by: ${configResolutionLabel(auth.config)}`);
       console.log(`auth-source: ${auth.auth_source}`);
     }
     return 0;
@@ -147,6 +148,9 @@ export async function run(argv: string[]): Promise<number> {
         }`,
       );
       console.log(`config: ${auth.config.path ? `${auth.config.kind} ${terminalPath(auth.config.path)} token=${auth.config.token_fingerprint ?? "none"}` : "none"}`);
+      // #1052 #2：说清是哪一步解析出的身份——在 Claude 会话里不带 AGENTPARTY_CONFIG 也能认出宿主
+      // 会话绑的 config（claude session registry），排障时一眼看出用的是不是本会话的身份。
+      console.log(`config-resolved-by: ${configResolutionLabel(auth.config)}`);
       console.log(`auth-source: ${auth.auth_source}`);
       if (rejoin) {
         console.log("rejoin:");

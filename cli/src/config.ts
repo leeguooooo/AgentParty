@@ -20,6 +20,12 @@ import {
 } from "node:fs";
 import { atomicWriteJson } from "./atomic-json";
 import { stripTerminalControls } from "./format";
+import { findSelfClaudeSession } from "./claude-self-session";
+import {
+  readClaudeSessionEntry,
+  sessionEntryMatchesIdentity,
+  sessionEntryMatchesServer,
+} from "./claude-session-registry";
 
 export interface Config {
   server: string;
@@ -47,11 +53,46 @@ export interface CachedIdentity {
 
 export type ConfigSourceKind = "explicit" | "workspace" | "global" | "none";
 
+/**
+ * 具体是哪一步解析出了身份（#1052 #2）。`kind` 是给闸门用的粗分类（explicit/workspace 算「绑过」，
+ * global 是兜底），这里是给人看的细分：`explicit_env`＝AGENTPARTY_CONFIG；
+ * `claude_session_registry`＝沿父进程链认出宿主 Claude 会话、从注册表条目拿到它绑的 config；
+ * `breadcrumb`＝cwd state 里的绑定面包屑（kind 同为 explicit）。
+ */
+export type ConfigResolution =
+  | "explicit_env"
+  | "claude_session_registry"
+  | "workspace"
+  | "breadcrumb"
+  | "global"
+  | "none";
+
 export interface ConfigSourceInfo {
   kind: ConfigSourceKind;
   path: string | null;
   workspace_id?: string;
   token_fingerprint?: string;
+  resolution?: ConfigResolution;
+  /** resolution 为 claude_session_registry 时：认出的宿主会话（诊断用，whoami/doctor 打印）。 */
+  claude_session?: { pid: number; session_id: string };
+}
+
+const CONFIG_RESOLUTION_LABEL: Record<ConfigResolution, string> = {
+  explicit_env: "explicit env",
+  claude_session_registry: "claude session registry",
+  workspace: "workspace",
+  breadcrumb: "breadcrumb",
+  global: "global",
+  none: "none",
+};
+
+/** 人话版的解析步骤名（whoami / doctor 用）：`explicit env` / `claude session registry` / …。 */
+export function configResolutionLabel(source: Pick<ConfigSourceInfo, "kind" | "resolution" | "claude_session">): string {
+  const base = source.resolution === undefined ? source.kind : CONFIG_RESOLUTION_LABEL[source.resolution];
+  if (source.resolution === "claude_session_registry" && source.claude_session !== undefined) {
+    return `${base} (claude pid ${source.claude_session.pid}, session ${source.claude_session.session_id})`;
+  }
+  return base;
 }
 
 export interface ConfigWithSource {
@@ -313,13 +354,57 @@ export function tokenFingerprint(token: string): string {
   return `sha256:${createHash("sha256").update(token).digest("hex").slice(0, 12)}`;
 }
 
-function sourceInfo(kind: ConfigSourceKind, path: string | null, cfg: Config | null, cwd: string): ConfigSourceInfo {
+function sourceInfo(
+  kind: ConfigSourceKind,
+  path: string | null,
+  cfg: Config | null,
+  cwd: string,
+  resolution: ConfigResolution = kind === "explicit" ? "explicit_env" : kind,
+): ConfigSourceInfo {
   return {
     kind,
     path,
     ...(kind === "workspace" ? { workspace_id: workspaceId(cwd) } : {}),
     ...(cfg?.token ? { token_fingerprint: tokenFingerprint(cfg.token) } : {}),
+    resolution,
   };
+}
+
+/**
+ * 宿主 Claude 会话绑定的 config（#1052 #2）——排在「显式 AGENTPARTY_CONFIG」之后、「按 cwd 找
+ * workspace config」之前。链路：父进程链 → 宿主 pid → `~/.claude/sessions/<pid>.json` 的 sessionId
+ * → 注册表条目 → 条目的 config_path。
+ *
+ * 失败即回落（返回 null 走既有步骤），且**绝不拿到别人的 config**：
+ *   - 条目的 pid 必须等于认出的宿主 pid，session_id 必须等于寻址文件里的 sessionId（pid 复用 /
+ *     `/clear` 换会话都会让其中一项对不上）；
+ *   - config 文件里的 server 与 identity.name 必须与条目记的实例 / 频道身份一致（同一目录里
+ *     后来者覆盖了这份文件也会被识破）；
+ *   - 文件必须真有 token。
+ */
+function readClaudeSessionConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): ConfigWithSource | null {
+  try {
+    const self = findSelfClaudeSession({ env });
+    if (self === null || self.sessionId === null) return null;
+    const entry = readClaudeSessionEntry(self.sessionId, env);
+    if (entry === null || entry.pid !== self.pid) return null;
+    if (entry.session_id.toLowerCase() !== self.sessionId.toLowerCase()) return null;
+    const path = entry.config_path;
+    if (path === undefined) return null;
+    const cfg = JSON.parse(readFileSync(path, "utf8")) as Config;
+    if (typeof cfg?.token !== "string" || cfg.token === "") return null;
+    if (!sessionEntryMatchesServer(entry, cfg.server)) return null;
+    if (!sessionEntryMatchesIdentity(entry, cfg.identity?.name)) return null;
+    return {
+      config: cfg,
+      source: {
+        ...sourceInfo("explicit", path, cfg, cwd, "claude_session_registry"),
+        claude_session: { pid: entry.pid, session_id: entry.session_id },
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 function readBreadcrumbConfig(cwd: string): ConfigWithSource | null {
@@ -329,7 +414,7 @@ function readBreadcrumbConfig(cwd: string): ConfigWithSource | null {
     if (!breadcrumb) return null;
     try {
       const cfg = JSON.parse(readFileSync(breadcrumb, "utf8")) as Config;
-      return { config: cfg, source: sourceInfo("explicit", breadcrumb, cfg, cwd) };
+      return { config: cfg, source: sourceInfo("explicit", breadcrumb, cfg, cwd, "breadcrumb") };
     } catch {
       console.error(
         `warning: workspace config breadcrumb is unreadable: ${stripTerminalControls(String(breadcrumb))}; falling back to global config`,
@@ -372,7 +457,12 @@ export function readConfigWithSource(cwd: string = process.cwd()): ConfigWithSou
     return { config: null, source: missingExplicit };
   }
 
-  // 走到这里说明没有 AGENTPARTY_CONFIG，按正常 workspace → breadcrumb → global 顺序读取。
+  // 没有 AGENTPARTY_CONFIG：先看自己是不是跑在某个已入册的 Claude 会话里（#1052 #2）——
+  // 那个会话绑的 config 比 cwd 更准（同目录的两个会话各有各的）。认不出就按
+  // workspace → breadcrumb → global 顺序读取。
+  const session = readClaudeSessionConfig(cwd);
+  if (session !== null) return session;
+
   const ws = defaultWorkspaceConfigPath(cwd);
   try {
     const cfg = JSON.parse(readFileSync(ws, "utf8")) as Config;

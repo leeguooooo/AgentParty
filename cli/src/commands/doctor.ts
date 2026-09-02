@@ -4,7 +4,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { localAgentConfigsForChannel, resolveChannel } from "../config";
+import { configResolutionLabel, localAgentConfigsForChannel, readConfigWithSource, resolveChannel } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, fetchPresence, fetchRuntimePeers, RestError, type Identity } from "../rest";
 import { stripTerminalControls } from "../format";
@@ -784,6 +784,16 @@ export async function taskLeaseDoctorLines(
   }
 }
 
+function configResolutionDoctorLines(): string[] {
+  try {
+    const { source } = readConfigWithSource();
+    const path = source.path === null ? "none" : stripTerminalControls(source.path);
+    return [`identity: config=${path} resolved-by=${configResolutionLabel(source)}`];
+  } catch {
+    return [];
+  }
+}
+
 async function runVersionDoctor(argv: string[]): Promise<number> {
   if (argv.length > 0) {
     console.error(HELP);
@@ -795,6 +805,9 @@ async function runVersionDoctor(argv: string[]): Promise<number> {
   // #931：同理，「同一身份的第二个执行体会不会被拦住」也曾只在 stderr 有一行 warn。
   // 只在**真有第二个执行体**时报（无冲突不报，避免每次 doctor 都多一条无关噪音）。
   for (const line of await taskLeaseDoctorLines()) console.log(line);
+  // #1052 #2：身份是从哪一步解析出来的（explicit env / claude session registry / workspace /
+  // breadcrumb / global）。在 Claude 会话里跑，认出宿主会话就会显示 claude session registry。
+  for (const line of configResolutionDoctorLines()) console.log(line);
   console.log("");
   console.log(`running:   ${RUNNING_VERSION}`);
   const pending = pendingUpgrade();

@@ -49,6 +49,11 @@ export const CLAUDE_SESSION_REGISTRY_CAPACITY = 128;
 const SESSION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DISPLAY_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+/** 注册表接受的展示名形态（与 validEntry 同一把尺子；Claude 原生会话名 `agentparty-83` 天然符合）。 */
+export function isClaudeSessionDisplayName(value: unknown): value is string {
+  return typeof value === "string" && DISPLAY_NAME_RE.test(value);
+}
 const CHANNEL_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ENTRY_FILE_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
@@ -117,6 +122,16 @@ export interface ClaudeSessionRegistryEntry {
    * 目录才是权威身份；这个字段只是「目录与内容不符即丢弃」的二道防线。
    */
   harness?: SessionRegistryHarness;
+  /**
+   * 该会话绑定的 config 文件绝对路径（#1052 #2）。有了它，会话里的 `party` 命令不必再手写
+   * `AGENTPARTY_CONFIG`：config.ts 沿父进程链找到宿主 Claude pid → `<pid>.json` 的 sessionId
+   * → 本条目 → 这里的路径。**只在 pid 与 session_id 双双吻合、且文件里的 server/identity 与
+   * 条目一致时才采用**（见 config.ts readClaudeSessionConfig），任何一项对不上都当没有。
+   *
+   * 可选：旧条目没有；hook 入册时解析不出「绑过的」来源（只有全局兜底）也不写——
+   * 全局兜底不是绑定，记进来会让 #1018 的 MCP 闸把它误当成显式绑定放行。
+   */
+  config_path?: string;
 }
 
 /**
@@ -218,7 +233,12 @@ function validEntry(value: unknown): value is ClaudeSessionRegistryEntry {
     isAbsolute(value.cwd) &&
     typeof value.registered_at === "number" &&
     Number.isFinite(value.registered_at) &&
-    (value.harness === undefined || value.harness === "claude" || value.harness === "codex");
+    (value.harness === undefined || value.harness === "claude" || value.harness === "codex") &&
+    // config_path 缺席合法（旧条目 / 没绑过）；在场必须是非空绝对路径，坏值按坏行丢弃。
+    (value.config_path === undefined ||
+      (typeof value.config_path === "string" &&
+        value.config_path !== "" &&
+        isAbsolute(value.config_path)));
 }
 
 function validDirectory(path: string): string | null {
@@ -356,6 +376,51 @@ export function listCodexSessions(
 }
 
 /**
+ * 按 session_id 读**一条**仍存活的 claude 条目（#1052 #2：config 解析每条命令都要查，不必
+ * 扫整个目录）。不存在 / 坏行 / pid 已死 ⇒ null（死行留给 listSessions 顺手清）。
+ */
+export function readClaudeSessionEntry(
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): ClaudeSessionRegistryEntry | null {
+  if (!isClaudeSessionRegistrySessionId(sessionId)) return null;
+  const directory = sessionRegistryDirectory("claude", env);
+  if (directory === null) return null;
+  const entry = readEntry(directory, `${sessionId.toLowerCase()}.json`, "claude");
+  if (entry === null || !pidAlive(entry.pid)) return null;
+  return entry;
+}
+
+/**
+ * 就地更新一条已入册 claude 会话的 display_name / config_path（#1052 #2/#6）。
+ * 只改已有条目（不存在返回 false，绝不凭空造），其余字段逐字保留；写入走 registerSession
+ * 的同一把锁与校验。传 undefined 的字段不动。
+ */
+export function patchClaudeSessionEntry(
+  sessionId: string,
+  patch: { display_name?: string | null; config_path?: string | null },
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const entry = readClaudeSessionEntry(sessionId, env);
+  if (entry === null) return false;
+  const displayName = patch.display_name === undefined ? entry.display_name : patch.display_name;
+  const configPath = patch.config_path === undefined ? (entry.config_path ?? null) : patch.config_path;
+  if (displayName === entry.display_name && configPath === (entry.config_path ?? null)) return true;
+  return registerSession({
+    session_id: entry.session_id,
+    pid: entry.pid,
+    display_name: displayName,
+    channel: entry.channel,
+    server: entry.server ?? null,
+    identity: entry.identity ?? null,
+    cwd: entry.cwd,
+    registered_at: entry.registered_at,
+    harness: "claude",
+    config_path: configPath,
+  }, env);
+}
+
+/**
  * 入册会话在 party 侧的宣告名（#841 P2/P3、#851 共用同一权威定义，防词表漂移）：
  * 有 display_name 用 display_name，否则回退 `<harness>-<session_id 前 12 个 hex>`。
  */
@@ -394,6 +459,8 @@ export interface RegisterClaudeSessionInput {
   registered_at?: number;
   /** 省略即 claude（保持 #841 调用点逐字不变）。 */
   harness?: SessionRegistryHarness;
+  /** 该会话绑定的 config 绝对路径（#1052 #2）；省略 / null / 非绝对路径都不写。 */
+  config_path?: string | null;
 }
 
 /**
@@ -443,6 +510,9 @@ export function registerSession(
     ...(identity === null ? {} : { identity }),
     cwd: input.cwd,
     registered_at: input.registered_at ?? Date.now(),
+    ...(typeof input.config_path === "string" && input.config_path !== "" && isAbsolute(input.config_path)
+      ? { config_path: input.config_path }
+      : {}),
   };
   if (!validEntry(entry)) return false;
   const directory = sessionRegistryDirectory(harness, env, true);

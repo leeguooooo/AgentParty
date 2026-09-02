@@ -42,6 +42,7 @@ import {
   sessionEntryMatchesServer,
   type ClaudeSessionRegistryEntry,
 } from "../claude-session-registry";
+import { announceDisplayName } from "../claude-native-display-name";
 import { injectChannelMessage } from "../claude-inbox-inject";
 import {
   claimMentionWake,
@@ -856,7 +857,7 @@ export async function runDormantClaudeSessionAnnounce(
     const topology = deps.buildTopology(auth.server, entry.cwd, {
       harnessSession: {
         harness: "claude",
-        display_name: dormantAnnounceDisplayName(entry),
+        display_name: await announceDisplayName(entry, deps.env ?? process.env, { signal }),
       },
     });
     if (topology === undefined) return;
