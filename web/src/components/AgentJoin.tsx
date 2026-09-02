@@ -769,10 +769,14 @@ export function AgentJoin({
   const mainCommand = includeInstall && !unattended && baseCommand !== "" ? withInstall(baseCommand) : baseCommand;
   const sessionCommand = session === null ? "" : wakeableSessionCommand(slug, session.harness, session.token);
   const showSessionCommand = session !== null && !session.recover && !unattended && session.command !== null;
+  // 安全警告要跟**实际显示的命令**走（/code-review）：recover 选「先诊断」时命令是 party recover、
+  // 没有 token，不能因为 harness 是 claude 就亮 banner。recover 直接看命令串；接入形态沿用
+  // 「有明文 token 就警告」（unattended 脚本与 interactive 命令都带 token）。
   const anyCommandCarriesToken =
     session !== null &&
-    ((session.token !== null && (session.recover ? wakeableCommandCarriesToken(effectiveHarness, session.token) : true)) ||
-      (showSessionCommand && wakeableCommandCarriesToken(session.harness, session.token)));
+    (session.recover
+      ? mainCommand.includes("AGENTPARTY_TOKEN=")
+      : session.token !== null || (showSessionCommand && wakeableCommandCarriesToken(session.harness, session.token)));
   const step2Summary =
     checkin === null
       ? t("AgentJoin.step2.waiting")
