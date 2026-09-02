@@ -37,6 +37,8 @@ interface Props {
   identities?: IdentityDisplayMap;
   // 模块②（#1047）：名单里叫不到的 agent 旁边直接给「接回」——打开一条命令的重连引导。
   onReconnect?: (name: string) => void;
+  /** 初始就展开名单（静态预览 / 测试用；生产不传）。 */
+  initialRosterOpen?: boolean;
 }
 
 // 暂停时长预设（#180）：值 → 相对 now 的恢复时刻（epoch ms），"indefinite" 返回 null（手动恢复）。
@@ -423,6 +425,7 @@ export function PresenceBar({
   onOpenAgentDetail,
   identities,
   onReconnect,
+  initialRosterOpen = false,
 }: Props) {
   const t = useT();
   const localizeWaitingOwner = (item: Item): string | null => {
@@ -438,7 +441,7 @@ export function PresenceBar({
   const now = Date.now();
 
   // #484：姓名 roster 不再挤占频道顶部；点 live 计数后在独立弹框里查看和操作。
-  const [rosterOpen, setRosterOpen] = useState(false);
+  const [rosterOpen, setRosterOpen] = useState<boolean>(initialRosterOpen);
   const rosterToggleRef = useRef<HTMLButtonElement | null>(null);
   const rosterCloseRef = useRef<HTMLButtonElement | null>(null);
   const rosterDialogRef = useRef<HTMLDivElement | null>(null);
