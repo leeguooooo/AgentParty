@@ -77,7 +77,6 @@ const REQUIRED_KEYS = [
   "Channel.team.front",
   "Channel.team.frontTitle",
   "Channel.team.active",
-  "Channel.team.manual",
   "Channel.team.noWorkers",
   "Channel.team.memberTitle",
   "Channel.agentBoard.aria",
