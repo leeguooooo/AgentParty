@@ -619,7 +619,8 @@ describe("presence live roster dialog (#484)", () => {
       sleeper: { name: "sleeper", kind: "agent", state: "offline", note: null, ts: now - 60_000, last_seen: now - 60_000, wake: { kind: "webhook", verified_at: now - 1000 } } as PresenceEntry,
       gone: { name: "gone", kind: "agent", state: "offline", note: null, ts: now - 86_400_000, last_seen: now - 86_400_000 } as PresenceEntry,
     };
-    const r = create(createElement(LocaleProvider, null, createElement(PresenceBar, { presence, participants: [{ name: "watcher", kind: "agent" } as Sender], status: "open" })));
+    // 走文件里统一的 renderWith（act + 登记到 afterEach 卸载），extra 里的 presence/participants 会覆盖默认值。
+    const r = renderWith(presence.watcher!, { presence, participants: [{ name: "watcher", kind: "agent" } as Sender] });
     const order = nodesWithClass(r, "presence-ava").filter((n) => n.props["data-name"] !== undefined).map((n) => `${n.props["data-name"]}:${n.props["data-reach"]}`);
     expect(order).toEqual(["sleeper:wakeable", "watcher:online", "gone:offline"]);
   });
