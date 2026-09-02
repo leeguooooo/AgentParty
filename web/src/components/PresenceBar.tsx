@@ -303,9 +303,10 @@ export function presenceTier(item: Item, now: number, staleMs = PRESENCE_STALE_M
 
 // #1044 头像堆叠的状态环：绿=能被 @ 唤醒，蓝=在线但只是在看（@ 叫不醒），灰=离开。
 // 人只有在/不在；agent 的关键不是「在不在」而是「叫不叫得醒」——与 presenceTier / wakeabilityBadge 同口径。
-export type AvatarReach = "wakeable" | "online" | "offline";
+export type AvatarReach = "present" | "wakeable" | "online" | "offline";
 export function avatarReach(item: Item, now: number): AvatarReach {
-  if (item.kind === "human") return item.state !== "offline" ? "online" : "offline";
+  // 人：在就是绿（看得到 @），不在就灰；「叫不叫得醒」只对 agent 有意义。
+  if (item.kind === "human") return item.state !== "offline" ? "present" : "offline";
   if (item.paused) return "online";
   if (presenceTier(item, now) === "wakeable") return "wakeable";
   if (item.state !== "offline") {
@@ -1045,6 +1046,8 @@ export function PresenceBar({
                       style={{ "--ah": agentHue(item.display) } as CSSProperties}
                     >
                       {src ? <img src={src} alt="" /> : <span className="presence-ava-initial">{item.display.trim().charAt(0).toUpperCase()}</span>}
+                      {/* 状态点（飞书式右下角小圆点）：比只靠描边颜色更易读 */}
+                      <i className="presence-ava-dot" aria-hidden="true" />
                       {item.connectionCount > 1 && <i className="presence-ava-dup t-mono">×{item.connectionCount}</i>}
                     </span>
                   );

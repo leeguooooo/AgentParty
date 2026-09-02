@@ -1931,7 +1931,8 @@ button.org-person-name {
   transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
 .presence-toggle::before {
-  content: "❯";
+  /* #1044：头像堆叠已是视觉锚点，终端味的 ❯ 前缀去掉 */
+  content: none;
   color: var(--t-faint);
   font-size: 11px;
   margin-right: 1px;
@@ -8662,30 +8663,43 @@ button.org-person-name {
 .presence-stack { display: inline-flex; align-items: center; margin-right: 2px; }
 .presence-ava {
   --ah: 200;
+  --reach: var(--t-faint);
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  margin-left: -7px;
-  border: 1.8px solid var(--t-faint);
+  width: 26px;
+  height: 26px;
+  margin-left: -8px;
+  border: 2px solid var(--reach);
   background: hsl(var(--ah) 55% 86%);
   color: var(--d-ink);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
   overflow: visible;
   box-shadow: 0 0 0 2px var(--t-panel2);
+}
+.presence-ava-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--reach);
+  border: 1.5px solid var(--t-panel2);
 }
 .presence-ava:first-child { margin-left: 0; }
 .presence-ava--human { border-radius: 50%; }
 .presence-ava--agent { border-radius: 5px; }
 .presence-ava img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
 .presence-ava-initial { pointer-events: none; }
-.presence-ava[data-reach="wakeable"] { border-color: var(--d-green); }
-.presence-ava[data-reach="online"] { border-color: #2b6cb0; }
-.presence-ava[data-reach="offline"] { opacity: 0.55; filter: grayscale(1); }
+.presence-ava[data-reach="wakeable"],
+.presence-ava[data-reach="present"] { --reach: var(--d-green); }
+.presence-ava[data-reach="online"] { --reach: #2b6cb0; }
+.presence-ava[data-reach="offline"] { --reach: var(--t-faint); opacity: 0.6; filter: grayscale(1); }
+.presence-ava--more .presence-ava-dot { display: none; }
 .presence-ava-dup {
   position: absolute;
   right: -5px;
@@ -8702,11 +8716,20 @@ button.org-person-name {
 .presence-ava--more { background: var(--t-panel); border-color: var(--t-faint); font-size: 9px; border-radius: 5px; }
 .presence-mode {
   flex: none;
-  padding: 1px 6px;
-  font-size: 10px;
+  padding: 2px 7px;
+  font-size: 10.5px;
   font-weight: 700;
   border: 1.4px solid var(--d-ink);
+  border-radius: 999px;
   white-space: nowrap;
+}
+.presence-alert--duplicate {
+  color: var(--d-ink);
+  background: var(--d-red-soft);
+  border: 1.4px solid var(--d-red);
+  border-radius: 999px;
+  padding: 2px 7px;
+  cursor: help;
 }
 .presence-mode--public { background: var(--d-green-soft); }
 .presence-mode--party { background: var(--d-yellow); }
