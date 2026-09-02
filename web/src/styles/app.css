@@ -7434,8 +7434,7 @@ button.org-person-name {
   font-size: 12px;
   color: var(--t-muted);
 }
-/* 频道项：❯ 前缀 */
-.chan-head::before { content: "❯"; color: var(--t-faint); font-size: 12px; flex: none; }
+/* 模块③（#1049）：频道项不再伪装成终端提示符，去掉 ❯ 前缀 */
 
 /* #1044：presence 行不再伪装成终端（原 `$ who --live` 前缀已去掉）。 */
 
