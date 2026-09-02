@@ -997,6 +997,39 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(/changes into|先进到/.test(hint)).toBe(false);
   });
 
+  // codex stop-time review：Codex 线程不按目录存放，不能沿用 Claude 那句「换目录找不到」。
+  test("recover + codex 身份 ⇒ resume 提示按 codex 说（不提 Claude 按目录存放）", () => {
+    const codexPresence = (session: Record<string, unknown> | null) =>
+      [
+        {
+          name: "helper-codex",
+          kind: "agent",
+          state: "offline",
+          note: null,
+          ts: NOW - 60_000,
+          last_seen: NOW - 60_000,
+          ...(session === null ? {} : { agent_session: session }),
+        } as unknown as PresenceEntry,
+      ];
+    const hintsOf = (r: ReactTestRenderer) =>
+      r.root.findAll((n) => n.props.className === "agent-join-hint").map((n) => String(n.children.join(""))).join("\n");
+    // 有 thread 没 cwd
+    const r1 = render(undefined, null, {
+      recoverName: "helper-codex",
+      presence: codexPresence({ harness: "codex", session_id: "thread-1", updated_at: NOW - 60_000 }),
+      messages: [],
+      now: () => NOW,
+    });
+    expect(joinCmd(r1)).toBe("party bridge codex demo --resume thread-1");
+    expect(hintsOf(r1)).toMatch(/Codex/);
+    expect(hintsOf(r1)).not.toMatch(/Claude keeps|Claude 的对话/);
+    // 没 thread
+    const r2 = render(undefined, null, { recoverName: "helper-codex", presence: codexPresence(null), messages: [], now: () => NOW });
+    expect(joinCmd(r2)).toBe("party bridge codex demo --resume-last");
+    expect(hintsOf(r2)).toMatch(/--resume-last|最近一次 Codex|most recent Codex/);
+    expect(hintsOf(r2)).not.toMatch(/Claude keeps|Claude 的对话/);
+  });
+
   test("recover 身份猜不出 harness（other）且无上次会话 ⇒ 没有「接着上次」这一档，默认先诊断", () => {
     const r = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });
     const plans = r.root.findAll((n) => typeof n.props["data-plan"] === "string").map((n) => n.props["data-plan"]);

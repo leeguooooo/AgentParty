@@ -1017,10 +1017,13 @@ export function AgentJoin({
                 <p className="agent-join-hint">
                   {/* 三种状态各说各的实话：有 sid 有 cwd（命令里带 cd）/ 有 sid 没 cwd（必须在原目录跑，
                       命令里没有 cd）/ 没 sid（--continue 接该目录最近一次）。 */}
+                  {/* 再按 harness 分：Claude 会话按目录存放（换目录找不到），Codex 线程不按目录（从哪都能续）。 */}
                   {resumeTarget === null
-                    ? t("AgentJoin.plan.resumeUnknown")
+                    ? t(effectiveHarness === "codex" ? "AgentJoin.plan.resumeUnknownCodex" : "AgentJoin.plan.resumeUnknown")
                     : resumeTarget.cwd === null
-                      ? t("AgentJoin.plan.resumeKnownNoCwd", { sid: resumeTarget.sessionId })
+                      ? t(effectiveHarness === "codex" ? "AgentJoin.plan.resumeKnownNoCwdCodex" : "AgentJoin.plan.resumeKnownNoCwd", {
+                          sid: resumeTarget.sessionId,
+                        })
                       : t("AgentJoin.plan.resumeKnown", { sid: resumeTarget.sessionId, cwd: ` (${resumeTarget.cwd})` })}
                 </p>
               )}
