@@ -657,7 +657,8 @@ export function PresenceBar({
             <span
               className={`d-dot d-dot--${it.state}${it.paused ? " d-dot--paused" : ""}${unreachable !== null ? " d-dot--unreachable" : ""}`}
             />
-            <span className="roster-status-text">{statusText}</span>
+            {/* 暂停时只留 ⏸ 芯片（下方），不再重复一整句——两处说同一件事是噪音 */}
+            {!(it.paused && it.kind === "agent") && <span className="roster-status-text">{statusText}</span>}
             {unreachable !== null && (
               <span className="t-mono presence-busy presence-unreachable" title={t(unreachable.titleKey)}>
                 {t(unreachable.key)}
