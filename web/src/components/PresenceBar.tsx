@@ -422,10 +422,6 @@ export function PresenceBar({
   initialRosterOpen = false,
 }: Props) {
   const t = useT();
-  const localizeWaitingOwner = (item: Item): string | null => {
-    const label = waitingOwnerLabel(item);
-    return label === null ? null : t(label.key, label.vars);
-  };
   // 相对时间 30s 刷一次
   const [, setTick] = useState(0);
   useEffect(() => {
