@@ -23,7 +23,7 @@ ok "health"
 
 # 每次跑用唯一名字：smoke 要能反复跑。第一版复用固定名字，第二次就撞重名，
 # 而错误信息却把它归到「迁移没跑」——错因指错方向比不报错更浪费时间。
-RUN="$(date +%s)"
+RUN="$(date +%s)-$$"   # 秒数会在同一秒内两次运行时撞名（409），拼上 pid
 
 # 分诊靠**真实 HTTP 状态**，不靠猜。curl 把状态码附在正文末尾一行。
 post() { # $1=path $2=headers-name $3=header-value $4=json
@@ -67,17 +67,18 @@ ok "agent token"
 #    kind 必须是 "message"（不是 "msg"）：格式以 worker/src/do.ts 的 parseSendFrame 为准，
 #    别照直觉猜——我第一版就猜错了，返回的只是笼统的 invalid send payload。
 r="$(post "/api/channels/$CHANNEL/messages" authorization "Bearer $AT" "{\"kind\":\"message\",\"body\":\"selfhost smoke $RUN\",\"mentions\":[]}")"
-case "$(body_of "$r")" in
-  *'"seq"'*) ok "发消息（穿过 ChannelDO）" ;;
-  *) fail "发消息失败（HTTP $(code_of "$r")）：$(body_of "$r")" ;;
-esac
+SEQ="$(body_of "$r" | sed -n 's/.*"seq":\([0-9][0-9]*\).*/\1/p' | head -1)"
+[ -n "$SEQ" ] || fail "发消息失败（HTTP $(code_of "$r")）：$(body_of "$r")"
+ok "发消息（穿过 ChannelDO，seq ${SEQ}）"
 
-# 6) 读回来 —— 证明它真的落盘了，不只是被接受
-hist="$(curl -fsS --max-time 15 "$BASE/api/channels/$CHANNEL/messages?limit=5" \
+# 6) 读回来 —— 证明它真的落盘了，不只是被接受。
+#    必须按本次的 seq 精确读：`?limit=5` 给的是最旧的 5 条，频道里积累超过 5 条
+#    （smoke 跑到第 6 次）就读不到自己那条，会把「一切正常」误报成失败。
+hist="$(curl -fsS --max-time 15 "$BASE/api/channels/$CHANNEL/messages?since=$((SEQ - 1))&limit=1" \
   -H "authorization: Bearer $AT" 2>/dev/null || true)"
 case "$hist" in
   *"selfhost smoke $RUN"*) ok "读回消息（DO 存储可用）" ;;
-  *) fail "读不回刚发的消息：$hist" ;;
+  *) fail "读不回刚发的消息（seq ${SEQ}）：$hist" ;;
 esac
 
 printf '\nsmoke: 全部通过 —— 这台自部署实例可以用了（%s）\n' "$BASE"

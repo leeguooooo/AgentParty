@@ -305,3 +305,22 @@ describe("run：前台 exec + 版本元数据", () => {
     expect(`${r.stdout}${r.stderr}`).toMatch(/^\s*run\s+前台/m);
   });
 });
+
+// smoke 真机跑到第 6 次才暴露的两个坑：`?limit=5` 返回最旧 5 条（自己那条读不到 ⇒ 误报失败）；
+// `RUN=$(date +%s)` 同一秒内两次运行撞名（409）。守卫钉住修法，别被顺手改回去。
+describe("selfhost-smoke：可反复运行", () => {
+  const smoke = require("node:fs")
+    .readFileSync(resolve(import.meta.dir, "selfhost-smoke.sh"), "utf8")
+    .split("\n")
+    .filter((l: string) => !l.trim().startsWith("#"))
+    .join("\n");
+
+  test("读回必须按本次 seq 精确取，不能拿最旧 N 条碰运气", () => {
+    expect(smoke).toContain('messages?since=$((SEQ - 1))&limit=1');
+    expect(smoke).not.toMatch(/messages\?limit=\d+"/);
+  });
+
+  test("每次运行的名字要在同一秒内也唯一", () => {
+    expect(smoke).toMatch(/^RUN="\$\(date \+%s\)-\$\$"/m);
+  });
+});
