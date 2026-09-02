@@ -26,7 +26,7 @@ import { healServerUrl } from "../src/validation";
 import { RUNNING_VERSION } from "../src/upgrade";
 import { codexAutoWakeAuth, codexAutoWakeMarkerPath, codexAutoWakeTarget, writeCodexAutoWakeMarker } from "../src/codex-auto-wake";
 import { currentProcessStartedAt, instanceLockTarget } from "../src/instance-lock";
-import { listCodexSessions, registerClaudeSession, registerCodexSession } from "../src/claude-session-registry";
+import { listClaudeSessions, listCodexSessions, registerClaudeSession, registerCodexSession } from "../src/claude-session-registry";
 import { startRestMock, type RestMock } from "./rest-mock";
 import { PLUGIN, baseJoinOpts, fixLine, joinDeps, joinEnv, stepLine, type SpawnBehavior } from "./join-fixture";
 
@@ -794,6 +794,53 @@ describe("party join claude 档 —— 武装监听闸（#979）", () => {
   function lockFileFor(lockDir: string, server: string, token: string): string {
     return join(lockDir, `serve-${instanceLockTarget(healServerUrl(server)!, token, "dev")}.lock`);
   }
+
+  test("在 Claude 会话里跑 join ⇒ 本会话登记到频道并记下 config_path（#1052 #2），原生名进 display_name", async () => {
+    mock = startRestMock();
+    const sessionId = "019f95e8-2c0b-7903-8779-cd102c5ecd4e";
+    // SessionStart 时挂在别的频道、没名字、没 config_path——join 之后必须全部对齐到本频道。
+    expect(registerClaudeSession({
+      session_id: sessionId,
+      pid: process.pid,
+      display_name: null,
+      channel: "elsewhere",
+      identity: null,
+      server: mock.url,
+      cwd: process.cwd(),
+      registered_at: 12_345,
+    })).toBe(true);
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    d.claudeSelfSession = () => ({ pid: process.pid, sessionId, name: "agentparty-83", hops: 2 });
+    await runJoin(baseOpts({ harnessFlag: "claude" }), d);
+    const entry = listClaudeSessions().find((candidate) => candidate.session_id === sessionId);
+    expect(entry).toMatchObject({
+      pid: process.pid,
+      channel: "dev",
+      identity: "agent", // mock /api/me 的身份
+      display_name: "agentparty-83",
+      config_path: configPath(),
+      registered_at: 12_345,
+    });
+    expect(logs.join("\n")).toContain("登记本会话");
+
+    // pid 不符（条目属于别的宿主）⇒ 拒绝改写，条目原样。
+    const before = listClaudeSessions().find((candidate) => candidate.session_id === sessionId)!;
+    const logs2: string[] = [];
+    const d2 = deps([], {}, logs2);
+    d2.claudeSelfSession = () => ({ pid: process.pid + 1, sessionId, name: "agentparty-84", hops: 2 });
+    await runJoin(baseOpts({ harnessFlag: "claude" }), d2);
+    expect(listClaudeSessions().find((candidate) => candidate.session_id === sessionId)).toEqual(before);
+    expect(logs2.join("\n")).toContain("拒绝改写");
+
+    // 不在 Claude 会话里（探测为 null）⇒ 一个字不说，也不动注册表。
+    const logs3: string[] = [];
+    const d3 = deps([], {}, logs3);
+    d3.claudeSelfSession = () => null;
+    await runJoin(baseOpts({ harnessFlag: "claude" }), d3);
+    expect(logs3.join("\n")).not.toContain("登记本会话");
+  });
 
   test("只有蛰伏档 claude-channel 进程 ⇒ 不印 ✅、不说「就能被唤醒」，两条命令原样印出，并说清本机 N 个会话全是蛰伏档", async () => {
     mock = startRestMock();

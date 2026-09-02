@@ -278,3 +278,38 @@ events are malformed envelopes and also exit 2 instead of falling through as no-
 `PostToolBatch` events from the previous session cannot read, clear, or consume the new session's chain.
 All three state transitions share the consume lock and recheck the armed session while holding it, so a
 re-arm between an optimistic check and lock acquisition cannot revive the previous session's event.
+
+## Identity inside a Claude session
+
+`party` resolves its identity config in this order; `party whoami` prints the winning step as
+`config-resolved-by`, `party doctor` as `resolved-by`, and `whoami --json` as `config.resolution`:
+
+1. `explicit env` — `AGENTPARTY_CONFIG` (or the global `--config` flag). Fail-closed: when that file and
+   its durable mirror are both unreadable, no other source is substituted.
+2. `claude session registry` — only inside a Claude Code process tree (Claude sets `CLAUDECODE` for
+   every child). `party` first reads Claude's own `CLAUDE_CODE_SESSION_ID` and
+   `CLAUDE_CODE_MESSAGING_SOCKET` (`/tmp/cc-socks/<pid>.sock`), takes the pid from the socket name, and
+   accepts it only when `~/.claude/sessions/<pid>.json` carries exactly that `sessionId` and
+   `messagingSocketPath` and the pid is alive — a stale inherited environment (serve runner, nested
+   shell, a session replaced by `/clear`) fails that check. This path spawns nothing. Without those
+   variables (older Claude Code, or not under the Bash tool) it walks its parent-process chain (at most
+   10 hops of `ps -o ppid=`; `process.ppid` alone is the intermediate shell, not Claude) to the first
+   ancestor that owns `~/.claude/sessions/<pid>.json` and reads that file's `sessionId`. Either way it
+   then looks up the local session registry entry for that `sessionId`. The entry's `config_path` is used only when the entry's `pid` equals that
+   ancestor, its `session_id` equals the file's `sessionId`, and the config file's `server` and
+   `identity.name` still match what the entry recorded. Any mismatch or error falls through; this step
+   never selects another session's config. `config_path` is written by the `SessionStart` hook from a
+   bound source (explicit or workspace, never the global fallback) and by `party join` / `party recover`
+   when they run inside the session. The walk runs once per process and never runs outside Claude.
+3. `workspace` — the cwd-keyed config written by `party init` / `party join`.
+4. `breadcrumb` — the cwd state's binding pointer.
+5. `global` — `~/.agentparty/config.json`.
+
+Display names come from Claude's sessions file. A registry entry's `display_name` is Claude's own
+`name` from `~/.claude/sessions/<pid>.json` (for example `agentparty-83`) — the same name Claude's
+`ListAgents` shows, minus the bracketed `[ref]`, which AgentParty cannot derive and does not invent.
+`SessionStart` often runs before Claude writes that file, so every later hook round (`PreToolUse`,
+`Stop`, …) re-reads it once and updates the entry, and the dormant announce re-reads it once (with one
+short retry for a freshly registered session) before publishing `harness_session.display_name`. The
+`claude-<12hex>` fallback appears only while the native name is unavailable. `party who`, `party agents`,
+the `party_channel_peers` `claude_sessions[].display_name` hints, and doctor all render that name.

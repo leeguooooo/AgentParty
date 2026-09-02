@@ -89,6 +89,21 @@ function nativeSessionsDir(env: NodeJS.ProcessEnv = process.env): string | null 
   }
 }
 
+/**
+ * 本机是否存在任何 Claude 原生会话寻址文件（`<pid>.json`）。#1052 #2 的祖先链探测先问这一句：
+ * 目录不存在 / 空目录 ⇒ 这台机器上根本没有 Claude 会话，`party` 不必再花 `ps` 往上爬。
+ * 只 readdir 不解析，任何失败按「没有」处理（调用方随之走既有的 cwd 解析）。
+ */
+export function nativeSessionsAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  const dir = nativeSessionsDir(env);
+  if (dir === null) return false;
+  try {
+    return readdirSync(dir).some((filename) => PID_JSON_RE.test(filename));
+  } catch {
+    return false;
+  }
+}
+
 /** 单个 `<pid>.json` 的关切字段（native `B5d` 解析同款）。 */
 export interface NativeClaudeSession {
   pid: number;

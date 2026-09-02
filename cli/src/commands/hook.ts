@@ -26,7 +26,9 @@ import {
   loadStuck,
   loadStuckForConfig,
   readConfig,
+  readConfigWithSource,
   readState,
+  type ConfigSourceInfo,
   type StuckWake,
 } from "../config";
 import {
@@ -63,10 +65,12 @@ import { atomicWriteJson, atomicWriteText } from "../atomic-json";
 import {
   isClaudeSessionRegistrySessionId,
   listCodexSessions,
+  readClaudeSessionEntry,
   registerClaudeSession,
   registerCodexSession,
   unregisterClaudeSession,
 } from "../claude-session-registry";
+import { syncNativeDisplayName } from "../claude-native-display-name";
 import {
   CODEX_AUTO_WAKE_ENV,
   CODEX_AUTO_WAKE_MARKER_ENV,
@@ -845,6 +849,16 @@ export function claudeSessionDisplayNameFromHookPayload(
 }
 
 /**
+ * 入册时记进条目的 config 路径（#1052 #2）：只认「绑过」的来源——显式 AGENTPARTY_CONFIG /
+ * 注册表 / cwd 面包屑（kind=explicit）与本目录 workspace config。全局兜底不是绑定：记进去会让
+ * 后续命令把它当显式绑定用，也会绕过 #1018 的 MCP 闸。
+ */
+export function boundConfigPathForRegistry(source: ConfigSourceInfo): string | null {
+  if (source.path === null) return null;
+  return source.kind === "explicit" || source.kind === "workspace" ? source.path : null;
+}
+
+/**
  * 本机会话注册表接线（issue #841 P1）：SessionStart 入册、SessionEnd 出册。
  * 严守 hook 铁律：stdout 恒空、任何失败静默、不等网络。serve 托管 lane
  * （AP_ACTIVITY_FILE 有值）不入册——那是被管理的 runner 会话，不是交互式会话。
@@ -858,9 +872,16 @@ export function recordClaudeSessionLifecycle(
 ): void {
   try {
     const event = record.hook_event_name;
-    if (event !== "SessionStart" && event !== "SessionEnd") return;
     const sessionId = record.session_id;
     if (!isClaudeSessionRegistrySessionId(sessionId)) return;
+    if (event !== "SessionStart" && event !== "SessionEnd") {
+      // #1052 #6：SessionStart 常早于 Claude 写出 `~/.claude/sessions/<pid>.json`，那一轮拿不到
+      // 原生会话名。后续每一轮 hook（每轮一个新进程）再读一次；pid 与 session_id 都对得上才写回。
+      if (env.AP_ACTIVITY_FILE) return;
+      const entry = readClaudeSessionEntry(sessionId, env);
+      if (entry !== null && entry.pid === pid) syncNativeDisplayName(entry, env);
+      return;
+    }
     if (event === "SessionEnd") {
       unregisterClaudeSession(sessionId, env);
       return;
@@ -869,6 +890,7 @@ export function recordClaudeSessionLifecycle(
     const cwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : process.cwd();
     const channel = env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel;
     if (!channel) return;
+    const bound = readConfigWithSource(cwd);
     registerClaudeSession({
       session_id: sessionId,
       pid,
@@ -883,8 +905,11 @@ export function recordClaudeSessionLifecycle(
       // #865：条目必须带实例维度——频道 slug 跨实例不唯一（两台生产实例上都有
       // `agentparty`）。取该会话绑定 config 的 server；解析不出就不写，条目随之
       // 不可匹配（宁可这一轮叫不醒，也不跨实例误投）。
-      server: readConfig(cwd)?.server ?? null,
+      server: bound.config?.server ?? null,
       cwd,
+      // #1052 #2：记下这个会话绑的 config，后续 `party` 命令沿父进程链认出宿主会话后直接用它，
+      // 不必再手写 AGENTPARTY_CONFIG。
+      config_path: boundConfigPathForRegistry(bound.source),
     }, env);
   } catch {
     // hook 铁律：注册表任何失败都不配影响模型。

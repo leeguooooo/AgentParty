@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WAKE_VERIFY_PREFIX, type ServerFrame } from "@agentparty/shared";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
+import { CLAUDE_NATIVE_SESSIONS_DIR_ENV } from "../src/claude-inbox-inject";
 import { wakeProxyNoteFromId } from "../src/serve-wake-proxy";
 import { resetWakeLangCache } from "../src/wake-note-i18n";
 import {
@@ -140,6 +141,47 @@ function makeDeps(overrides: Partial<DormantAnnounceDeps> = {}): {
 async function tick(ms = 20): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+describe("announce display name = Claude native session name (#1052 #6)", () => {
+  function nativeFixture(name: string | null): NodeJS.ProcessEnv {
+    const dir = mkdtempSync(join(tmpdir(), "announce-native-sessions-"));
+    if (name !== null) {
+      writeFileSync(
+        join(dir, `${process.ppid}.json`),
+        JSON.stringify({ pid: process.ppid, sessionId: entry().session_id, name, messagingSocketPath: join(dir, "inbox.sock") }),
+        { mode: 0o600 },
+      );
+    }
+    return { [CLAUDE_NATIVE_SESSIONS_DIR_ENV]: dir };
+  }
+
+  test("announces Claude's own session name when the sessions file is readable", async () => {
+    const { deps, connections } = makeDeps({ env: nativeFixture("agentparty-83") });
+    const controller = new AbortController();
+    const run = runDormantClaudeSessionAnnounce("dev", controller.signal, deps);
+    await tick();
+    expect(connections).toHaveLength(1);
+    const opts = connections[0]!.connectArgs.opts;
+    expect((opts.runtimeTopology as { harness_session?: unknown }).harness_session).toEqual({
+      harness: "claude",
+      display_name: "agentparty-83",
+    });
+    controller.abort();
+    await run;
+  });
+
+  test("falls back to claude-<12hex> only while the native name is unavailable", async () => {
+    const { deps, connections } = makeDeps({ env: nativeFixture(null) });
+    const controller = new AbortController();
+    const run = runDormantClaudeSessionAnnounce("dev", controller.signal, deps);
+    await tick();
+    expect(connections).toHaveLength(1);
+    expect((connections[0]!.connectArgs.opts.runtimeTopology as { harness_session?: { display_name: string } }).harness_session?.display_name)
+      .toBe("claude-111111111111");
+    controller.abort();
+    await run;
+  });
+});
 
 describe("dormantAnnounceDisplayName", () => {
   test("prefers the registered name and falls back to a deterministic session-derived name", () => {

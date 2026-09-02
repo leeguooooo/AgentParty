@@ -20,6 +20,8 @@ import {
   registerClaudeSession,
   normalizeSessionRegistryIdentity,
   normalizeSessionRegistryServer,
+  patchClaudeSessionEntry,
+  readClaudeSessionEntry,
   registerSession,
   resolveSessionRegistryIdentity,
   sessionEntryMatchesIdentity,
@@ -190,6 +192,66 @@ describe("claude session registry", () => {
     expect(listClaudeSessions(env)).toHaveLength(1);
     // 注册完成后锁已释放。
     expect(readdirSync(directory)).toEqual([`${SESSION_ID}.json`]);
+  });
+});
+
+describe("config_path (#1052 #2)", () => {
+  test("round-trips an absolute config_path and drops rows with a bad one", () => {
+    expect(registerClaudeSession(baseEntry({ config_path: "/tmp/agents/a-dev.json" }), env)).toBe(true);
+    expect(listClaudeSessions(env)[0]!.config_path).toBe("/tmp/agents/a-dev.json");
+    expect(readClaudeSessionEntry(SESSION_ID, env)?.config_path).toBe("/tmp/agents/a-dev.json");
+    // 相对路径 / 空串不写（条目照常入册，只是没有 config_path）。
+    expect(registerClaudeSession(baseEntry({ config_path: "relative.json" }), env)).toBe(true);
+    expect(listClaudeSessions(env)[0]!.config_path).toBeUndefined();
+    // 盘上被写坏的 config_path 按坏行丢弃，不退化成「无 config_path」。
+    writeFileSync(
+      join(directory, `${SESSION_ID}.json`),
+      JSON.stringify({ ...listClaudeSessions(env)[0]!, config_path: "../evil.json" }),
+      { mode: 0o600 },
+    );
+    expect(listClaudeSessions(env)).toHaveLength(0);
+  });
+
+  test("patchClaudeSessionEntry updates only display_name / config_path of an existing entry", () => {
+    expect(patchClaudeSessionEntry(SESSION_ID, { display_name: "x" }, env)).toBe(false);
+    expect(registerClaudeSession(baseEntry({ server: "https://party.example", identity: "agent-a" }), env)).toBe(true);
+    const before = listClaudeSessions(env)[0]!;
+    expect(patchClaudeSessionEntry(SESSION_ID, { config_path: "/tmp/agents/a-dev.json" }, env)).toBe(true);
+    expect(listClaudeSessions(env)[0]).toEqual({ ...before, config_path: "/tmp/agents/a-dev.json" });
+    expect(patchClaudeSessionEntry(SESSION_ID, { display_name: "agentparty-83" }, env)).toBe(true);
+    expect(listClaudeSessions(env)[0]).toEqual({ ...before, config_path: "/tmp/agents/a-dev.json", display_name: "agentparty-83" });
+    expect(patchClaudeSessionEntry(SESSION_ID, { config_path: null }, env)).toBe(true);
+    expect(listClaudeSessions(env)[0]!.config_path).toBeUndefined();
+    expect(readClaudeSessionEntry("../evil", env)).toBeNull();
+  });
+
+  test("SessionStart records the bound config path (explicit env) but never the global fallback", () => {
+    const home = mkdtempSync(join(tmpdir(), "ap-registry-home-"));
+    const savedHome = process.env.AGENTPARTY_HOME;
+    const savedConfig = process.env.AGENTPARTY_CONFIG;
+    const savedNative = process.env.AGENTPARTY_CLAUDE_NATIVE_SESSIONS_DIR;
+    try {
+      process.env.AGENTPARTY_HOME = home;
+      process.env.AGENTPARTY_CLAUDE_NATIVE_SESSIONS_DIR = directory;
+      const hookEnv = { ...env, AGENTPARTY_CHANNEL: "dev", AGENTPARTY_CLAUDE_NATIVE_SESSIONS_DIR: directory };
+      const payload = { hook_event_name: "SessionStart", session_id: SESSION_ID, cwd: "/tmp/project" };
+      // 全局兜底：不记（记了会让后续命令把兜底当显式绑定，也绕过 #1018 的 MCP 闸）。
+      writeFileSync(join(home, "config.json"), JSON.stringify({ server: "https://party.example", token: "t", identity: { name: "agent-g" } }));
+      delete process.env.AGENTPARTY_CONFIG;
+      recordClaudeSessionLifecycle(payload, hookEnv, process.pid);
+      expect(listClaudeSessions(env)[0]!.config_path).toBeUndefined();
+      // 显式 AGENTPARTY_CONFIG：记下来。
+      const explicit = join(home, "agent-a-dev.json");
+      writeFileSync(explicit, JSON.stringify({ server: "https://party.example", token: "t", identity: { name: "agent-a" } }));
+      process.env.AGENTPARTY_CONFIG = explicit;
+      recordClaudeSessionLifecycle(payload, hookEnv, process.pid);
+      expect(listClaudeSessions(env)[0]).toMatchObject({ config_path: explicit, server: "https://party.example", identity: "agent-a" });
+    } finally {
+      if (savedHome === undefined) delete process.env.AGENTPARTY_HOME; else process.env.AGENTPARTY_HOME = savedHome;
+      if (savedConfig === undefined) delete process.env.AGENTPARTY_CONFIG; else process.env.AGENTPARTY_CONFIG = savedConfig;
+      if (savedNative === undefined) delete process.env.AGENTPARTY_CLAUDE_NATIVE_SESSIONS_DIR; else process.env.AGENTPARTY_CLAUDE_NATIVE_SESSIONS_DIR = savedNative;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

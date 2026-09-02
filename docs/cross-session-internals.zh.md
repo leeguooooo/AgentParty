@@ -214,3 +214,34 @@ receiver 的 Claude/MCP 初始化、bridge 启动地址，以及同时匹配该�
 上一条 session 迟到的 `PreToolUse` 或 `PostToolBatch` 不能读取、清空或消费新 session 的许可链。
 三类状态转换共用 consume lock，并在持锁时重查 armed session；旧事件即使先通过乐观检查、后等待锁，
 也不能在重武装后恢复执行。
+
+## Claude 会话内的身份
+
+`party` 按下列顺序解析身份 config；`party whoami` 用 `config-resolved-by` 打印命中的那一步，
+`party doctor` 用 `resolved-by`，`whoami --json` 给 `config.resolution`：
+
+1. `explicit env`——`AGENTPARTY_CONFIG`（或全局 `--config`）。失败关闭：该文件与其持久镜像都读不到时，
+   不拿任何别的来源顶替。
+2. `claude session registry`——只在 Claude Code 的进程树里生效（Claude 给每个子进程设 `CLAUDECODE`）。
+   `party` 先读 Claude 自己给的 `CLAUDE_CODE_SESSION_ID` 与 `CLAUDE_CODE_MESSAGING_SOCKET`
+   （`/tmp/cc-socks/<pid>.sock`），从 socket 文件名取 pid，只有 `~/.claude/sessions/<pid>.json` 里的
+   `sessionId`、`messagingSocketPath` 与变量逐字相等且 pid 活着才认——继承来的陈旧环境（serve runner、
+   嵌套 shell、`/clear` 之后换了会话）过不了这一关。这条路径不起任何子进程。变量缺失（旧版 Claude
+   Code、或不在 Bash 工具下）才沿父进程链往上走（最多 10 跳 `ps -o ppid=`；只看 `process.ppid` 得到的是
+   中间 shell，不是 Claude），找到第一个持有 `~/.claude/sessions/<pid>.json` 的祖先，读该文件的
+   `sessionId`。之后都是查本机会话注册表里对应的条目。只有当条目的 `pid` 等于那个祖先、`session_id` 等于文件里的 `sessionId`、且
+   config 文件里的 `server` 与 `identity.name` 仍与条目所记一致时，才采用条目的 `config_path`。任何一项
+   对不上或出错都往下回落；这一步绝不会选到别的会话的 config。`config_path` 由 `SessionStart` hook 从
+   「绑过」的来源（显式或 workspace，绝不是全局兜底）写入，也由在会话内运行的 `party join` /
+   `party recover` 写入。爬链每进程只做一次，不在 Claude 里根本不爬。
+3. `workspace`——`party init` / `party join` 写的按 cwd 隔离的 config。
+4. `breadcrumb`——cwd state 里的绑定面包屑。
+5. `global`——`~/.agentparty/config.json`。
+
+展示名来自 Claude 自己的 sessions 文件。注册表条目的 `display_name` 就是
+`~/.claude/sessions/<pid>.json` 里 Claude 自己的 `name`（例如 `agentparty-83`）——与 Claude `ListAgents`
+显示的同名，只是没有方括号里的 `[ref]`（AgentParty 推不出它，也不编造）。`SessionStart` 常常跑在
+Claude 写出该文件之前，所以之后每一轮 hook（`PreToolUse`、`Stop`……）都会再读一次并更新条目；蛰伏
+announce 在发布 `harness_session.display_name` 之前也会再读一次（刚入册的会话多一次短暂重试）。
+`claude-<12hex>` 回退名只在原生名不可读时出现。`party who`、`party agents`、`party_channel_peers` 的
+`claude_sessions[].display_name` 提示与 doctor 展示的都是这个名字。

@@ -59,8 +59,11 @@ import {
 } from "../codex-auto-wake";
 import { defaultInstanceLockDir, isSameLiveProcess } from "../instance-lock";
 import {
+  isClaudeSessionDisplayName,
   isClaudeSessionRegistrySessionId,
   listCodexSessions,
+  readClaudeSessionEntry,
+  registerClaudeSession,
   registerCodexSession,
 } from "../claude-session-registry";
 import {
@@ -77,6 +80,7 @@ import { STEP_INDENT, runSteps, type Step, type StepResult } from "../onboarding
 import { verifyWakeRoundTrip, type VerifyWakeDeps } from "../onboarding/verify-wake";
 import { normalizeWakeLang, resolveWakeLang, type WakeLang } from "../wake-note-i18n";
 import { findHarnessAncestor } from "../join-binding";
+import { findSelfClaudeSession, type SelfClaudeSession } from "../claude-self-session";
 import {
   CLAUDE_PLUGIN_MIN_VERSION,
   inspectClaudePluginShell,
@@ -237,6 +241,11 @@ export interface JoinDeps {
   codexWakeLayerLive: () => Promise<CodexWakeLayerLiveness | null>;
   /** 跑 join 的那个 codex 进程 pid（进程祖先链）；找不到 null。用于把本会话在注册表里挂到本频道。 */
   codexAncestorPid: () => number | null;
+  /**
+   * 跑 join 的这个进程所在的 Claude 会话（#1052 #2）；不在 Claude 里 ⇒ null。可选：测试夹具不给
+   * 就不登记（绝不让单测沿真实进程链写真实注册表）。生产由 defaultJoinDeps 接 findSelfClaudeSession。
+   */
+  claudeSelfSession?: () => SelfClaudeSession | null;
   /**
    * 当前 Codex task/thread id。ChatGPT.app 的多个 task 共用同一个 app-server PID，PID 只能证明
    * 属于这批 task，不能选出眼前这个；缺失时只允许 PID 下恰好一个注册表候选。
@@ -622,6 +631,57 @@ function adoptCodexSessionForChannel(
   }
 }
 
+/**
+ * 把跑 join 的这个 Claude 会话登记到本频道，并记下它绑的 config（#1052 #2）。
+ *
+ * 会话的 SessionStart hook 入册时往往还没绑频道（条目不存在）或绑在别的频道 / 记着同目录里
+ * 上一个身份的 config；join 刚写好 per-session config，此刻是唯一知道「这个会话＝这份 config」
+ * 的时机。登记之后，本会话里的 `party` 命令不必再手写 AGENTPARTY_CONFIG（config.ts 沿父进程链
+ * 认出宿主会话 → 注册表 → config_path）。
+ *
+ * 判据全部来自 Claude 自己的寻址文件（`~/.claude/sessions/<pid>.json` 的 sessionId / name），
+ * 不是猜的；已有条目 pid 不符（pid 复用）就拒绝改写。不在 Claude 会话里 ⇒ null（一个字不说）。
+ */
+function adoptClaudeSessionForChannel(
+  deps: JoinDeps,
+  slug: string,
+  configPath: string,
+  identity: string | null,
+  server: string | null,
+): StepOutcome | null {
+  try {
+    if (deps.claudeSelfSession === undefined || process.env.AP_ACTIVITY_FILE) return null;
+    const self = deps.claudeSelfSession();
+    if (self === null) return null;
+    if (self.sessionId === null || !isClaudeSessionRegistrySessionId(self.sessionId)) {
+      return { level: "warn", msg: `Claude 寻址文件里没有合法的 sessionId（pid ${self.pid}）——没登记；本会话里跑 party 命令请带 AGENTPARTY_CONFIG=${configPath}` };
+    }
+    const existing = readClaudeSessionEntry(self.sessionId);
+    if (existing !== null && existing.pid !== self.pid) {
+      return { level: "warn", msg: `注册表里会话 ${self.sessionId} 记的 pid ${existing.pid} 与当前宿主 ${self.pid} 不符——拒绝改写` };
+    }
+    const displayName = isClaudeSessionDisplayName(self.name) ? self.name : existing?.display_name ?? null;
+    const ok = registerClaudeSession({
+      session_id: self.sessionId,
+      pid: self.pid,
+      display_name: displayName,
+      channel: slug,
+      identity,
+      server,
+      cwd: existing?.cwd ?? process.cwd(),
+      ...(existing === null ? {} : { registered_at: existing.registered_at }),
+      config_path: configPath,
+    });
+    if (!ok) return { level: "warn", msg: "会话注册表写入失败——本会话里跑 party 命令请带 AGENTPARTY_CONFIG" };
+    return {
+      level: "ok",
+      msg: `${displayName ?? `claude pid ${self.pid}`} → ${configPath}（本会话里的 party 命令不用再带 AGENTPARTY_CONFIG）`,
+    };
+  } catch (e) {
+    return { level: "warn", msg: `会话注册表更新失败：${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 /** codex 档第 3 步：先认领本会话、再主动拉起唤醒层、再探活。三步各自失败都不抛，全部进证据。 */
 async function bringUpCodexWakeLayer(
   deps: JoinDeps,
@@ -825,6 +885,11 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       }
       // claude 档：crossSessionInbound=accept（#844），否则跨会话 @ 默认 hold 会被 drop。
       if (harness === "claude") detail.push(outcomeLine("开启跨会话 @ 接收", setClaudeInboxAccept(deps)));
+      // #1052 #2：跑在 Claude 会话里就把这个会话登记到本频道并记下它绑的 config（codex 档另有 #957）。
+      if (harness !== "codex") {
+        const adopted = adoptClaudeSessionForChannel(deps, slug, configPath, identity, cfg.server);
+        if (adopted !== null) detail.push(outcomeLine("登记本会话", adopted));
+      }
       // 报到（#597）。init 只写配置不发言，必须补这一条，否则网页/频道里看不到你。能 @ 邀请人就 @。
       const sendArgs = [`👋 ${agentName} 报到，来参与协作`, "--channel", slug];
       if (opts.mention !== null) sendArgs.push("--mention", opts.mention);
@@ -1338,6 +1403,7 @@ export function defaultJoinDeps(slug: string): JoinDeps {
         config: readConfig(),
         channel: slug,
       }),
+    claudeSelfSession: () => findSelfClaudeSession(),
     codexAncestorPid: () => {
       const found = findHarnessAncestor(process.ppid);
       return found !== null && found.harness === "codex" ? found.pid : null;
