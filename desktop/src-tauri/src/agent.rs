@@ -304,15 +304,13 @@ pub(crate) fn parse_config_summary(path: &Path) -> Result<AgentConfigSummary, St
     }
     let parsed = url::Url::parse(&config.server)
         .map_err(|_| "AgentParty config server is invalid".to_string())?;
-    let local_http = parsed.scheme() == "http"
-        && parsed.host_str().is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|address| address.is_loopback())
-        });
+    // 明文 http 只放行私网主机，规则与桌面凭据、web 层一致，见 private_network.rs
+    let private_http = parsed.scheme() == "http"
+        && parsed
+            .host_str()
+            .is_some_and(crate::private_network::allows_plain_http);
     if !matches!(parsed.scheme(), "http" | "https")
-        || (parsed.scheme() == "http" && !local_http)
+        || (parsed.scheme() == "http" && !private_http)
         || parsed.host_str().is_none()
         || parsed.username() != ""
         || parsed.password().is_some()

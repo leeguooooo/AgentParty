@@ -166,6 +166,12 @@ party send dev "hello from the intranet"
 
 其余功能（`party claude`、`party serve`、webhook、Claude 插件）对内网地址同样可用，无需改动。
 
+### 桌面端
+
+桌面端只对「公网够不到」的主机接受明文 `http://`：回环地址、私网 IPv4 段（`10/8`、`172.16/12`、`192.168/16`）、链路本地与 CGNAT（`100.64/10`，Tailscale 用的就是它）、IPv6 ULA / 链路本地、以 `.local`、`.internal`、`.lan`、`.home.arpa`、`.intranet` 结尾的域名，以及 `http://agentparty:8787` 这类无点单标签主机名。公网域名和公网 IP 必须 HTTPS。在「服务器 → 添加」里填内网地址，然后和浏览器一样粘贴 token 登录。
+
+这条规则由界面包和原生壳同时执行，所以桌面端本身要 v0.2.242 或更新；旧壳即使界面已自动更新，仍会拒绝非回环的 `http://`。
+
 ## 运维
 
 ### 服务命令

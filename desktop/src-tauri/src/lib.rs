@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 mod agent;
 mod duty;
+mod private_network;
 #[cfg(desktop)]
 mod ui_download;
 #[cfg(desktop)]
@@ -322,15 +323,13 @@ fn parse_stored_credential(input: &str) -> Result<StoredDesktopCredential, Strin
     }
     let origin = url::Url::parse(&credential.server_origin)
         .map_err(|_| "desktop credential server is invalid".to_string())?;
-    let local_http = origin.scheme() == "http"
-        && origin.host_str().is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|address| address.is_loopback())
-        });
+    // 明文 http 只放行私网主机（回环、RFC1918、链路本地、CGNAT、ULA、内网域名后缀），见 private_network.rs
+    let private_http = origin.scheme() == "http"
+        && origin
+            .host_str()
+            .is_some_and(crate::private_network::allows_plain_http);
     if !matches!(origin.scheme(), "https" | "http")
-        || (origin.scheme() == "http" && !local_http)
+        || (origin.scheme() == "http" && !private_http)
         || origin.host_str().is_none()
         || origin.username() != ""
         || origin.password().is_some()

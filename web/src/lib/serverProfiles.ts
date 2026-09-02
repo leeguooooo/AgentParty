@@ -50,11 +50,57 @@ export function isLeeguoooooDeployment(origin: string): boolean {
   return normalizeServerOrigin(origin) === LEEGUOOOOO_SERVER_ORIGIN;
 }
 
-function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (host === "localhost" || host === "::1") return true;
+// 约定只在私网内解析的域名后缀（RFC 6762 .local、ICANN 保留的 .internal、RFC 8375 home.arpa，
+// 以及企业内网常用的 .lan / .intranet）。
+const PRIVATE_HOST_SUFFIXES = [".local", ".internal", ".lan", ".home.arpa", ".intranet"];
+
+function parseIpv4(host: string): number[] | null {
   const parts = host.split(".");
-  return parts.length === 4 && parts.every((part) => /^\d+$/.test(part)) && Number(parts[0]) === 127;
+  if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/.test(part))) return null;
+  const octets = parts.map(Number);
+  return octets.every((octet) => octet <= 255) ? octets : null;
+}
+
+function isPrivateIpv4(octets: number[]): boolean {
+  const [a, b] = octets as [number, number];
+  return (
+    a === 127 || // 回环
+    a === 10 || // 10/8
+    (a === 172 && b >= 16 && b <= 31) || // 172.16/12
+    (a === 192 && b === 168) || // 192.168/16
+    (a === 169 && b === 254) || // 169.254/16 链路本地
+    (a === 100 && b >= 64 && b <= 127) // 100.64/10 CGNAT（Tailscale 等）
+  );
+}
+
+function isPrivateIpv6(host: string): boolean {
+  if (host === "::1") return true;
+  const mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped !== null) {
+    const octets = parseIpv4(mapped[1]!);
+    return octets !== null && isPrivateIpv4(octets);
+  }
+  const first = host.split(":")[0] ?? "";
+  if (!/^[0-9a-f]{1,4}$/.test(first)) return false;
+  const seg = Number.parseInt(first, 16);
+  return (seg & 0xfe00) === 0xfc00 || (seg & 0xffc0) === 0xfe80; // ULA fc00::/7、链路本地 fe80::/10
+}
+
+/**
+ * 明文 http 的准入判定：只放行「流量出不了私网」的主机——回环、RFC1918、链路本地、CGNAT、
+ * IPv6 ULA / 链路本地、内网域名后缀、无点单标签主机名。公网域名 / 公网 IP 仍然必须 https。
+ * 内网私有部署（docs/self-host-intranet.md）从桌面端接入靠的就是这条。
+ * 与桌面壳 desktop/src-tauri/src/private_network.rs 是同一条规则，改一处要改两处。
+ */
+export function isPrivateNetworkHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host.length === 0) return false;
+  if (host === "localhost") return true;
+  const ipv4 = parseIpv4(host);
+  if (ipv4 !== null) return isPrivateIpv4(ipv4);
+  if (host.includes(":")) return isPrivateIpv6(host);
+  if (!host.includes(".")) return true; // 无点单标签主机名只能由内网 DNS / hosts 解析
+  return PRIVATE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
 export function normalizeServerOrigin(input: string): string | null {
@@ -62,7 +108,7 @@ export function normalizeServerOrigin(input: string): string | null {
     const url = new URL(input.trim());
     if (url.username || url.password || url.search || url.hash) return null;
     if (url.pathname !== "/" && url.pathname !== "") return null;
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) return null;
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && isPrivateNetworkHost(url.hostname))) return null;
     return url.origin;
   } catch {
     return null;
