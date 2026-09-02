@@ -437,14 +437,12 @@ function nodesWithClass(r: ReactTestRenderer, className: string) {
 }
 
 describe("presence client version", () => {
-  test("shows an agent CLI version in expanded details and the group tooltip, then removes it when collapsed", async () => {
+  test("shows an agent CLI version in the roster row, then removes it when the dialog closes", async () => {
     const r = renderPresence(presenceEntry("0.2.89"), true);
 
     const versions = nodesWithClass(r, "presence-client-version");
     expect(versions).toHaveLength(1);
     expect(versions[0]?.children).toEqual(["cli v", "0.2.89"]);
-    const group = nodesWithClass(r, "presence-group")[0];
-    expect(group?.props.title).toContain("agent-a: cli v0.2.89");
 
     await act(async () => {
       r.root.findByProps({ "aria-label": "collapse" }).props.onClick();
@@ -679,93 +677,16 @@ describe("presence live roster dialog (#484)", () => {
     });
     expect(r.root.findAllByProps({ role: "dialog" })).toHaveLength(1);
     expect(r.root.findByProps({ role: "dialog" }).props["aria-modal"]).toBe("true");
-    expect(r.root.findByProps({ "aria-label": "Participant groups by owner" })).toBeDefined();
+    expect(r.root.findByProps({ "aria-label": "Channel members" })).toBeDefined();
 
-    // 再次点击应关闭，姓名组从 DOM 移除，顶部不再留一整排列表。
+    // 再次点击应关闭，成员行从 DOM 移除，顶部不再留一整排列表。
     expect(toggle?.props["aria-expanded"]).toBe(true);
-    expect(nodesWithClass(r, "presence-group")).toHaveLength(1);
+    expect(nodesWithClass(r, "roster-row")).toHaveLength(1);
     await act(async () => {
       toggle?.props.onClick();
     });
     expect(r.root.findAllByProps({ role: "dialog" })).toHaveLength(0);
-    expect(nodesWithClass(r, "presence-group")).toHaveLength(0);
-  });
-});
-
-describe("presence group popover overflow (#357)", () => {
-  async function focusGroup(r: ReactTestRenderer): Promise<void> {
-    const group = nodesWithClass(r, "presence-group")[0];
-    await act(async () => {
-      group?.props.onFocus({
-        currentTarget: { getBoundingClientRect: () => ({ left: 10, right: 310, top: 10, bottom: 44, width: 300, height: 34 }) },
-      });
-    });
-  }
-
-  test("caps the hover popover at ten members and reports the hidden count", async () => {
-    const r = renderPresenceRoster(12, true);
-    await focusGroup(r);
-
-    const popover = nodesWithClass(r, "presence-popover")[0];
-    expect(popover).toBeDefined();
-    expect(popover?.findAll((node) => String(node.props.className ?? "").includes("presence-pill--full"))).toHaveLength(10);
-    expect(nodesWithClass(r, "presence-popover-more")[0]?.children.join("")).toBe("+2 · expand participants");
-  });
-
-  test("clicking the compact group closes the popover and expands all members inline", async () => {
-    const r = renderPresenceRoster(12, true);
-    await focusGroup(r);
-
-    const group = nodesWithClass(r, "presence-group")[0];
-    expect(group?.props["aria-expanded"]).toBe(false);
-    await act(async () => {
-      group?.props.onClick({ target: { closest: () => null } });
-    });
-
-    expect(nodesWithClass(r, "presence-popover")).toHaveLength(0);
-    const expandedGroup = nodesWithClass(r, "presence-group--full")[0];
-    expect(expandedGroup?.props["aria-expanded"]).toBe(true);
-    expect(nodesWithClass(r, "presence-group-detail")[0]?.findAll(
-      (node) => String(node.props.className ?? "").includes("presence-pill--full"),
-    )).toHaveLength(12);
-  });
-
-  test("uses the existing Chinese expand text for the overflow affordance", async () => {
-    localStorage.setItem("ap_locale", "zh");
-    const r = renderPresenceRoster(11, true);
-    await focusGroup(r);
-
-    expect(nodesWithClass(r, "presence-popover-more")[0]?.children.join("")).toBe("+1 · 展开参与者");
-  });
-
-  test("mouse can cross the trigger gap into the popover without closing it (#457)", async () => {
-    const r = renderPresenceRoster(3, true);
-    const group = nodesWithClass(r, "presence-group")[0];
-    await act(async () => {
-      group?.props.onMouseEnter({
-        currentTarget: { getBoundingClientRect: () => ({ left: 10, right: 310, top: 10, bottom: 44, width: 300, height: 34 }) },
-      });
-    });
-    const popover = nodesWithClass(r, "presence-popover")[0];
-    expect(popover).toBeDefined();
-
-    await act(async () => {
-      group?.props.onMouseLeave();
-      popover?.props.onMouseEnter();
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    });
-    expect(nodesWithClass(r, "presence-popover")).toHaveLength(1);
-
-    await act(async () => {
-      nodesWithClass(r, "presence-popover")[0]?.props.onMouseLeave();
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    });
-    expect(nodesWithClass(r, "presence-popover")).toHaveLength(0);
-  });
-
-  test("popover accepts pointer events so its enter handler can keep it open (#457)", async () => {
-    const css = await Bun.file(new URL("../styles/app.css", import.meta.url)).text();
-    expect(css).toMatch(/\.presence-popover\s*\{[^}]*pointer-events:\s*auto;/s);
+    expect(nodesWithClass(r, "roster-row")).toHaveLength(0);
   });
 });
 
@@ -789,6 +710,105 @@ function renderWith(entry: PresenceEntry, extra: Record<string, unknown>, open =
   if (open) openRoster(next);
   return next;
 }
+
+// 模块②（#1047）：名单弹窗从分组卡片 + 悬停浮层改成平铺成员表——一人一行、人话状态、一行一个主动作。
+describe("presence roster flat list (#1047)", () => {
+  const NOW = Date.now();
+  const agent = (name: string, over: Record<string, unknown> = {}): PresenceEntry =>
+    ({ name, kind: "agent", state: "online", note: null, ts: NOW, last_seen: NOW, live: true, wake: { kind: "serve" }, residency: "resident", ...over }) as unknown as PresenceEntry;
+  const human = (name: string): PresenceEntry =>
+    ({ name, kind: "human", state: "online", note: null, ts: NOW, last_seen: NOW, live: true }) as unknown as PresenceEntry;
+
+  function renderRoster(presence: Record<string, PresenceEntry>, extra: Record<string, unknown> = {}): ReactTestRenderer {
+    const names = Object.keys(presence);
+    const online = names.filter((n) => presence[n]!.state !== "offline");
+    return renderWith(presence[names[0]!]!, {
+      presence,
+      participants: online.map((name) => ({ name, kind: presence[name]!.kind }) as Sender),
+      ...extra,
+    }, true);
+  }
+
+  test("rows are flat (no owner groups), sorted by reachability, with plain-language status per row", () => {
+    const r = renderRoster({
+      gone: agent("gone", { state: "offline", live: false, ts: NOW - 3_600_000, last_seen: NOW - 3_600_000, wake: { kind: "none" } }),
+      watcher: agent("watcher", { wake: { kind: "none" }, residency: "bare" }),
+      leo: human("leo"),
+      worker: agent("worker"),
+    });
+    expect(nodesWithClass(r, "presence-group")).toHaveLength(0);
+    const rows = nodesWithClass(r, "roster-row");
+    expect(rows.map((n) => `${n.props["data-name"]}:${n.props["data-reach"]}`)).toEqual([
+      "leo:present",
+      "worker:wakeable",
+      "watcher:online",
+      "gone:offline",
+    ]);
+    const statusOf = (name: string) =>
+      String(rows.find((n) => n.props["data-name"] === name)?.findAll((c) => c.props.className === "roster-status-text")[0]?.children.join(""));
+    expect(statusOf("worker")).toMatch(/can be woken/);
+    expect(statusOf("watcher")).toMatch(/watching only/);
+    expect(statusOf("gone")).toMatch(/away/);
+    // 行话不再出现在名单里
+    const json = JSON.stringify(r.toJSON());
+    expect(json).not.toContain("wakeable · unverified");
+    expect(json).not.toContain('"dup"');
+  });
+
+  test("reconnect appears only next to agents you can't reach right now, and calls onReconnect(name)", async () => {
+    const reconnected: string[] = [];
+    const r = renderRoster(
+      {
+        worker: agent("worker"),
+        watcher: agent("watcher", { wake: { kind: "none" }, residency: "bare" }),
+        gone: agent("gone", { state: "offline", live: false, ts: NOW - 60_000, last_seen: NOW - 60_000, wake: { kind: "none" } }),
+        leo: human("leo"),
+      },
+      { onReconnect: (name: string) => reconnected.push(name) },
+    );
+    const rows = nodesWithClass(r, "roster-row").filter(
+      (n) => n.findAll((c) => String(c.props.className ?? "").includes("roster-reconnect")).length > 0,
+    );
+    expect(rows.map((n) => n.props["data-name"]).sort()).toEqual(["gone", "watcher"]);
+    // 逐行点：每个按钮回调的必须是自己那一行的成员名（CodeRabbit：只点第一个测不出串行）
+    for (const row of rows) {
+      const btn = row.findAll((c) => String(c.props.className ?? "").includes("roster-reconnect"))[0];
+      expect(btn?.type).toBe("button");
+      await act(async () => {
+        btn?.props.onClick();
+      });
+      expect(reconnected[reconnected.length - 1]).toBe(row.props["data-name"]);
+    }
+    expect(reconnected.sort()).toEqual(["gone", "watcher"]);
+  });
+
+  test("without onReconnect the roster renders no reconnect buttons", () => {
+    const r = renderRoster({ gone: agent("gone", { state: "offline", live: false, wake: { kind: "none" } }) });
+    expect(nodesWithClass(r, "roster-reconnect")).toHaveLength(0);
+  });
+
+  test("clicking the name opens the agent detail and closes the dialog", async () => {
+    const opened: string[] = [];
+    const r = renderRoster({ worker: agent("worker") }, { onOpenAgentDetail: (name: string) => opened.push(name) });
+    const nameBtn = nodesWithClass(r, "roster-name")[0];
+    expect(nameBtn?.type).toBe("button");
+    await act(async () => {
+      nameBtn?.props.onClick();
+    });
+    expect(opened).toEqual(["worker"]);
+    expect(r.root.findAllByProps({ role: "dialog" })).toHaveLength(0);
+  });
+
+  test("known-unwakeable agent shows the blocked reason inline instead of a green status", () => {
+    const r = renderRoster({
+      stuck: agent("stuck", { wake_block: { reason: "hook_untrusted", detail: "hook not trusted", fix: "party hook trust", ts: NOW } }),
+    });
+    const row = nodesWithClass(r, "roster-row")[0];
+    expect(row?.props["data-reach"]).toBe("blocked");
+    const status = String(row?.findAll((c) => c.props.className === "roster-status-text")[0]?.children.join(""));
+    expect(status).toContain("party hook trust");
+  });
+});
 
 describe("presence 暂停接待（#180）", () => {
   test("pauseResumeAt：预设 → 恢复时刻；indefinite → null", () => {
@@ -820,12 +840,9 @@ describe("presence 暂停接待（#180）", () => {
     expect(nodesWithClass(r, "presence-paused")).toHaveLength(0);
   });
 
-  // 管理控件在 hover 详情弹层里（与 kick 同处）；测试先触发 popover 再断言。
-  async function openPopover(r: ReactTestRenderer): Promise<void> {
-    const section = nodesWithClass(r, "presence-group")[0];
-    await act(async () => {
-      section?.props.onFocus({ currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0 }) } });
-    });
+  // 模块②后管理控件直接在名单行里，不再需要触发浮层；保留空操作以少动下面的用例。
+  async function openPopover(_r: ReactTestRenderer): Promise<void> {
+    await act(async () => {});
   }
 
   test("moderator：未暂停的 agent 在详情弹层显示 pause 下拉，选预设即回调 onPauseAgent 带恢复时刻", async () => {
@@ -869,50 +886,6 @@ describe("presence 暂停接待（#180）", () => {
     await openPopover(r);
     expect(nodesWithClass(r, "presence-pause-select")).toHaveLength(0);
     expect(nodesWithClass(r, "presence-resume")).toHaveLength(0);
-  });
-});
-
-// #635 / #637 a11y 修复
-describe("presence a11y (#635 pill 键劫持 / #637 group button role)", () => {
-  async function openPopover(r: ReactTestRenderer): Promise<void> {
-    const section = nodesWithClass(r, "presence-group")[0];
-    await act(async () => {
-      section?.props.onFocus({ currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0 }) } });
-    });
-  }
-
-  // #635：pill 的 onKeyDown 只在 target 就是 pill 自身时才接管；焦点落在嵌套 kick 按钮上时冒泡不劫持。
-  test("pill onKeyDown 忽略来自嵌套控件的键盘事件，只响应 pill 自身", async () => {
-    const opened: string[] = [];
-    const r = renderWith(
-      { name: "agent-a", kind: "agent", state: "working", note: null, ts: Date.now() },
-      { canModerate: true, onRemoveParticipant: () => {}, onOpenAgentDetail: (name: string) => opened.push(name) },
-      true,
-    );
-    await openPopover(r);
-    const pill = nodesWithClass(r, "presence-pill")[0];
-    expect(pill).toBeDefined();
-    expect(pill?.props.role).toBe("button");
-    const self = {};
-    const child = {};
-    // 焦点在嵌套 kick 按钮（target !== currentTarget）→ 不触发详情弹窗
-    await act(async () => {
-      pill?.props.onKeyDown({ key: "Enter", target: child, currentTarget: self, preventDefault: () => {} });
-    });
-    expect(opened).toEqual([]);
-    // 焦点就在 pill 自身（target === currentTarget）→ 正常打开详情
-    await act(async () => {
-      pill?.props.onKeyDown({ key: "Enter", target: self, currentTarget: self, preventDefault: () => {} });
-    });
-    expect(opened).toEqual(["agent-a"]);
-  });
-
-  // #637：可键盘激活的 disclosure section 必须暴露 button role + aria-expanded。
-  test("presence-group section 暴露 role=button 与 aria-expanded", () => {
-    const r = renderPresenceRoster(2, true);
-    const section = nodesWithClass(r, "presence-group")[0];
-    expect(section?.props.role).toBe("button");
-    expect(section?.props["aria-expanded"]).toBe(false);
   });
 });
 

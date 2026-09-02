@@ -2,6 +2,7 @@
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
 import { autoWakeReachable, evaluateHostLease, PRESENCE_TIMEOUT_MS, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
+import { isOpaqueAccount } from "@agentparty/shared/identity";
 import { agentHue } from "../lib/agentColor";
 import { disambiguatorForIdentity, type IdentityDisplayMap } from "../lib/identityDisplay";
 import { IdentityDisambiguator } from "./IdentityDisambiguator";
@@ -34,6 +35,10 @@ interface Props {
   onOpenAgentDetail?: (name: string) => void;
   // #858：撞名身份的技术区分码来源；缺省即不显示区分码（老调用方行为不变）。
   identities?: IdentityDisplayMap;
+  // 模块②（#1047）：名单里叫不到的 agent 旁边直接给「接回」——打开一条命令的重连引导。
+  onReconnect?: (name: string) => void;
+  /** 初始就展开名单（静态预览 / 测试用；生产不传）。 */
+  initialRosterOpen?: boolean;
 }
 
 // 暂停时长预设（#180）：值 → 相对 now 的恢复时刻（epoch ms），"indefinite" 返回 null（手动恢复）。
@@ -145,12 +150,6 @@ function roleBadge(item: Item, now: number): string | null {
   const badge = item.role === null || item.role === "host" ? hostBadge(item, now) : item.role;
   if (badge === null) return null;
   return item.roleSource === "assigned" ? `*${badge}` : badge;
-}
-
-function residencyBadge(item: Item): string | null {
-  if (item.residency === null) return null;
-  if (item.residency === "human_driven") return "manual";
-  return item.residency;
 }
 
 // busy 标签（#103）：「⏳ busy」或「⏳ busy · N queued」。null = 不忙，不渲染。
@@ -419,12 +418,10 @@ export function PresenceBar({
   focus,
   onOpenAgentDetail,
   identities,
+  onReconnect,
+  initialRosterOpen = false,
 }: Props) {
   const t = useT();
-  const localizeWaitingOwner = (item: Item): string | null => {
-    const label = waitingOwnerLabel(item);
-    return label === null ? null : t(label.key, label.vars);
-  };
   // 相对时间 30s 刷一次
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -434,7 +431,7 @@ export function PresenceBar({
   const now = Date.now();
 
   // #484：姓名 roster 不再挤占频道顶部；点 live 计数后在独立弹框里查看和操作。
-  const [rosterOpen, setRosterOpen] = useState(false);
+  const [rosterOpen, setRosterOpen] = useState<boolean>(initialRosterOpen);
   const rosterToggleRef = useRef<HTMLButtonElement | null>(null);
   const rosterCloseRef = useRef<HTMLButtonElement | null>(null);
   const rosterDialogRef = useRef<HTMLDivElement | null>(null);
@@ -527,37 +524,7 @@ export function PresenceBar({
     if (rank !== 0) return rank;
     return a.label.localeCompare(b.label);
   });
-  const [hoveredGroup, setHoveredGroup] = useState<{ key: string; left: number; top: number; width: number } | null>(null);
-  const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
-  const popoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  function cancelPopoverClose() {
-    if (popoverCloseTimer.current === null) return;
-    clearTimeout(popoverCloseTimer.current);
-    popoverCloseTimer.current = null;
-  }
-
-  function schedulePopoverClose() {
-    cancelPopoverClose();
-    // #457：chip 与 fixed popover 之间有 8px 间隙。立即关闭会让鼠标永远跨不过去；
-    // 留一个短 grace period，进入 popover 后取消，既可操作又不会把浮层粘在页面上。
-    popoverCloseTimer.current = setTimeout(() => {
-      popoverCloseTimer.current = null;
-      setHoveredGroup(null);
-    }, 160);
-  }
-
-  useEffect(
-    () => () => {
-      if (popoverCloseTimer.current === null) return;
-      clearTimeout(popoverCloseTimer.current);
-      popoverCloseTimer.current = null;
-    },
-    [],
-  );
   const closeRoster = useCallback(() => {
-    setHoveredGroup(null);
-    setExpandedGroupKey(null);
     setRosterOpen(false);
     rosterToggleRef.current?.focus();
   }, []);
@@ -582,10 +549,6 @@ export function PresenceBar({
   );
   const stackItems = rankedItems.slice(0, PRESENCE_STACK_MAX);
   const hiddenStack = Math.max(0, rankedItems.length - stackItems.length);
-  // 折叠态下 chip 不在 DOM 里，popover 也不该跟着冒出来。
-  const activePopoverGroup =
-    !rosterOpen || hoveredGroup === null ? null : sortedGroups.find((group) => group.key === hoveredGroup.key) ?? null;
-
   useModalFocusTrap({
     active: rosterOpen,
     containerRef: rosterDialogRef,
@@ -600,428 +563,196 @@ export function PresenceBar({
     onOpenAgentDetail(name);
   }
 
-  function showGroupPopover(group: PresenceGroup, rect: DOMRect) {
-    cancelPopoverClose();
-    const margin = 10;
-    const width = Math.min(520, window.innerWidth - margin * 2);
-    const left = Math.min(Math.max(margin, rect.left), Math.max(margin, window.innerWidth - width - margin));
-    const top = Math.min(rect.bottom + 8, Math.max(margin, window.innerHeight - 120));
-    setHoveredGroup({ key: group.key, left, top, width });
-  }
-
-  function renderItem(it: Item, mode: "compact" | "full") {
-    const badge = roleBadge(it, now);
-    const residency = residencyBadge(it);
+  // 模块②（#1047）：名单弹窗从「按 owner 分组卡片 + 悬停浮层 + 展开/折叠」改成平铺成员表——
+  // 一人一行：头像（同头部堆叠）· 名字 · 人话状态 · 正在干什么 · 一个主动作（接回 / 暂停 / 恢复）。
+  // 技术细节（config/lineage/workflow…）不再塞 title，点名字进 AgentDetailModal 看。
+  function renderRosterRow(it: Item) {
+    const reach = avatarReach(it, now);
+    const liveness = livenessBadge(it);
     const wakeability = wakeabilityBadge(it, now);
+    const unreachable = unreachableBadge(it, now);
     const busy = busyLabel(it);
-    const waitingOwner = localizeWaitingOwner(it);
+    const waitingOwner = waitingOwnerLabel(it);
     const unhandledMention = unhandledMentionLabel(it);
     const task = taskLabel(it, now);
-    const taskText = task === null ? null : t(task.key, task.vars);
-    const liveness = livenessBadge(it);
     const activityChip = activityBadge(it, now);
-    const unreachable = unreachableBadge(it, now);
+    const role = roleBadge(it, now);
+    const gitChip = gitContextChip(it.context);
+    const src = it.avatarThumb ?? it.avatarUrl;
+    const seen = it.lastSeen ?? it.ts;
+    const pausedText = it.resumeAt !== null
+      ? t("PresenceBar.pausedUntil", { time: new Date(it.resumeAt).toLocaleString() })
+      : t("PresenceBar.pausedManual");
+    const statusText =
+      it.paused && it.kind === "agent"
+        ? pausedText
+        : reach === "blocked" && liveness !== null
+          ? `${t(liveness.key, liveness.vars)}${liveness.title !== null ? ` · ${liveness.title}` : ""}`
+          : reach === "wakeable"
+            ? `${t("PresenceBar.reach.wakeable")}${wakeability?.tone === "pending" ? ` ${t("PresenceBar.roster.unverified")}` : ""}`
+            : reach === "offline"
+              ? seen !== null
+                ? t("PresenceBar.roster.offlineSince", { age: fmtRel(seen, now) })
+                : t("PresenceBar.reach.offline")
+              : t(`PresenceBar.reach.${reach}`);
+    // 「接回」只给 agent、且只在它此刻叫不到的时候出现：离开 / 已知叫不醒 / 在线只看。
+    const canReconnect =
+      onReconnect !== undefined && it.kind === "agent" && it.name !== "system" && !it.paused &&
+      (reach === "offline" || reach === "blocked" || reach === "online");
+    const readableOwner =
+      it.kind === "agent" && it.owner !== null && it.owner !== it.name && !isOpaqueAccount(it.owner) ? it.owner : null;
     const taskTitle =
       it.currentTask === null
-        ? null
+        ? undefined
         : it.heartbeatAt !== null
           ? t("PresenceBar.taskTitleBeat", { seq: it.currentTask, age: fmtRel(it.heartbeatAt, now) })
           : t("PresenceBar.taskTitle", { seq: it.currentTask });
-    const activeHost = hasActiveHostLease(it, now);
-    const full = mode === "full";
-    const titleParts = [
-      it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
-      it.busy
-        ? it.queueDepth !== null
-          ? t("PresenceBar.busyTitleQueued", { count: it.queueDepth })
-          : t("PresenceBar.busyTitle")
-        : null,
-      it.waitingOwnerCount > 0 ? t("PresenceBar.waitingOwnerTitle", { count: it.waitingOwnerCount }) : null,
-      unhandledMention === null
-        ? null
-        : t(
-            unhandledMention.vars.seq === undefined
-              ? "PresenceBar.unhandledMentionsTitleCountOnly"
-              : "PresenceBar.unhandledMentionsTitle",
-            unhandledMention.vars,
-          ),
-      taskTitle,
-      it.handle !== null && it.handle !== "" ? `handle: ${it.handle}` : null,
-      it.role !== null ? `role: ${it.role}` : null,
-      it.responsibility !== null && it.responsibility !== "" ? `responsibility: ${it.responsibility}` : null,
-      it.roleSource !== null ? `role source: ${it.roleSource}` : null,
-      it.residency !== null ? `residency: ${it.residency}` : null,
-      it.wakeKind !== null ? `wake: ${it.wakeKind}` : null,
-      it.wakeVerifiedAt !== null ? `wake verified: ${fmtRel(it.wakeVerifiedAt)}` : null,
-      it.context?.config_kind !== undefined ? `config: ${it.context.config_kind}` : null,
-      it.context?.config_fingerprint !== undefined ? `fingerprint: ${it.context.config_fingerprint}` : null,
-      it.context?.workspace_id !== undefined ? `workspace id: ${it.context.workspace_id}` : null,
-      it.context?.workspace_label !== undefined ? `workspace: ${it.context.workspace_label}` : null,
-      it.context?.worktree_label !== undefined ? `worktree: ${it.context.worktree_label}` : null,
-      it.context?.repo !== undefined ? `repo: ${it.context.repo}` : null,
-      it.context?.branch !== undefined ? `branch: ${it.context.branch}` : null,
-      it.lineage !== null ? `parent: ${it.lineage.parent_agent}` : null,
-      it.lineage !== null ? `root: ${it.lineage.root_agent}` : null,
-      it.lineage !== null ? `team: ${it.lineage.team_id}` : null,
-      it.lineage !== null ? `depth: ${it.lineage.depth}` : null,
-      it.lineage?.expires_at ? `expires: ${fmtRel(it.lineage.expires_at)}` : null,
-      it.workflow !== null ? `workflow: ${it.workflow.workflow_id}` : null,
-      it.workflow !== null ? `workflow kind: ${it.workflow.kind}` : null,
-      it.workflow?.run_id ? `workflow run: ${it.workflow.run_id}` : null,
-      it.workflow?.step_id ? `workflow step: ${it.workflow.step_id}` : null,
-      it.workflow?.parent_summary_seq ? `parent summary: #${it.workflow.parent_summary_seq}` : null,
-      it.connectionCount > 1 ? `${it.connectionCount} live sessions using this identity` : null,
-      it.kind === "agent" && it.clientVersion !== null ? `cli v${it.clientVersion}` : null,
-      it.note !== null && it.note !== "" ? `note: ${it.note}` : null,
-      it.lastSeen !== null ? `last seen: ${fmtRel(it.lastSeen)}` : null,
-    ].filter((part): part is string => part !== null);
-    const gitChip = gitContextChip(it.context);
+    const doing = task !== null || busy !== null || waitingOwner !== null || unhandledMention !== null || activityChip !== null || gitChip !== null;
     return (
-      <span
+      <li
         key={it.name}
-        className={
-          `d-pill presence-pill${it.state === "blocked" ? " presence-pill--blocked" : ""}` +
-          `${activeHost ? " presence-pill--active-host" : ""}` +
-          `${it.connectionCount > 1 ? " presence-pill--duplicate" : ""}` +
-          `${full ? " presence-pill--full" : ""}` +
-          `${onOpenAgentDetail !== undefined ? " presence-pill--clickable" : ""}`
-        }
-        title={titleParts.join(" · ")}
-        role={onOpenAgentDetail !== undefined ? "button" : undefined}
-        tabIndex={onOpenAgentDetail !== undefined ? 0 : undefined}
-        onClick={onOpenAgentDetail !== undefined ? () => openAgentDetail(it.name) : undefined}
-        onKeyDown={
-          onOpenAgentDetail !== undefined
-            ? (e) => {
-                // #635：焦点落在嵌套的 pause/resume/kick 控件上时，键盘激活会冒泡到本 pill；
-                // 只在事件 target 就是 pill 自身时才接管（对齐 renderGroup 的守卫）。
-                if (e.target !== e.currentTarget) return;
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  openAgentDetail(it.name);
-                }
-              }
-            : undefined
-        }
-        style={{ "--ah": agentHue(it.name) } as CSSProperties}
+        className={`roster-row roster-row--${reach}`}
+        data-name={it.name}
+        data-reach={reach}
+        data-kind={it.kind}
+        style={{ "--ah": agentHue(it.display) } as CSSProperties}
       >
-        <span
-          className={`d-dot d-dot--${it.state}${it.paused ? " d-dot--paused" : ""}${unreachable !== null ? " d-dot--unreachable" : ""}`}
-        />
-        <span className="presence-name">{it.display}</span>
-        <IdentityDisambiguator code={it.disambiguator} />
-        <span className={`t-mono presence-kind presence-kind--${it.kind}`}>{it.kind}</span>
-        {it.paused && (
-          <span
-            className="t-mono presence-paused"
-            title={
-              it.resumeAt !== null
-                ? t("PresenceBar.pausedUntil", { time: new Date(it.resumeAt).toLocaleString() })
-                : t("PresenceBar.pausedManual")
-            }
-          >
-            {it.resumeAt !== null
-              ? t("PresenceBar.pausedChipUntil", {
-                  time: new Date(it.resumeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-                })
-              : t("PresenceBar.pausedChip")}
-          </span>
-        )}
-        {full && it.owner !== null && it.owner !== "" && it.owner !== it.name && (
-          <span className="t-mono presence-owner">· {it.owner}</span>
-        )}
-        {badge !== null && (
-          <span className={`t-mono presence-role${activeHost ? " presence-role--active" : ""}`}>
-            {badge}
-          </span>
-        )}
-        {busy !== null && <span className="t-mono presence-busy">{t(busy.key, busy.vars)}</span>}
-        {waitingOwner !== null && <span className="t-mono presence-busy presence-waiting-owner">{waitingOwner}</span>}
-        {unhandledMention !== null && (
-          <span className="t-mono presence-busy presence-unhandled-mentions">
-            {t(unhandledMention.key, unhandledMention.vars)}
-          </span>
-        )}
-        {taskText !== null && (
-          <span className="t-mono presence-busy presence-task" title={taskTitle ?? undefined}>
-            {taskText}
-          </span>
-        )}
-        {liveness !== null && (
-          <span
-            className={`t-mono presence-busy presence-liveness presence-liveness--${liveness.tone}`}
-            title={liveness.title ?? undefined}
-          >
-            {t(liveness.key, liveness.vars)}
-          </span>
-        )}
-        {activityChip !== null && (
-          <span
-            className={`t-mono presence-busy presence-activity${activityChip.highlight ? " presence-activity--alert" : ""}`}
-          >
-            {t(activityChip.key, activityChip.vars)}
-          </span>
-        )}
-        {full && it.lineage !== null && (
-          <span className="t-mono presence-lineage">child:{it.lineage.parent_agent}</span>
-        )}
-        {full && residency !== null && <span className="t-mono presence-residency">{residency}</span>}
-        {/* #666：真不可唤醒时不再显示「可唤醒·未验证」——那会让人误以为叫得醒；改由下方 unreachable 徽章如实标注。 */}
-        {full && wakeability !== null && unreachable === null && (
-          <span className={`t-mono presence-wake presence-wake--${wakeability.tone}`}>{t(wakeability.key)}</span>
-        )}
-        {unreachable !== null && (
-          <span className="t-mono presence-busy presence-unreachable" title={t(unreachable.titleKey)}>
-            {t(unreachable.key)}
-          </span>
-        )}
-        {/* #853：repo ⎇ branch · worktree 提级到常规行（不再只在深展开）；title 悬浮全文。 */}
-        {gitChip !== null && (
-          <span className="t-mono presence-context presence-git-context" title={gitChip}>{gitChip}</span>
-        )}
-        {full && gitChip === null && it.context?.worktree_label !== undefined && (
-          <span className="t-mono presence-context">{it.context.worktree_label}</span>
-        )}
-        {full && it.context?.config_kind !== undefined && (
-          <span className="t-mono presence-context">cfg:{it.context.config_kind}</span>
-        )}
-        {it.connectionCount > 1 && (
-          <span className="t-mono presence-duplicate">x{it.connectionCount} sessions</span>
-        )}
-        {full && it.kind === "agent" && it.clientVersion !== null && (
-          <span className="t-mono presence-client-version">cli v{it.clientVersion}</span>
-        )}
-        {full && it.workflow !== null && <span className="t-mono presence-context">wf:{it.workflow.workflow_id}</span>}
-        {full && it.note !== null && it.note !== "" && <span className="t-mono presence-note">{it.note}</span>}
-        {full && it.responsibility !== null && it.responsibility !== "" && (
-          <span className="t-mono presence-note">{it.responsibility}</span>
-        )}
-        {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}
-        {full && canModerate && it.kind === "agent" && it.name !== "system" && it.paused && onResumeAgent !== undefined && (
-          <button
-            className="presence-resume"
-            type="button"
-            disabled={pausingName === it.name}
-            title={t("PresenceBar.resumeTitle", { name: it.name })}
-            onClick={(e) => {
-              e.stopPropagation();
-              onResumeAgent(it.name);
-            }}
-          >
-            {t("PresenceBar.resume")}
-          </button>
-        )}
-        {full && canModerate && it.kind === "agent" && it.name !== "system" && !it.paused && onPauseAgent !== undefined && (
-          <select
-            className="presence-pause-select"
-            aria-label={t("PresenceBar.pauseTitle", { name: it.name })}
-            title={t("PresenceBar.pauseTitle", { name: it.name })}
-            disabled={pausingName === it.name}
-            value=""
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => {
-              const preset = e.target.value;
-              e.currentTarget.value = "";
-              if (preset === "") return;
-              onPauseAgent(it.name, pauseResumeAt(preset, Date.now()));
-            }}
-          >
-            <option value="">{t("PresenceBar.pause")}</option>
-            <option value="1h">{t("PresenceBar.pause1h")}</option>
-            <option value="4h">{t("PresenceBar.pause4h")}</option>
-            <option value="8h">{t("PresenceBar.pause8h")}</option>
-            <option value="tomorrow">{t("PresenceBar.pauseTomorrow")}</option>
-            <option value="indefinite">{t("PresenceBar.pauseIndefinite")}</option>
-          </select>
-        )}
-        {full && canModerate && onRemoveParticipant !== undefined && it.name !== "system" && (
-          <button
-            className="presence-kick"
-            type="button"
-            disabled={removingName === it.name}
-            title={t("PresenceBar.kickTitle", { name: it.name })}
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemoveParticipant(it.name);
-            }}
-          >
-            {t("PresenceBar.kick")}
-          </button>
-        )}
-      </span>
-    );
-  }
-
-  function renderGroup(group: PresenceGroup, mode: "compact" | "full") {
-    const full = mode === "full";
-    const representative = group.human ?? group.items[0]!;
-    const live = group.items.filter((item) => item.state !== "offline").length;
-    const blocked = group.items.filter((item) => item.state === "blocked").length;
-    const duplicateSessions = group.items.reduce((sum, item) => sum + Math.max(0, item.connectionCount - 1), 0);
-    const previewAgents = group.agents.slice(0, 3);
-    const hiddenAgents = group.agents.length - previewAgents.length;
-    const title = [
-      group.label,
-      // group.label 优先显示 handle 时，account/email 锚点在这里补回来，保证底层身份始终可查。
-      representative.owner !== null && representative.owner !== group.label ? `account: ${representative.owner}` : null,
-      `${live}/${group.items.length} live`,
-      duplicateSessions > 0 ? `${duplicateSessions} extra live session${duplicateSessions === 1 ? "" : "s"}` : null,
-      group.human !== null ? `human: ${group.human.name}` : null,
-      group.agents.length > 0 ? `agents: ${group.agents.map((item) => item.name).join(", ")}` : null,
-      ...group.agents
-        .filter((item) => item.clientVersion !== null)
-        .map((item) => `${item.name}: cli v${item.clientVersion}`),
-    ].filter((part): part is string => part !== null).join(" · ");
-    return (
-      <section
-        key={group.key}
-        // #637 a11y：本 section 是可键盘激活的 disclosure toggle，必须显式 role="button"，
-        // 否则 aria-expanded 不被 AT 暴露、只当成普通 region 播报。
-        role="button"
-        tabIndex={0}
-        aria-expanded={full}
-        className={
-          `presence-group${blocked > 0 ? " presence-group--blocked" : ""}` +
-          `${duplicateSessions > 0 ? " presence-group--duplicate" : ""}` +
-          `${full ? " presence-group--full" : ""}`
-        }
-        title={title}
-        style={{ "--ah": agentHue(group.label) } as CSSProperties}
-        onMouseEnter={(e) => {
-          if (!full) showGroupPopover(group, e.currentTarget.getBoundingClientRect());
-        }}
-        onMouseLeave={() => {
-          if (!full) schedulePopoverClose();
-        }}
-        onFocus={(e) => {
-          if (!full) showGroupPopover(group, e.currentTarget.getBoundingClientRect());
-        }}
-        onBlur={() => {
-          if (!full) setHoveredGroup(null);
-        }}
-        onClick={(e) => {
-          if ((e.target as Element).closest(".presence-group-detail, button, select")) return;
-          setHoveredGroup(null);
-          setExpandedGroupKey(full ? null : group.key);
-        }}
-        onKeyDown={(e) => {
-          if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
-          e.preventDefault();
-          setHoveredGroup(null);
-          setExpandedGroupKey(full ? null : group.key);
-        }}
-      >
-        <div className="presence-group-head">
-          {representative.avatarThumb || representative.avatarUrl ? (
-            <img className="presence-group-avatar" src={representative.avatarThumb ?? representative.avatarUrl ?? ""} alt="" />
-          ) : (
-            <span className={`d-dot d-dot--${representative.state}`} />
-          )}
-          <span className="presence-group-label">{group.label}</span>
-          <span className="t-mono presence-group-count">
-            {live}/{group.items.length}
-          </span>
-          {duplicateSessions > 0 && <span className="t-mono presence-group-duplicate">dup</span>}
-        </div>
-        {!full && (
-          <div className="presence-group-agents" aria-label={`agents owned by ${group.label}`}>
-            {previewAgents.map((agent) => {
-              const agentBusy = busyLabel(agent);
-              const agentTask = taskLabel(agent, now);
-              const agentUnreachable = unreachableBadge(agent, now);
-              const agentUnhandledMention = unhandledMentionLabel(agent);
-              // #853：repo ⎇ branch · worktree 提级到常规行的 agent chip（不再只在深展开）。
-              const agentGitChip = gitContextChip(agent.context);
-              return (
-              <span
-                key={agent.name}
-                className={`presence-agent-chip${onOpenAgentDetail !== undefined ? " presence-agent-chip--clickable" : ""}`}
-                role={onOpenAgentDetail !== undefined ? "button" : undefined}
-                tabIndex={onOpenAgentDetail !== undefined ? 0 : undefined}
-                onClick={
-                  onOpenAgentDetail !== undefined
-                    ? (e) => {
-                        e.stopPropagation();
-                        openAgentDetail(agent.name);
-                      }
-                    : undefined
-                }
-                onKeyDown={
-                  onOpenAgentDetail !== undefined
-                    ? (e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          openAgentDetail(agent.name);
-                        }
-                      }
-                    : undefined
-                }
-              >
-                <span
-                  className={`d-dot d-dot--${agent.state}${agent.paused ? " d-dot--paused" : ""}${agentUnreachable !== null ? " d-dot--unreachable" : ""}`}
-                />
-                <span>{agent.display}</span>
-                <IdentityDisambiguator code={agent.disambiguator} />
-                <span className={`t-mono presence-agent-kind presence-kind--${agent.kind}`}>{agent.kind}</span>
-                {agent.paused && (
-                  <span
-                    className="t-mono presence-paused"
-                    title={
-                      agent.resumeAt !== null
-                        ? t("PresenceBar.pausedUntil", { time: new Date(agent.resumeAt).toLocaleString() })
-                        : t("PresenceBar.pausedManual")
-                    }
-                  >
-                    {agent.resumeAt !== null
-                      ? t("PresenceBar.pausedChipUntil", {
-                          time: new Date(agent.resumeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-                        })
-                      : t("PresenceBar.pausedChip")}
-                  </span>
-                )}
-                {agent.clientVersion !== null && (
-                  <span className="t-mono presence-client-version">cli v{agent.clientVersion}</span>
-                )}
-                {agentGitChip !== null && (
-                  <span className="t-mono presence-context presence-git-context" title={agentGitChip}>
-                    {agentGitChip}
-                  </span>
-                )}
-                {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
-                {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
-                {agentBusy !== null && (
-                  <span className="t-mono presence-busy presence-busy--chip">{t(agentBusy.key, agentBusy.vars)}</span>
-                )}
-                {agent.waitingOwnerCount > 0 && (
-                  <span className="t-mono presence-busy presence-busy--chip presence-waiting-owner">
-                    {t("PresenceBar.waitingOwnerChip", { count: agent.waitingOwnerCount })}
-                  </span>
-                )}
-                {agentUnhandledMention !== null && (
-                  <span className="t-mono presence-busy presence-busy--chip presence-unhandled-mentions">
-                    {t(agentUnhandledMention.key, agentUnhandledMention.vars)}
-                  </span>
-                )}
-                {agentTask !== null && (
-                  <span className="t-mono presence-busy presence-busy--chip presence-task">{t(agentTask.key, agentTask.vars)}</span>
-                )}
-                {agentUnreachable !== null && (
-                  <span
-                    className="t-mono presence-busy presence-busy--chip presence-unreachable"
-                    title={t(agentUnreachable.titleKey)}
-                  >
-                    {t(agentUnreachable.key)}
-                  </span>
-                )}
+        <span className={`presence-ava presence-ava--${it.kind}`} data-reach={reach} aria-hidden="true">
+          {src ? <img src={src} alt="" /> : <span className="presence-ava-initial">{it.display.trim().charAt(0).toUpperCase()}</span>}
+          <i className="presence-ava-dot" />
+        </span>
+        <div className="roster-main">
+          <div className="roster-head">
+            {onOpenAgentDetail !== undefined ? (
+              <button type="button" className="roster-name" title={t("PresenceBar.roster.detail", { name: it.name })} onClick={() => openAgentDetail(it.name)}>
+                {it.display}
+              </button>
+            ) : (
+              <span className="roster-name">{it.display}</span>
+            )}
+            <IdentityDisambiguator code={it.disambiguator} />
+            <span className={`t-mono presence-kind presence-kind--${it.kind}`}>{it.kind}</span>
+            {readableOwner !== null && <span className="t-mono presence-owner">· {readableOwner}</span>}
+            {role !== null && <span className="t-mono presence-agent-role">{role}</span>}
+            {it.connectionCount > 1 && (
+              <span className="t-mono presence-duplicate" title={t("PresenceBar.alert.duplicateTitle")}>
+                {t("PresenceBar.roster.dup", { count: it.connectionCount })}
               </span>
-              );
-            })}
-            {hiddenAgents > 0 && <span className="t-mono presence-agent-more">+{hiddenAgents}</span>}
+            )}
+            {it.kind === "agent" && it.clientVersion !== null && (
+              <span className="t-mono presence-client-version">cli v{it.clientVersion}</span>
+            )}
           </div>
-        )}
-        {full && <div className="presence-group-detail">{group.items.map((item) => renderItem(item, "full"))}</div>}
-      </section>
+          <div className={`roster-status roster-status--${reach}`}>
+            <span
+              className={`d-dot d-dot--${it.state}${it.paused ? " d-dot--paused" : ""}${unreachable !== null ? " d-dot--unreachable" : ""}`}
+            />
+            {/* 暂停时只留 ⏸ 芯片（下方），不再重复一整句——两处说同一件事是噪音 */}
+            {!(it.paused && it.kind === "agent") && <span className="roster-status-text">{statusText}</span>}
+            {unreachable !== null && (
+              <span className="t-mono presence-busy presence-unreachable" title={t(unreachable.titleKey)}>
+                {t(unreachable.key)}
+              </span>
+            )}
+            {it.paused && (
+              <span className="t-mono presence-paused" title={pausedText}>
+                {it.resumeAt !== null
+                  ? t("PresenceBar.pausedChipUntil", {
+                      time: new Date(it.resumeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                    })
+                  : t("PresenceBar.pausedChip")}
+              </span>
+            )}
+          </div>
+          {doing && (
+            <div className="roster-doing">
+              {task !== null && <span className="t-mono presence-busy presence-busy--chip presence-task" title={taskTitle}>{t(task.key, task.vars)}</span>}
+              {busy !== null && (
+                <span
+                  className="t-mono presence-busy presence-busy--chip"
+                  title={it.queueDepth !== null ? t("PresenceBar.busyTitleQueued", { count: it.queueDepth }) : t("PresenceBar.busyTitle")}
+                >
+                  {t(busy.key, busy.vars)}
+                </span>
+              )}
+              {waitingOwner !== null && (
+                <span className="t-mono presence-busy presence-busy--chip presence-waiting-owner" title={t("PresenceBar.waitingOwnerTitle", waitingOwner.vars)}>
+                  {t(waitingOwner.key, waitingOwner.vars)}
+                </span>
+              )}
+              {unhandledMention !== null && (
+                <span className="t-mono presence-busy presence-busy--chip presence-unhandled-mentions">
+                  {t(unhandledMention.key, unhandledMention.vars)}
+                </span>
+              )}
+              {activityChip !== null && (
+                <span className={`t-mono presence-busy presence-activity${activityChip.highlight ? " presence-activity--alert" : ""}`}>
+                  {t(activityChip.key, activityChip.vars)}
+                </span>
+              )}
+              {gitChip !== null && (
+                <span className="t-mono presence-context presence-git-context" title={gitChip}>{gitChip}</span>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="roster-actions">
+          {canReconnect && (
+            <button
+              type="button"
+              className="d-btn d-btn--primary roster-reconnect"
+              title={t("PresenceBar.roster.reconnectTitle", { name: it.name })}
+              onClick={() => onReconnect(it.name)}
+            >
+              {t("PresenceBar.roster.reconnect")}
+            </button>
+          )}
+          {canModerate && it.kind === "agent" && it.name !== "system" && it.paused && onResumeAgent !== undefined && (
+            <button
+              className="presence-resume"
+              type="button"
+              disabled={pausingName === it.name}
+              title={t("PresenceBar.resumeTitle", { name: it.name })}
+              onClick={() => onResumeAgent(it.name)}
+            >
+              {t("PresenceBar.resume")}
+            </button>
+          )}
+          {canModerate && it.kind === "agent" && it.name !== "system" && !it.paused && onPauseAgent !== undefined && (
+            <select
+              className="presence-pause-select"
+              aria-label={t("PresenceBar.pauseTitle", { name: it.name })}
+              title={t("PresenceBar.pauseTitle", { name: it.name })}
+              disabled={pausingName === it.name}
+              value=""
+              onChange={(e) => {
+                const preset = e.target.value;
+                e.currentTarget.value = "";
+                if (preset === "") return;
+                onPauseAgent(it.name, pauseResumeAt(preset, Date.now()));
+              }}
+            >
+              <option value="">{t("PresenceBar.pause")}</option>
+              <option value="1h">{t("PresenceBar.pause1h")}</option>
+              <option value="4h">{t("PresenceBar.pause4h")}</option>
+              <option value="8h">{t("PresenceBar.pause8h")}</option>
+              <option value="tomorrow">{t("PresenceBar.pauseTomorrow")}</option>
+              <option value="indefinite">{t("PresenceBar.pauseIndefinite")}</option>
+            </select>
+          )}
+          {canModerate && onRemoveParticipant !== undefined && it.name !== "system" && (
+            <button
+              className="presence-kick"
+              type="button"
+              disabled={removingName === it.name}
+              title={t("PresenceBar.kickTitle", { name: it.name })}
+              onClick={() => onRemoveParticipant(it.name)}
+            >
+              {t("PresenceBar.kick")}
+            </button>
+          )}
+        </div>
+      </li>
     );
   }
 
@@ -1132,47 +863,22 @@ export function PresenceBar({
             <header className="channel-panel-head">
               <div className="channel-panel-titlebox">
                 <h2 id="presence-roster-title">{t("PresenceBar.dialogTitle")}</h2>
-                <p className="t-mono">{liveGroups}/{totalGroups} live</p>
+                <p className="t-mono">{t("PresenceBar.liveCount", { live: liveGroups, total: totalGroups })}</p>
               </div>
               <button ref={rosterCloseRef} className="d-btn channel-panel-close" type="button" aria-label={t("PresenceBar.close")} onClick={closeRoster}>
                 {t("PresenceBar.close")}
               </button>
             </header>
             <div className="channel-panel-body presence-roster-body">
-              <div className="presence-strip" aria-label={t("PresenceBar.participantGroupsByOwner")}>
-                {sortedGroups.map((group) => renderGroup(group, expandedGroupKey === group.key ? "full" : "compact"))}
-              </div>
+              {rankedItems.length === 0 ? (
+                <p className="t-mono presence-empty">{t("PresenceBar.empty")}</p>
+              ) : (
+                <ul className="roster-list" aria-label={t("PresenceBar.roster.listLabel")}>
+                  {rankedItems.map((item) => renderRosterRow(item))}
+                </ul>
+              )}
             </div>
           </section>
-        </div>
-      )}
-      {activePopoverGroup !== null && hoveredGroup !== null && (
-        <div
-          className="presence-popover"
-          role="tooltip"
-          onMouseEnter={cancelPopoverClose}
-          onMouseLeave={schedulePopoverClose}
-          style={{
-            left: hoveredGroup.left,
-            top: hoveredGroup.top,
-            width: hoveredGroup.width,
-            "--ah": agentHue(activePopoverGroup.label),
-          } as CSSProperties}
-        >
-          <header className="presence-popover-head">
-            <span className="presence-popover-title">{activePopoverGroup.label}</span>
-            <span className="t-mono presence-popover-count">
-              {activePopoverGroup.items.filter((item) => item.state !== "offline").length}/{activePopoverGroup.items.length} live
-            </span>
-          </header>
-          <div className="presence-popover-list">
-            {activePopoverGroup.items.slice(0, 10).map((item) => renderItem(item, "full"))}
-            {activePopoverGroup.items.length > 10 && (
-              <span className="t-mono presence-popover-more">
-                +{activePopoverGroup.items.length - 10} · {t("PresenceBar.expand")}
-              </span>
-            )}
-          </div>
         </div>
       )}
     </div>
