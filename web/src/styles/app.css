@@ -693,7 +693,6 @@
   overflow: hidden;
   white-space: nowrap;
 }
-.app-me-prefix { flex: none; }
 .app-me-avatar {
   flex: none;
   width: 22px;
@@ -1932,7 +1931,8 @@ button.org-person-name {
   transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
 .presence-toggle::before {
-  content: "❯";
+  /* #1044：头像堆叠已是视觉锚点，终端味的 ❯ 前缀去掉 */
+  content: none;
   color: var(--t-faint);
   font-size: 11px;
   margin-right: 1px;
@@ -7437,14 +7437,7 @@ button.org-person-name {
 /* 频道项：❯ 前缀 */
 .chan-head::before { content: "❯"; color: var(--t-faint); font-size: 12px; flex: none; }
 
-/* presence 条：$ who --live 前缀 */
-.presence-meta::before {
-  content: "$ who --live";
-  color: var(--t-muted);
-  font-family: var(--t-mono);
-  font-size: 12px;
-  white-space: nowrap;
-}
+/* #1044：presence 行不再伪装成终端（原 `$ who --live` 前缀已去掉）。 */
 
 /* 切换组（语言 / 频道分类）：墨线框 + 反白激活 */
 .lang-switch,
@@ -8665,3 +8658,94 @@ button.org-person-name {
 .agent-join-light--done { background: var(--t-panel2); }
 .agent-join-light--pending { opacity: 0.6; border-style: dashed; }
 .agent-join-light--active { box-shadow: 3px 3px 0 var(--d-shadow); }
+
+/* #1044 频道头部重做：头像堆叠（人圆 / agent 方，状态环 = 可达性）+ 人话模式芯片。 */
+.presence-stack { display: inline-flex; align-items: center; margin-right: 2px; }
+.presence-ava {
+  --ah: 200;
+  --reach: var(--t-faint);
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: -8px;
+  border: 2px solid var(--reach);
+  background: hsl(var(--ah) 55% 86%);
+  color: var(--d-ink);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  overflow: visible;
+  box-shadow: 0 0 0 2px var(--t-panel2);
+}
+.presence-ava-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--reach);
+  border: 1.5px solid var(--t-panel2);
+}
+.presence-ava:first-child { margin-left: 0; }
+.presence-ava--human { border-radius: 50%; }
+.presence-ava--agent { border-radius: 5px; }
+.presence-ava img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.presence-ava-initial { pointer-events: none; }
+.presence-ava[data-reach="wakeable"],
+.presence-ava[data-reach="present"] { --reach: var(--d-green); }
+.presence-ava[data-reach="online"] { --reach: #2b6cb0; }
+.presence-ava[data-reach="offline"] { --reach: var(--t-faint); opacity: 0.6; filter: grayscale(1); }
+.presence-ava--more .presence-ava-dot { display: none; }
+.presence-ava-dup {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  padding: 0 2px;
+  font-size: 8px;
+  font-style: normal;
+  line-height: 1.3;
+  color: #fff;
+  background: var(--d-red);
+  border: 1px solid var(--d-ink);
+  border-radius: 3px;
+}
+.presence-ava--more { background: var(--t-panel); border-color: var(--t-faint); font-size: 9px; border-radius: 5px; }
+.presence-mode {
+  flex: none;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 700;
+  border: 1.4px solid var(--d-ink);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.presence-alert--duplicate {
+  color: var(--d-ink);
+  background: var(--d-red-soft);
+  border: 1.4px solid var(--d-red);
+  border-radius: 999px;
+  padding: 2px 7px;
+  cursor: help;
+}
+.presence-mode--public { background: var(--d-green-soft); }
+.presence-mode--party { background: var(--d-yellow); }
+.presence-alert--blocked { color: var(--d-red); }
+/* 顶栏身份簇：去掉 `token` 前缀词后不再需要 */
+
+/* #1044 右侧动作分层：只有「让 agent 加入」是实心主按钮，其余（继续接入 / 我的 agent / 管理）降为轻按钮，
+   四个粗框并排打架的问题就没了。 */
+.chan-admin-actions .agent-join-resume,
+.chan-admin-actions .agenttokens-btn,
+.chan-admin-group--channel .chan-tool-btn {
+  background: transparent;
+  border-color: var(--t-faint);
+  box-shadow: none;
+}
+.chan-admin-actions .agent-join-resume:hover,
+.chan-admin-actions .agenttokens-btn:hover,
+.chan-admin-group--channel .chan-tool-btn:hover { border-color: var(--d-ink); background: var(--t-panel2); }

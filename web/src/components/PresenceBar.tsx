@@ -301,6 +301,27 @@ export function presenceTier(item: Item, now: number, staleMs = PRESENCE_STALE_M
   return wstate !== "offline" && reachable ? "wakeable" : "recent";
 }
 
+// #1044 头像堆叠的状态环：绿=能被 @ 唤醒，蓝=在线但只是在看（@ 叫不醒），灰=离开。
+// 人只有在/不在；agent 的关键不是「在不在」而是「叫不叫得醒」——与 presenceTier / wakeabilityBadge 同口径。
+export type AvatarReach = "present" | "wakeable" | "online" | "offline";
+export function avatarReach(item: Item, now: number): AvatarReach {
+  // 人：在就是绿（看得到 @），不在就灰；「叫不叫得醒」只对 agent 有意义。
+  if (item.kind === "human") return item.state !== "offline" ? "present" : "offline";
+  if (item.paused) return "online";
+  if (presenceTier(item, now) === "wakeable") return "wakeable";
+  if (item.state !== "offline") {
+    const armed =
+      item.wakeKind !== null && item.wakeKind !== "none" && item.residency !== "bare" && item.residency !== "human_driven";
+    return armed ? "wakeable" : "online";
+  }
+  return "offline";
+}
+
+/** 头像堆叠最多露几张；其余折成 +N。 */
+export const PRESENCE_STACK_MAX = 6;
+/** 堆叠排序：能被 @ 叫到的（人在线 / agent 可唤醒）> 在线只看 > 离开。 */
+export const AVATAR_REACH_ORDER: Record<AvatarReach, number> = { present: 0, wakeable: 0, online: 1, offline: 2 };
+
 // #666：不可唤醒/未监听徽章。仅当 agent 既非在线、也非可唤醒待命（tier=recent）时显式标注：
 // 它的 watch 已退出或从未验证可唤醒，@ 只会进历史、可能不被处理。paused 是人主动设的有意状态、
 // 已有独立 ⏸ chip，不叠加；人类离线本就靠人接续，不算「未监听」，只对 agent 标。
@@ -548,6 +569,16 @@ export function PresenceBar({
   const busyCount = items.filter((it) => it.busy).length;
   const duplicateCount = items.filter((it) => it.connectionCount > 1).length;
   const unhandledMentionCount = items.reduce((sum, item) => sum + item.unhandledMentionCount, 0);
+  // #1044 头像堆叠：先按可达性（绿 > 蓝 > 灰），同档内再按 presenceRank，只露前几张。
+  // presenceRank 会把任意在线项排在「离线但可唤醒」之前——那会让蓝头像跑到绿头像前面（CodeRabbit）。
+  const rankedItems = [...items].sort(
+    (a, b) =>
+      AVATAR_REACH_ORDER[avatarReach(a, now)] - AVATAR_REACH_ORDER[avatarReach(b, now)] ||
+      presenceRank(a, now) - presenceRank(b, now) ||
+      a.display.localeCompare(b.display),
+  );
+  const stackItems = rankedItems.slice(0, PRESENCE_STACK_MAX);
+  const hiddenStack = Math.max(0, rankedItems.length - stackItems.length);
   // 折叠态下 chip 不在 DOM 里，popover 也不该跟着冒出来。
   const activePopoverGroup =
     !rosterOpen || hoveredGroup === null ? null : sortedGroups.find((group) => group.key === hoveredGroup.key) ?? null;
@@ -995,25 +1026,8 @@ export function PresenceBar({
     <div className="presence-bar">
       <div className="presence-head">
         <div className="presence-meta" aria-label="channel presence summary">
-          {isPublic && <span className="d-hl public-badge">{publicWatch ? "WATCH" : "PUBLIC"}</span>}
-          {party && <span className="d-hl party-badge">PARTY</span>}
-          {blockedCount > 0 && <span className="t-mono presence-alert">{blockedCount} blocked</span>}
-          {busyCount > 0 && (
-            <span className="t-mono presence-alert presence-alert--busy" title="serially handling a wake — reachable, reply may be slow">
-              ⏳ {busyCount} busy
-            </span>
-          )}
-          {unhandledMentionCount > 0 && (
-            <span className="t-mono presence-alert presence-alert--unhandled">
-              {t("PresenceBar.unhandledMentionsSummary", { count: unhandledMentionCount })}
-            </span>
-          )}
-          {duplicateCount > 0 && <span className="t-mono presence-alert presence-alert--duplicate">{duplicateCount} duplicate</span>}
-          {items.length === 0 && (
-            <span className="t-mono presence-empty" role="status" aria-live="polite">
-              nobody here yet
-            </span>
-          )}
+          {/* #1044：头像堆叠 + 在线数是这一行的主角（「谁在这里」一眼可见），点开完整名单。
+              人圆 / agent 方；状态环见 avatarReach。行话徽章（WATCH/PARTY/N duplicate）全部换成人话芯片。 */}
           <button
             ref={rosterToggleRef}
             type="button"
@@ -1023,18 +1037,82 @@ export function PresenceBar({
             aria-label={t(rosterOpen ? "PresenceBar.collapse" : "PresenceBar.expand")}
             onClick={toggleRoster}
           >
-            <span className="t-mono presence-summary">
-              {liveGroups}/{totalGroups} live
-            </span>
+            {stackItems.length > 0 && (
+              <span className="presence-stack">
+                {stackItems.map((item) => {
+                  const reach = avatarReach(item, now);
+                  const reachText = t(item.paused && item.kind === "agent" ? "PresenceBar.reach.paused" : `PresenceBar.reach.${reach}`);
+                  const dup = item.connectionCount > 1 ? ` · ×${item.connectionCount}` : "";
+                  const src = item.avatarThumb ?? item.avatarUrl;
+                  return (
+                    <span
+                      key={item.name}
+                      className={`presence-ava presence-ava--${item.kind}`}
+                      data-reach={reach}
+                      data-name={item.name}
+                      title={`${item.display} · ${reachText}${dup}`}
+                      style={{ "--ah": agentHue(item.display) } as CSSProperties}
+                    >
+                      {src ? <img src={src} alt="" /> : <span className="presence-ava-initial">{item.display.trim().charAt(0).toUpperCase()}</span>}
+                      {/* 状态点（飞书式右下角小圆点）：比只靠描边颜色更易读 */}
+                      <i className="presence-ava-dot" aria-hidden="true" />
+                      {item.connectionCount > 1 && <i className="presence-ava-dup t-mono">×{item.connectionCount}</i>}
+                    </span>
+                  );
+                })}
+                {hiddenStack > 0 && (
+                  <span className="presence-ava presence-ava--more t-mono" title={t("PresenceBar.stackMore", { count: hiddenStack })}>
+                    +{hiddenStack}
+                  </span>
+                )}
+              </span>
+            )}
+            <span className="t-mono presence-summary">{t("PresenceBar.liveCount", { live: liveGroups, total: totalGroups })}</span>
             <span className="presence-toggle-arrow" aria-hidden="true">{rosterOpen ? "▾" : "▸"}</span>
           </button>
+          {isPublic && (
+            <span className="t-mono presence-mode presence-mode--public">
+              {t(publicWatch ? "PresenceBar.mode.watch" : "PresenceBar.mode.public")}
+            </span>
+          )}
+          {party && <span className="t-mono presence-mode presence-mode--party">{t("PresenceBar.mode.party")}</span>}
+          {blockedCount > 0 && (
+            <span className="t-mono presence-alert presence-alert--blocked">{t("PresenceBar.alert.blocked", { count: blockedCount })}</span>
+          )}
+          {busyCount > 0 && (
+            <span className="t-mono presence-alert presence-alert--busy" title={t("PresenceBar.alert.busyTitle")}>
+              {t("PresenceBar.alert.busy", { count: busyCount })}
+            </span>
+          )}
+          {unhandledMentionCount > 0 && (
+            <span className="t-mono presence-alert presence-alert--unhandled">
+              {t("PresenceBar.unhandledMentionsSummary", { count: unhandledMentionCount })}
+            </span>
+          )}
+          {duplicateCount > 0 && (
+            <span className="t-mono presence-alert presence-alert--duplicate" title={t("PresenceBar.alert.duplicateTitle")}>
+              {t("PresenceBar.alert.duplicate", { count: duplicateCount })}
+            </span>
+          )}
+          {items.length === 0 && (
+            <span className="t-mono presence-empty" role="status" aria-live="polite">
+              {t("PresenceBar.empty")}
+            </span>
+          )}
         </div>
         {focus !== undefined && focus !== null && focus}
         {headerControls !== undefined && headerControls !== null && (
           <div className="presence-channel-controls">{headerControls}</div>
         )}
-        <span className="conn t-mono" data-s={status} role="status" aria-live="polite">
-          {status === "open" ? "● live" : `◌ ${status}…`}
+        <span
+          className="conn t-mono"
+          data-s={status}
+          role="status"
+          aria-live="polite"
+          aria-label={status === "open" ? t("PresenceBar.conn.open") : status}
+          title={status === "open" ? t("PresenceBar.conn.open") : status}
+        >
+          {status === "open" ? "●" : `◌ ${status}…`}
         </span>
       </div>
       {rosterOpen && (

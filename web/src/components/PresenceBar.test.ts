@@ -591,7 +591,8 @@ describe("busy indicator + queue depth (#103)", () => {
 });
 
 describe("presence live roster dialog (#484)", () => {
-  test("keeps the live roster button last after every status badge (#179)", () => {
+  // #1044：头像堆叠 + 在线数是这一行的主角，放最前；模式/告警芯片在后（#179 的「计数是可点按钮」不变）。
+  test("roster button (avatar stack + count) comes first, then mode and status chips", () => {
     const r = renderWith(busyEntry({ connection_count: 2 }), { party: true });
     const meta = r.root.findByProps({ "aria-label": "channel presence summary" });
     const directClasses = meta.children.map((child) =>
@@ -599,11 +600,42 @@ describe("presence live roster dialog (#484)", () => {
     );
 
     expect(directClasses).toEqual([
-      "d-hl party-badge",
+      "presence-toggle",
+      "t-mono presence-mode presence-mode--party",
       "t-mono presence-alert presence-alert--busy",
       "t-mono presence-alert presence-alert--duplicate",
-      "presence-toggle",
     ]);
+    // 行话换人话：不再出现 "duplicate" 这种词，而是说清楚「重复登录」
+    const dup = nodesWithClass(r, "presence-alert--duplicate")[0];
+    expect(String(dup?.children.join(""))).toMatch(/signed in twice|重复登录/);
+    expect(String(dup?.props.title)).toMatch(/token|连接/);
+  });
+
+  // CodeRabbit on #1044：presenceRank 会把「在线但叫不醒」排在「离线但可唤醒」之前，堆叠顺序必须以可达性优先。
+  test("avatar stack orders wakeable before online-only before offline", () => {
+    const now = Date.now();
+    const presence: Record<string, PresenceEntry> = {
+      watcher: { name: "watcher", kind: "agent", state: "online", note: null, ts: now, last_seen: now, live: true, wake: { kind: "none" }, residency: "bare" } as PresenceEntry,
+      sleeper: { name: "sleeper", kind: "agent", state: "offline", note: null, ts: now - 60_000, last_seen: now - 60_000, wake: { kind: "webhook", verified_at: now - 1000 } } as PresenceEntry,
+      gone: { name: "gone", kind: "agent", state: "offline", note: null, ts: now - 86_400_000, last_seen: now - 86_400_000 } as PresenceEntry,
+    };
+    // 走文件里统一的 renderWith（act + 登记到 afterEach 卸载），extra 里的 presence/participants 会覆盖默认值。
+    const r = renderWith(presence.watcher!, { presence, participants: [{ name: "watcher", kind: "agent" } as Sender] });
+    const order = nodesWithClass(r, "presence-ava").filter((n) => n.props["data-name"] !== undefined).map((n) => `${n.props["data-name"]}:${n.props["data-reach"]}`);
+    expect(order).toEqual(["sleeper:wakeable", "watcher:online", "gone:offline"]);
+  });
+
+  test("avatar stack: humans round, agents square, ring = reachability, ×N for duplicate connections", () => {
+    const r = renderWith(busyEntry({ connection_count: 2 }), { party: true });
+    const avatars = nodesWithClass(r, "presence-ava").filter((n) => n.props["data-name"] !== undefined);
+    expect(avatars.length).toBeGreaterThan(0);
+    const agent = avatars.find((n) => String(n.props.className).includes("presence-ava--agent"));
+    expect(agent).toBeDefined();
+    expect(["wakeable", "online", "offline"]).toContain(agent?.props["data-reach"]);
+    // 重复登录在头像上叠 ×2
+    expect(nodesWithClass(r, "presence-ava-dup")[0]?.children.join("")).toBe("×2");
+    // title 说人话：名字 · 状态
+    expect(String(agent?.props.title)).toMatch(/·/);
   });
 
   // #179 的可点击计数保留；#484 把姓名列表从顶部条移进独立 modal。
@@ -620,7 +652,7 @@ describe("presence live roster dialog (#484)", () => {
       (node) => String(node.props.className ?? "").split(" ").includes("presence-summary"),
     );
     expect(summary).toHaveLength(1);
-    expect(summary?.[0]?.children.join("")).toBe("1/1 live");
+    expect(summary?.[0]?.children.join("")).toBe("1/1 online");
 
     expect(toggle?.props["aria-haspopup"]).toBe("dialog");
     expect(toggle?.props["aria-expanded"]).toBe(false);

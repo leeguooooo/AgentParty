@@ -1,5 +1,6 @@
 // 应用骨架：登录闸 → 头部 + 左侧频道列表 + 右侧（首页 | 频道页）
 import { isMember } from "@agentparty/shared";
+import { isOpaqueAccount } from "@agentparty/shared/identity";
 import { membershipApplyMailto, membershipStatusOf } from "./lib/membership";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelList } from "./components/ChannelList";
@@ -120,6 +121,14 @@ import "./i18n/strings/App";
 const PENDING_JOIN_KEY = "ap_pending_join";
 // 外部协作者邀请（#593）：/invite/<code> 同款跨登录暂存。
 const PENDING_INVITE_KEY = "ap_pending_invite";
+function readableOwner(me: MeInfo): string | null {
+  if (me.kind !== "agent") return null;
+  for (const candidate of [me.owner_display_name, me.owner_handle, me.owner]) {
+    const value = typeof candidate === "string" ? candidate.trim() : "";
+    if (value !== "" && value !== me.name && !isOpaqueAccount(value)) return value;
+  }
+  return null;
+}
 function meTitle(me: MeInfo): string {
   const parts = [`token: ${me.name}`, `kind: ${me.kind}`, `role: ${me.role}`];
   if (me.display_name !== null) parts.push(`display: ${me.display_name}`);
@@ -1217,14 +1226,13 @@ export function App() {
             {me.avatar_thumb !== null || me.avatar_url !== null ? (
               <img className="app-me-avatar" src={me.avatar_thumb ?? me.avatar_url ?? ""} alt="" />
             ) : null}
-            <span className="app-me-prefix">token</span>
             <strong className="app-me-name">{me.display_name ?? me.handle ?? me.name}</strong>
             <span className={`app-me-chip app-me-chip--${me.kind}`}>{me.kind}</span>
             {/* role 与 kind 相同时（human/human、agent/agent）不重复显示，只有 readonly 等差异角色才补一个 chip */}
             {me.role !== me.kind && <span className="app-me-chip">{me.role}</span>}
-            {me.owner !== null && me.owner !== me.name && (
-              <span className="app-me-owner">owner: {me.owner}</span>
-            )}
+            {/* #1044：所属人只在 agent 身份下、且拿得到人可读名字时显示（display_name > handle > owner，
+                不透明账号 id 一律不露——人类账号的 owner 就是自己，显示它纯属噪音）。完整信息仍在 title 里。 */}
+            {readableOwner(me) !== null && <span className="app-me-owner">· {readableOwner(me)}</span>}
             {/* 会员骨架（#277）：账号 free/member 状态就近展示（不进 #273 全局设置面板，避免并行冲突）。 */}
             {me.kind === "human" && isLeeguoooooDeployment(deploymentOrigin) && (
               isMember(membershipStatusOf(me)) ? (
