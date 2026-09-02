@@ -1,6 +1,7 @@
 // 频道页：presence 条 + 实时消息流 + 内联错误条幅 + 插话框。
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { guessJoinPackHarness } from "../lib/joinPack";
 import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type CollaborationRole, type MsgFrame, type ParticipantRemovedFrame, type PresenceEntry, type PublicDirectedDelivery, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailPanel } from "../components/AgentDetailModal";
@@ -5659,6 +5660,21 @@ export function ChannelPage({
         onResumeAgent={resumeAgentReception}
         roles={channelRoles}
         onOpenAgentDetail={openTeamMember}
+        // 模块②（#1047）：名单里叫不到的 agent 旁的「接回」→ 一条命令的重连引导（同凭证面板的「重新接上」）。
+        onReconnect={
+          canMintAgent && accountKey !== null && !state.archived
+            ? (name) =>
+                openJoinGuide({
+                  name,
+                  command: `party recover ${slug}`,
+                  mode: "interactive",
+                  harness: guessJoinPackHarness(name),
+                  runner: "codex",
+                  recover: true,
+                  token: null,
+                })
+            : undefined
+        }
         focus={
           <ChannelFocusBar
             focus={channelFocus}
