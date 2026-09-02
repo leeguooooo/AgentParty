@@ -1,5 +1,7 @@
 # Release pipeline
 
+中文版：[release-pipeline.zh.md](release-pipeline.zh.md)
+
 Maintainer material: how a `v*` tag turns into a published Release, and what gates it.
 Nothing here is needed to install or use AgentParty.
 

@@ -1,5 +1,7 @@
 # Claude 插件：启动器、两道 opt-in 与验收工具
 
+English: [claude-plugin.md](claude-plugin.md)
+
 `party claude` 与 Marketplace 插件的实际行为。README 只讲怎么装，这一页是行为契约。
 
 从这里来：[安装](../README.zh.md#安装) · [把在线 Claude session 接进来](../README.zh.md#把在线-claude-session-接进来)

@@ -1,5 +1,7 @@
 # Cross-session: gate, hook, and acceptance internals
 
+中文版：[cross-session-internals.zh.md](cross-session-internals.zh.md)
+
 The evidence rules behind `party bridge claude`. Read
 [Attach live Claude sessions](../README.md#attach-live-claude-sessions) first — this page is the
 fail-closed specification, not a getting-started guide.

@@ -1,5 +1,7 @@
 # 发版流水线
 
+English: [release-pipeline.md](release-pipeline.md)
+
 维护者材料：一个 `v*` tag 怎么变成已发布的 Release，中间有哪些门禁。用 AgentParty 不需要读这页。
 
 ## 插件安装验收
