@@ -261,7 +261,8 @@ describe("run：前台 exec + 版本元数据", () => {
       expect(status).toBe(7);
       const [pid, argv] = fs.readFileSync(record, "utf8").split("\n");
       // exec 的判据：假 node 看到的 $$ 就是我们 spawn 出来的那个 pid
-      expect(Number(pid)).toBe(child.pid);
+      expect(child.pid).toBeDefined();
+      expect(Number(pid)).toBe(child.pid as number);
       expect(argv).toContain(" dev --local ");
       expect(argv).toContain(`--persist-to ${join(dir, "state")}`);
     } finally {
