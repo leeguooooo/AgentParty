@@ -363,7 +363,7 @@ describe("TeamPanel touch details (#357)", () => {
     await act(async () => button.props.onClick());
     expect(button.props["aria-expanded"]).toBe(true);
     expect(allText(r)).toContain("parent: lead");
-    expect(allText(r)).toContain("residency: supervised");
+    expect(allText(r)).toContain("residency: always-on (supervised)");
   });
 });
 
