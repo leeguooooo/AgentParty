@@ -21,7 +21,11 @@ pub const MAX_ASSET_BYTES: usize = 16 * 1024 * 1024;
 
 const META_PATH: &str = "__agentparty_ui_meta.js";
 const META_SCRIPT_TAG: &str = "<script src=\"/__agentparty_ui_meta.js\"></script>";
-const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:* http://[::1]:*; connect-src 'self' ipc: http://ipc.localhost https: wss: http://127.0.0.1:* http://localhost:* http://[::1]:* ws://127.0.0.1:* ws://localhost:* ws://[::1]:*";
+// connect-src / img-src 放行 `http:` `ws:` 整个 scheme：CSP 的 host-source 写不出 10/8、192.168/16
+// 这类网段，而内网私有部署（docs/self-host-intranet.md）走的正是明文 http。真正的准入判定在
+// private_network.rs（Rust）与 serverProfiles.ts（web）——公网主机仍然只能 https，CSP 在这里
+// 只是第二道防线，不是策略本身。
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http:; connect-src 'self' ipc: http://ipc.localhost https: wss: http: ws:";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiProtocolResponse {
@@ -626,7 +630,7 @@ mod tests {
         assert_eq!(response.header("cache-control"), Some("no-store"));
         assert_eq!(
             response.header("content-security-policy"),
-            Some("default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:* http://[::1]:*; connect-src 'self' ipc: http://ipc.localhost https: wss: http://127.0.0.1:* http://localhost:* http://[::1]:* ws://127.0.0.1:* ws://localhost:* ws://[::1]:*")
+            Some("default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http:; connect-src 'self' ipc: http://ipc.localhost https: wss: http: ws:")
         );
         assert_eq!(response.headers().len(), 5);
         let html = body_text(&response);

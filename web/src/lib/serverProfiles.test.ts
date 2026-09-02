@@ -30,9 +30,33 @@ describe("server origin validation", () => {
     expect(normalizeServerOrigin("http://[::1]:8787")).toBe("http://[::1]:8787");
   });
 
-  test("rejects remote HTTP, userinfo, and any path/query/fragment", () => {
+  test("accepts plain HTTP on private-network hosts (intranet self-hosting)", () => {
+    for (const [input, origin] of [
+      ["http://10.240.40.226:8790", "http://10.240.40.226:8790"],
+      ["http://192.168.0.197:8787/", "http://192.168.0.197:8787"],
+      ["http://172.31.5.5", "http://172.31.5.5"],
+      ["http://169.254.1.1:80", "http://169.254.1.1"],
+      ["http://100.100.1.1:8787", "http://100.100.1.1:8787"],
+      ["http://[fd12:3456::1]:8787", "http://[fd12:3456::1]:8787"],
+      ["http://[fe80::1]:8787", "http://[fe80::1]:8787"],
+      ["http://agentparty:8787", "http://agentparty:8787"],
+      ["http://nas.local:8787", "http://nas.local:8787"],
+      ["http://party.corp.internal", "http://party.corp.internal"],
+      ["http://ap.lan:8787", "http://ap.lan:8787"],
+    ] as const) {
+      expect(normalizeServerOrigin(input)).toBe(origin);
+    }
+  });
+
+  test("rejects public HTTP, userinfo, and any path/query/fragment", () => {
     for (const input of [
       "http://party.example.com",
+      "http://8.8.8.8:8787",
+      "http://172.32.0.1",
+      "http://100.128.0.1",
+      "http://[2001:db8::1]",
+      "http://evil.notlocal",
+      "http://x.local.example.com",
       "https://user:pass@party.example.com",
       "https://party.example.com/api",
       "https://party.example.com?tenant=a",

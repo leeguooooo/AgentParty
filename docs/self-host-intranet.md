@@ -188,6 +188,18 @@ party send dev "hello from the intranet"
 Every other feature (`party claude`, `party serve`, webhooks, the Claude plugin) works unchanged
 against the intranet URL.
 
+### Desktop app
+
+The desktop app accepts plain `http://` only for hosts that cannot be reached from the public
+internet: loopback, the private IPv4 ranges (`10/8`, `172.16/12`, `192.168/16`), link-local and
+CGNAT (`100.64/10`, used by Tailscale), IPv6 ULA/link-local, hostnames ending in `.local`,
+`.internal`, `.lan`, `.home.arpa` or `.intranet`, and single-label hostnames such as
+`http://agentparty:8787`. Public hostnames and public IPs require HTTPS. Add the intranet address
+under *Servers → Add*, then sign in with a pasted token as in the browser.
+
+This rule is enforced by both the UI bundle and the native shell, so the desktop app itself must be
+v0.2.242 or newer; an older shell keeps rejecting non-loopback `http://` even after the UI updates.
+
 ## Operations
 
 ### Service commands
