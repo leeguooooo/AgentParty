@@ -317,7 +317,7 @@ describe("selfhost-smoke：可反复运行", () => {
 
   test("读回必须按本次 seq 精确取，不能拿最旧 N 条碰运气", () => {
     expect(smoke).toContain('messages?since=$((SEQ - 1))&limit=1');
-    expect(smoke).not.toMatch(/messages\?limit=\d+"/);
+    expect(smoke).not.toMatch(/messages\?[^&]*limit=\d+/);
   });
 
   test("每次运行的名字要在同一秒内也唯一", () => {
