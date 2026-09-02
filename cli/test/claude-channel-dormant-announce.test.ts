@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { WAKE_VERIFY_PREFIX, type ServerFrame } from "@agentparty/shared";
 import { CLAUDE_NATIVE_SESSIONS_DIR_ENV, CROSS_SESSION_TAG } from "../src/claude-inbox-inject";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
-import { CLAUDE_NATIVE_SESSIONS_DIR_ENV } from "../src/claude-inbox-inject";
 import { wakeProxyNoteFromId } from "../src/serve-wake-proxy";
 import { resetWakeLangCache } from "../src/wake-note-i18n";
 import {
