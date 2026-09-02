@@ -303,11 +303,14 @@ export function presenceTier(item: Item, now: number, staleMs = PRESENCE_STALE_M
 
 // #1044 头像堆叠的状态环：绿=能被 @ 唤醒，蓝=在线但只是在看（@ 叫不醒），灰=离开。
 // 人只有在/不在；agent 的关键不是「在不在」而是「叫不叫得醒」——与 presenceTier / wakeabilityBadge 同口径。
-export type AvatarReach = "present" | "wakeable" | "online" | "offline";
+export type AvatarReach = "present" | "wakeable" | "online" | "blocked" | "offline";
 export function avatarReach(item: Item, now: number): AvatarReach {
   // 人：在就是绿（看得到 @），不在就灰；「叫不叫得醒」只对 agent 有意义。
   if (item.kind === "human") return item.state !== "offline" ? "present" : "offline";
   if (item.paused) return "online";
+  // 已知叫不醒（codex stop-time review）：wake 被拦 / runner 连败 / 没在听——这三条是服务端或
+  // 目标机自检给出的**否定证据**，比 wake 类型更硬，绝不能亮绿。与 livenessBadge 的 bad 档同口径。
+  if (livenessBadge(item)?.tone === "bad") return "blocked";
   if (presenceTier(item, now) === "wakeable") return "wakeable";
   if (item.state !== "offline") {
     const armed =
@@ -320,7 +323,7 @@ export function avatarReach(item: Item, now: number): AvatarReach {
 /** 头像堆叠最多露几张；其余折成 +N。 */
 export const PRESENCE_STACK_MAX = 6;
 /** 堆叠排序：能被 @ 叫到的（人在线 / agent 可唤醒）> 在线只看 > 离开。 */
-export const AVATAR_REACH_ORDER: Record<AvatarReach, number> = { present: 0, wakeable: 0, online: 1, offline: 2 };
+export const AVATAR_REACH_ORDER: Record<AvatarReach, number> = { present: 0, wakeable: 0, online: 1, blocked: 1, offline: 2 };
 
 // #666：不可唤醒/未监听徽章。仅当 agent 既非在线、也非可唤醒待命（tier=recent）时显式标注：
 // 它的 watch 已退出或从未验证可唤醒，@ 只会进历史、可能不被处理。paused 是人主动设的有意状态、

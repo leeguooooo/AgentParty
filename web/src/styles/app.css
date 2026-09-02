@@ -8699,6 +8699,7 @@ button.org-person-name {
 .presence-ava[data-reach="wakeable"],
 .presence-ava[data-reach="present"] { --reach: var(--d-green); }
 .presence-ava[data-reach="online"] { --reach: #2b6cb0; }
+.presence-ava[data-reach="blocked"] { --reach: var(--d-red); }
 .presence-ava[data-reach="offline"] { --reach: var(--t-faint); opacity: 0.6; filter: grayscale(1); }
 .presence-ava--more .presence-ava-dot { display: none; }
 .presence-ava-dup {
