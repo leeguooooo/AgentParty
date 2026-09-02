@@ -216,3 +216,91 @@ describe("自部署预检（#selfhost）", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+// `run`：前台 exec，给 systemd（Type=exec）/ 容器入口用。真机上 Type=forking + pidfile 的形态
+// 有两个毛病：systemd 只能靠 cgroup 盯一个「不是自己孩子」的进程；stop 时 node 以 143 退出
+// 被记成 failed。前台 exec 之后 systemd 直接持有 worker 的 pid，这两条都消失。
+describe("run：前台 exec + 版本元数据", () => {
+  const fs = require("node:fs") as typeof import("node:fs");
+
+  /** 假 repo：假 node 把自己的 pid 与 argv 记下来再按指定退出码退出；带 wrangler 占位与版本号。 */
+  function runSandbox(exitCode: number) {
+    const dir = mkdtempSync(join(tmpdir(), "agentparty-selfhost-run-"));
+    for (const d of ["bin", "scripts", "worker", "cli", "web/dist", "node_modules/wrangler/bin"]) {
+      mkdirSync(join(dir, d), { recursive: true });
+    }
+    writeFileSync(join(dir, "web", "dist", "index.html"), "<html></html>");
+    writeFileSync(join(dir, "node_modules", "wrangler", "bin", "wrangler.js"), "");
+    writeFileSync(join(dir, "cli", "package.json"), JSON.stringify({ name: "x", version: "1.2.3" }));
+    const record = join(dir, "node.record");
+    writeFileSync(
+      join(dir, "bin", "node"),
+      `#!/bin/sh\n[ "$1" = "-v" ] && { echo v22.14.0; exit 0; }\n` +
+        // migrate 那次也会经过这里（d1 migrations apply）：只记录 dev 那次
+        `case "$*" in *" dev "*) printf '%s\\n%s\\n' "$$" "$*" > "${record}"; exit ${exitCode} ;; esac\nexit 0\n`,
+    );
+    chmodSync(join(dir, "bin", "node"), 0o755);
+    const copy = join(dir, "scripts", "selfhost.sh");
+    writeFileSync(copy, fs.readFileSync(script, "utf8"));
+    chmodSync(copy, 0o755);
+    const env = {
+      PATH: `${join(dir, "bin")}:/usr/bin:/bin`,
+      HOME: dir,
+      AGENTPARTY_ADMIN_SECRET: "s3cret",
+      AGENTPARTY_SELFHOST_DATA: join(dir, "state"),
+    };
+    return { dir, copy, env, record };
+  }
+
+  test("run 把自己 exec 成 worker：pid 不变、退出码透传", async () => {
+    const { dir, copy, env, record } = runSandbox(7);
+    try {
+      const { spawn } = require("node:child_process") as typeof import("node:child_process");
+      const child = spawn("sh", [copy, "run"], { env, stdio: ["ignore", "pipe", "pipe"] });
+      const status = await new Promise<number | null>((r) => child.on("exit", (c) => r(c)));
+      expect(status).toBe(7);
+      const [pid, argv] = fs.readFileSync(record, "utf8").split("\n");
+      // exec 的判据：假 node 看到的 $$ 就是我们 spawn 出来的那个 pid
+      expect(Number(pid)).toBe(child.pid);
+      expect(argv).toContain(" dev --local ");
+      expect(argv).toContain(`--persist-to ${join(dir, "state")}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("启动参数注入版本与提交（否则 /api/health 永远是 dev/unknown，升级后核不出跑的哪版）", () => {
+    const { dir, copy, env, record } = runSandbox(0);
+    try {
+      const r = spawnSync("sh", [copy, "run"], { env, encoding: "utf8" });
+      expect(r.status).toBe(0);
+      const argv = fs.readFileSync(record, "utf8").split("\n")[1];
+      expect(argv).toContain('--define __AGENTPARTY_BUILD_VERSION__:"1.2.3"');
+      // 沙箱不是 git 仓库：commit 退化成 unknown，但 define 必须在
+      expect(argv).toContain('--define __AGENTPARTY_BUILD_COMMIT__:"unknown"');
+      expect(argv).toMatch(/--define __AGENTPARTY_DEPLOYED_AT__:"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"/);
+      // secret 仍然不进 argv
+      expect(argv).not.toContain("s3cret");
+      expect(fs.readFileSync(join(dir, "worker", ".dev.vars"), "utf8")).toContain("ADMIN_SECRET=s3cret");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("run 与 start 共用同一套前置：没设 ADMIN_SECRET 一样拒绝", () => {
+    const { dir, copy, env } = runSandbox(0);
+    try {
+      const { AGENTPARTY_ADMIN_SECRET: _drop, ...noSecret } = env;
+      const r = spawnSync("sh", [copy, "run"], { env: noSecret, encoding: "utf8" });
+      expect(r.status).not.toBe(0);
+      expect(`${r.stdout}${r.stderr}`).toContain("AGENTPARTY_ADMIN_SECRET");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("usage 列出 run", () => {
+    const r = spawnSync("sh", [script], { encoding: "utf8" });
+    expect(`${r.stdout}${r.stderr}`).toMatch(/^\s*run\s+前台/m);
+  });
+});
