@@ -101,7 +101,6 @@ export function TeamTabs({
       <header className="team-blog-head">
         <div className="team-blog-title">
           <h2 className="team-blog-name">{t("Channel.team.overview.title")}</h2>
-          <span className="t-mono team-blog-prompt">{t("Channel.team.overview.prompt")}</span>
         </div>
         <div className="team-blog-stats" role="list">
           {stats.people !== undefined && (

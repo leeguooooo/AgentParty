@@ -2044,7 +2044,6 @@ export function AgentBoardPanel({
   return (
     <section className="agent-board-panel" aria-label={t("Channel.agentBoard.aria")}>
       <header className="agent-board-overview">
-        <span className="t-mono agent-board-prompt">{t("Channel.agentBoard.prompt")}</span>
         <span className="t-mono agent-board-summary">
           {t("Channel.agentBoard.summary", {
             busy: String(counts.busy),
