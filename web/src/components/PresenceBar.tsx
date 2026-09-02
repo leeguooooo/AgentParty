@@ -152,12 +152,6 @@ function roleBadge(item: Item, now: number): string | null {
   return item.roleSource === "assigned" ? `*${badge}` : badge;
 }
 
-function residencyBadge(item: Item): string | null {
-  if (item.residency === null) return null;
-  if (item.residency === "human_driven") return "manual";
-  return item.residency;
-}
-
 // busy 标签（#103）：「⏳ busy」或「⏳ busy · N queued」。null = 不忙，不渲染。
 // #639：返回 { key, vars } 走 t()，别写死英文——zh 界面也要翻译。
 export function busyLabel(item: Item): { key: string; vars?: { count: number } } | null {

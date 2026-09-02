@@ -8664,6 +8664,8 @@ button.org-person-name {
 .presence-ava {
   --ah: 200;
   --reach: var(--t-faint);
+  /* 「在线只看」的蓝：集中在一处，主题要换只改这里 */
+  --reach-online: #2b6cb0;
 
   position: relative;
   display: inline-flex;
@@ -8698,7 +8700,7 @@ button.org-person-name {
 .presence-ava-initial { pointer-events: none; }
 .presence-ava[data-reach="wakeable"],
 .presence-ava[data-reach="present"] { --reach: var(--d-green); }
-.presence-ava[data-reach="online"] { --reach: #2b6cb0; }
+.presence-ava[data-reach="online"] { --reach: var(--reach-online, #2b6cb0); }
 .presence-ava[data-reach="blocked"] { --reach: var(--d-red); }
 .presence-ava[data-reach="offline"] { --reach: var(--t-faint); opacity: 0.6; filter: grayscale(1); }
 .presence-ava--more .presence-ava-dot { display: none; }
@@ -8779,7 +8781,7 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .roster-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12.5px; color: var(--t-muted); }
 .roster-status--present .roster-status-text,
 .roster-status--wakeable .roster-status-text { color: var(--d-green); font-weight: 600; }
-.roster-status--online .roster-status-text { color: #2b6cb0; }
+.roster-status--online .roster-status-text { color: var(--reach-online, #2b6cb0); }
 .roster-status--blocked .roster-status-text { color: var(--d-red); font-weight: 600; }
 .roster-status--offline .roster-status-text { color: var(--t-dim); }
 .roster-doing { display: flex; flex-wrap: wrap; gap: 6px; }

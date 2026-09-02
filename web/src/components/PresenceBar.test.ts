@@ -766,17 +766,20 @@ describe("presence roster flat list (#1047)", () => {
       },
       { onReconnect: (name: string) => reconnected.push(name) },
     );
-    const rowsWithReconnect = nodesWithClass(r, "roster-row")
-      .filter((n) => n.findAll((c) => String(c.props.className ?? "").includes("roster-reconnect")).length > 0)
-      .map((n) => n.props["data-name"]);
-    expect(rowsWithReconnect.sort()).toEqual(["gone", "watcher"]);
-    const btn = nodesWithClass(r, "roster-reconnect")[0];
-    expect(btn?.type).toBe("button");
-    await act(async () => {
-      btn?.props.onClick();
-    });
-    expect(reconnected).toHaveLength(1);
-    expect(["gone", "watcher"]).toContain(reconnected[0]);
+    const rows = nodesWithClass(r, "roster-row").filter(
+      (n) => n.findAll((c) => String(c.props.className ?? "").includes("roster-reconnect")).length > 0,
+    );
+    expect(rows.map((n) => n.props["data-name"]).sort()).toEqual(["gone", "watcher"]);
+    // 逐行点：每个按钮回调的必须是自己那一行的成员名（CodeRabbit：只点第一个测不出串行）
+    for (const row of rows) {
+      const btn = row.findAll((c) => String(c.props.className ?? "").includes("roster-reconnect"))[0];
+      expect(btn?.type).toBe("button");
+      await act(async () => {
+        btn?.props.onClick();
+      });
+      expect(reconnected[reconnected.length - 1]).toBe(row.props["data-name"]);
+    }
+    expect(reconnected.sort()).toEqual(["gone", "watcher"]);
   });
 
   test("without onReconnect the roster renders no reconnect buttons", () => {
