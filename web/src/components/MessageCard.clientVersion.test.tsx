@@ -80,7 +80,7 @@ describe("MessageCard sender CLI version (#434)", () => {
     } as unknown as MsgFrame;
     const badges = receptionBadges(render(msg));
     expect(badges).toHaveLength(1);
-    expect(badges[0]!.children.join("")).toBe("codex reception reply");
+    expect(badges[0]!.children.join("")).toBe("auto-reply via codex");
     expect(String(badges[0]!.props.title)).toContain("does not inherit");
     expect(String(badges[0]!.props.title)).toContain("#6");
   });
