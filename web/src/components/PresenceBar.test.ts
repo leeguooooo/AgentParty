@@ -625,6 +625,23 @@ describe("presence live roster dialog (#484)", () => {
     expect(order).toEqual(["sleeper:wakeable", "watcher:online", "gone:offline"]);
   });
 
+  // codex stop-time review on #1044：wake 被拦 / runner 连败 / 没在听 是「已知叫不醒」的否定证据，绝不能亮绿。
+  test("avatar ring is red (blocked), never green, when the agent is known to be unwakeable", () => {
+    const now = Date.now();
+    const base = { kind: "agent", state: "online", note: null, ts: now, last_seen: now, live: true, wake: { kind: "serve" }, residency: "resident" };
+    const presence: Record<string, PresenceEntry> = {
+      blocked: { ...base, name: "blocked", wake_block: { reason: "hook_untrusted", detail: "hook not trusted", fix: "party hook trust", ts: now } } as unknown as PresenceEntry,
+      failing: { ...base, name: "failing", runner_health: { ok: false, consecutive_failures: 3, last_error: "boom" } } as unknown as PresenceEntry,
+      deaf: { ...base, name: "deaf", listening: "deaf" } as unknown as PresenceEntry,
+      fine: { ...base, name: "fine" } as unknown as PresenceEntry,
+    };
+    const r = renderWith(presence.fine!, { presence, participants: Object.keys(presence).map((name) => ({ name, kind: "agent" }) as Sender) });
+    const reach = Object.fromEntries(
+      nodesWithClass(r, "presence-ava").filter((n) => n.props["data-name"] !== undefined).map((n) => [n.props["data-name"], n.props["data-reach"]]),
+    );
+    expect(reach).toEqual({ fine: "wakeable", blocked: "blocked", failing: "blocked", deaf: "blocked" });
+  });
+
   test("avatar stack: humans round, agents square, ring = reachability, ×N for duplicate connections", () => {
     const r = renderWith(busyEntry({ connection_count: 2 }), { party: true });
     const avatars = nodesWithClass(r, "presence-ava").filter((n) => n.props["data-name"] !== undefined);
