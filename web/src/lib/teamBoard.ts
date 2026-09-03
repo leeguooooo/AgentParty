@@ -11,6 +11,7 @@ import type {
 } from "@agentparty/shared";
 import { isOpaqueAccount } from "@agentparty/shared/identity";
 import type { ChannelIdentity } from "./api";
+import { buildPersonRows } from "./personRoster";
 import { resolveTeamMemberView, type TeamMemberRole, type TeamMemberView } from "./teamMember";
 import type { TeamSummary } from "./teams";
 
@@ -58,6 +59,14 @@ export interface TeamCard {
   /** 可读的归属人；不透明账号 id 一律 null。 */
   owner: string | null;
   account: string | null;
+  handle: string | null;
+  displayName: string | null;
+  /** #1067：同一个人的其它会话（本卡是代表）。人按 handle/account 聚合，agent 恒为空。 */
+  otherSessions: TeamCard[];
+  /** 这个人名下有几个不同账号串（>1 说明登录路径岔开了）。 */
+  accountCount: number;
+  /** 给 personRoster 用的聚合字段（= presence 状态，离线为 "offline"）。 */
+  state: string;
   avatarUrl: string | null;
   avatarThumb: string | null;
   lane: TeamLane;
@@ -288,6 +297,11 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
       kind: view.kind,
       owner: readable(view.owner),
       account: view.account,
+      handle: nonBlank(entry?.handle) ?? nonBlank(participant?.handle) ?? nonBlank(identity?.handle),
+      displayName: nonBlank(entry?.display_name) ?? nonBlank(participant?.display_name),
+      otherSessions: [],
+      accountCount: 1,
+      state: lane === "offline" ? "offline" : (entry?.state ?? "online"),
       avatarUrl: entry?.avatar_url ?? null,
       avatarThumb: entry?.avatar_thumb ?? null,
       lane,
@@ -328,6 +342,18 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
       presence: entry,
     });
   }
+
+  // #1067：人按 handle/account 折成一行（agent 各自成行）；被折起来的会话挂在代表卡的 otherSessions 上。
+  const personRows = buildPersonRows<TeamCard>(cards, {
+    rank: (card) => LANE_ORDER[card.lane] * 10 + (card.online ? 0 : 1),
+  });
+  const merged: TeamCard[] = personRows.map((row) => {
+    const [primary, ...rest] = row.sessions;
+    if (rest.length === 0 && row.accountCount <= 1) return primary!;
+    return { ...primary!, display: row.display, owner: row.owner, otherSessions: rest, accountCount: row.accountCount };
+  });
+  cards.length = 0;
+  cards.push(...merged);
 
   cards.sort((a, b) =>
     LANE_ORDER[a.lane] - LANE_ORDER[b.lane]

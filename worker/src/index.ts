@@ -2284,6 +2284,29 @@ async function consumeLarkDirectorySearchLimit(db: D1Database, account: string):
   return Math.max(1, Math.ceil((Number(row?.window_started_at ?? now) + windowMs - now) / 1000));
 }
 
+// #1067：2026-07-12（#358）之前，Lark 登录按邮箱构造 account（`<provider>-email:<邮箱>`）；之后统一成
+// `<provider>:<provider_user_id>`。同一个人跨过这条分界线就会有两个账号，名单里显示成两个人。
+function legacyEmailAccount(providerId: string, email: string | null): string | null {
+  if (email === null || email === "") return null;
+  const account = `${providerId}-email:${email}`;
+  return account.length <= OWNER_MAX && OWNER_RE.test(account) ? account : null;
+}
+
+/** 把别名账号解析成规范账号；无别名时原样返回。读侧统一走这里，历史行一律不改写。 */
+async function resolveAccountAliases(db: D1Database, accounts: Iterable<string>): Promise<Map<string, string>> {
+  const list = [...new Set([...accounts])].filter((a) => a !== "");
+  const out = new Map<string, string>();
+  if (list.length === 0) return out;
+  const placeholders = list.map(() => "?").join(",");
+  const rows = await db
+    .prepare(`SELECT alias_account, canonical_account FROM account_aliases WHERE alias_account IN (${placeholders})`)
+    .bind(...list)
+    .all<{ alias_account: string; canonical_account: string }>()
+    .catch(() => ({ results: [] as { alias_account: string; canonical_account: string }[] }));
+  for (const row of rows.results) out.set(row.alias_account, row.canonical_account);
+  return out;
+}
+
 function directoryAccount(providerId: string, providerUserId: string): string | null {
   const account = `${providerId}:${providerUserId}`;
   return account.length <= OWNER_MAX && OWNER_RE.test(account) ? account : null;
@@ -2997,9 +3020,28 @@ app.post("/api/auth/:provider/callback", async (c) => {
       WHERE provider = ? AND provider_user_id = ? AND tenant_key = ?
       LIMIT 1`,
   ).bind(provider.id, exchanged.providerUserId, exchanged.tenantKey).first<{ account: string }>();
-  const stableAccount = existingAccount?.account ?? directoryAccount(provider.id, exchanged.providerUserId);
+  // #1067：先看这个 provider 用户是否已有账号；没有再看他是不是分界线之前的遗留邮箱账号——
+  // 认领遗留账号（并补上 provider 三元组，下次直接命中）比新建一个账号更好：频道成员、角色、历史归属都留在原处。
+  const legacyAccount = legacyEmailAccount(provider.id, exchanged.email);
+  const legacyRow = existingAccount === null && legacyAccount !== null
+    ? await c.env.DB.prepare("SELECT account FROM account_profiles WHERE account = ? LIMIT 1")
+        .bind(legacyAccount).first<{ account: string }>()
+    : null;
+  const stableAccount = existingAccount?.account ?? legacyRow?.account ?? directoryAccount(provider.id, exchanged.providerUserId);
   if (stableAccount === null) {
     return c.json(errorBody("unavailable", "provider user id is not header-safe"), 500);
+  }
+  if (legacyRow !== null) {
+    await c.env.DB.prepare(
+      `UPDATE account_profiles SET provider = ?, provider_user_id = ?, tenant_key = ?, updated_at = ? WHERE account = ?`,
+    ).bind(provider.id, exchanged.providerUserId, exchanged.tenantKey, Date.now(), legacyRow.account).run().catch(() => undefined);
+  } else if (existingAccount !== null && legacyAccount !== null && legacyAccount !== existingAccount.account) {
+    // 两个账号都已存在（分界线前后各进过一次）：把遗留账号登记为别名，读侧解析到规范账号。
+    await c.env.DB.prepare(
+      `INSERT INTO account_aliases (alias_account, canonical_account, provider, linked_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(alias_account) DO UPDATE SET canonical_account = excluded.canonical_account, linked_at = excluded.linked_at`,
+    ).bind(legacyAccount, existingAccount.account, provider.id, Date.now()).run().catch(() => undefined);
   }
   exchanged.account = stableAccount;
   const tokenName = await oauthTokenName(provider.id, exchanged.account);
@@ -6925,6 +6967,18 @@ app.get("/api/channels/:slug/identities", async (c) => {
     if (entry.account !== undefined) continue;
     const account = accountByName.get(entry.name.toLocaleLowerCase());
     if (account !== undefined) add({ ...entry, account });
+  }
+
+  // #1067：把别名账号解析成规范账号——同一个人跨账号的会话在前端才会归成一行。
+  const aliasMap = await resolveAccountAliases(
+    c.env.DB,
+    [...identities.values()].map((entry) => entry.account).filter((a): a is string => typeof a === "string"),
+  );
+  if (aliasMap.size > 0) {
+    for (const entry of identities.values()) {
+      const canonical = entry.account !== undefined ? aliasMap.get(entry.account) : undefined;
+      if (canonical !== undefined) entry.account = canonical;
+    }
   }
 
   const humanAccounts = new Set(
