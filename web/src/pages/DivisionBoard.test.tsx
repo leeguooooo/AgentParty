@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { PresenceEntry, Sender } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
-import { DivisionBoard, teamMemberOnlineNames, teamRoleBuckets, type DivisionBoardProps } from "./Channel";
+import { DivisionBoard, type DivisionBoardProps } from "../components/team/DivisionBoard";
+import { teamMemberOnlineNames } from "../components/team/agentBoard";
+import { teamRoleBuckets } from "../lib/channelRoles";
 
 // issue #169:「频道四个 agent 分工面板只有两个」——分工面板此前只渲染
 // 已分配角色（roles）+ 自报角色（presence role_source==="self"）的成员，
