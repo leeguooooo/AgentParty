@@ -8478,3 +8478,10 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
   cursor: pointer;
 }
 .agent-board-name--button:hover { color: var(--t-accent); }
+
+/* 名单按人聚合（#1067） */
+.roster-row--session { margin-left: 26px; border-left: 2px solid var(--t-border); background: color-mix(in srgb, var(--t-panel) 60%, transparent); }
+.roster-sessions-toggle, .roster-stale-toggle { background: none; border: 0; padding: 0; font: inherit; font-size: 12px; color: var(--t-link); cursor: pointer; }
+.roster-sessions-toggle:hover, .roster-stale-toggle:hover { text-decoration: underline; }
+.roster-stale { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; margin-top: 8px; border-top: 1px dashed var(--t-border); }
+.roster-stale-hint { margin: 0; font-size: 12px; color: var(--t-muted); }
