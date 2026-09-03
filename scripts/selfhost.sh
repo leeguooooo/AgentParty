@@ -20,6 +20,12 @@ MIN_NODE_MAJOR=22
 
 REPO="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 DATA_DIR="${AGENTPARTY_SELFHOST_DATA:-$REPO/.selfhost-state}"
+# Wrangler 在 launch() 里会 cd 到 worker/。相对状态目录若不在这里固定，预检/迁移和
+# 运行时会悄悄落到两个不同目录（例如调用方的 state 与 worker/state）。
+case "$DATA_DIR" in
+  /*) ;;
+  *) DATA_DIR="$(pwd -P)/$DATA_DIR" ;;
+esac
 HOST="${AGENTPARTY_SELFHOST_HOST:-0.0.0.0}"
 PORT="${AGENTPARTY_SELFHOST_PORT:-8787}"
 LOG="${AGENTPARTY_SELFHOST_LOG:-$DATA_DIR/worker.log}"

@@ -295,6 +295,21 @@ describe("run / serve：前台 exec + 版本元数据", () => {
     }
   });
 
+  test("相对状态目录在 cd worker 前固定成绝对路径：准备与运行时不能写到两个地方", () => {
+    const { dir, copy, env, record } = runSandbox(0);
+    try {
+      const relativeEnv = { ...env, AGENTPARTY_SELFHOST_DATA: "state" };
+      const r = spawnSync("sh", [copy, "serve"], { cwd: dir, env: relativeEnv, encoding: "utf8" });
+      expect(r.status).toBe(0);
+      const argv = fs.readFileSync(record, "utf8").split("\n")[1];
+      expect(argv).toContain(`--persist-to ${join(fs.realpathSync(dir), "state")}`);
+      expect(fs.statSync(join(dir, "state")).mode & 0o777).toBe(0o700);
+      expect(fs.existsSync(join(dir, "worker", "state"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("启动参数注入版本与提交（否则 /api/health 永远是 dev/unknown，升级后核不出跑的哪版）", () => {
     const { dir, copy, env, record } = runSandbox(0);
     try {
@@ -317,7 +332,7 @@ describe("run / serve：前台 exec + 版本元数据", () => {
     const { dir, copy, env } = runSandbox(0);
     try {
       const { AGENTPARTY_ADMIN_SECRET: _drop, ...noSecret } = env;
-      for (const command of ["run", "serve"]) {
+      for (const command of ["start", "run", "serve"]) {
         const r = spawnSync("sh", [copy, command], { env: noSecret, encoding: "utf8" });
         expect(r.status).not.toBe(0);
         expect(`${r.stdout}${r.stderr}`).toContain("AGENTPARTY_ADMIN_SECRET");
