@@ -9,7 +9,7 @@ import { guessJoinPackHarness } from "../lib/joinPack";
 import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type MsgFrame, type ParticipantRemovedFrame, type PresenceEntry, type PublicDirectedDelivery, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailPanel } from "../components/AgentDetailModal";
-import { teamMemberOnlineNames } from "../components/team/agentBoard";
+import { teamMemberOnlineNames } from "../lib/onlineNames";
 import { AgentJoin, type JoinGuideSession } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";

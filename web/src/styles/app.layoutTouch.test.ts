@@ -41,6 +41,5 @@ describe("issue #357 layout and touch CSS", () => {
   test("touch-revealed status and team details wrap instead of inheriting compact truncation", () => {
     expect(ruleBody(".msg-status-detail")).toContain("white-space: pre-wrap");
     expect(ruleBody(".msg-context.msg-context-detail")).toContain("max-width: none");
-    expect(ruleBody(".team-member-detail")).toContain("overflow-wrap: anywhere");
   });
 });

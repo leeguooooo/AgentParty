@@ -169,7 +169,7 @@
 .desktop-install-prompt-copy span { color: var(--t-body); font-size: 11px; }
 .desktop-install-prompt-action { flex: none; white-space: nowrap; }
 .desktop-install-prompt-dismiss { flex: none; width: 28px; height: 28px; }
-@media (max-width: 640px) {
+@media (max-width: 640px){
   .desktop-install-prompt { margin-inline: 12px; flex-wrap: wrap; }
   .desktop-install-prompt-copy { flex-basis: calc(100% - 44px); }
   .desktop-install-prompt-action { order: 3; width: 100%; }
@@ -218,8 +218,8 @@
 .desktop-updater-trigger--checking span,
 .desktop-updater-trigger--downloading span,
 .desktop-updater-trigger--installing span { animation: desktop-updater-spin 1s linear infinite; }
-@keyframes desktop-updater-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) {
+@keyframes desktop-updater-spin{ to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){
   .desktop-updater-trigger--checking span,
   .desktop-updater-trigger--downloading span,
   .desktop-updater-trigger--installing span { animation: none; }
@@ -433,7 +433,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-@media (max-width: 640px) {
+@media (max-width: 640px){
   .resident-logs-toolbar { grid-template-columns: 1fr; }
 }
 
@@ -674,7 +674,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-@media (max-width: 430px) {
+@media (max-width: 430px){
   .desktop-agent-fields { grid-template-columns: 1fr 1fr; }
   .desktop-agent-fields label:first-child { grid-column: 1 / -1; }
 }
@@ -1163,98 +1163,9 @@
   gap: 8px;
   justify-content: flex-end;
 }
-.role-board {
-  margin-top: 10px;
-  padding: 0;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  background: var(--t-panel);
-  border: 1.6px solid var(--d-ink);
-  border-radius: 0;
-  box-shadow: 3px 3px 0 var(--d-shadow);
-}
-.role-board-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0;
-  padding: 10px 12px;
-  font-weight: 700;
-  list-style: none;
-  cursor: pointer;
-}
-.role-board-head::-webkit-details-marker {
-  display: none;
-}
-.role-board-head::before {
-  content: "▸";
-  flex: none;
-  margin-top: 1px;
-  color: var(--t-dim);
-  font-size: 12px;
-  line-height: 1.4;
-}
-.role-board[open] .role-board-head {
-  border-bottom: 1.4px dashed var(--t-faint);
-}
-.role-board[open] .role-board-head::before {
-  content: "▾";
-}
-.role-board-head > div {
-  min-width: 0;
-  flex: 1;
-}
-.role-board-head h2 {
-  margin: 0;
-  font-size: 15px;
-}
-.role-board-head p {
-  margin: 2px 0 0;
-  color: var(--t-dim);
-  font-size: 11px;
-  font-weight: 500;
-}
-.role-board-count {
-  flex: none;
-  color: var(--t-dim);
-  font-size: 11px;
-  font-weight: 600;
-}
-.role-board-summary {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 5px;
-  max-width: min(520px, 58vw);
-  min-width: 0;
-  flex-wrap: wrap;
-}
-.role-board-role-count {
-  flex: none;
-  padding: 1px 6px;
-  color: var(--t-muted);
-  background: var(--t-panel2);
-  border: 1.4px solid var(--t-faint);
-  border-radius: 0;
-  font-size: 10.5px;
-  line-height: 1.25;
-}
-.role-board-body {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 10px 12px 12px;
-}
+
 /* issue #150 / #171：分工面板头部动作条——同步到公告 + 跳转 agent 规则编辑 */
-.role-board-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
+
 .role-sync-charter-btn,
 .role-open-rules-btn {
   font-size: 12px;
@@ -1414,52 +1325,10 @@
   color: var(--t-text);
   padding: 5px 7px;
 }
-.role-text {
-  /* issue #150：分工职责说明之前单行截断看不全，改成可换行，读到完整内容 */
-  min-width: 0;
-  color: var(--t-muted);
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  line-height: 1.4;
-}
-.role-text--unassigned {
-  font-style: italic;
-}
 
 /* issue #281：频道组织架构/汇报关系树预览——把逐行的汇报标注折成一棵可整体查看的组织图。
    主题变量沿用 role 系列（--t- 与 --d-），light/dark 都随 :root 走，不另开配色。 */
-.org-tree {
-  border: 1.4px solid var(--t-faint);
-  background: var(--t-panel);
-  margin: 4px 0 2px;
-}
-.org-tree-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
-}
-.org-tree-head h3 {
-  margin: 0;
-  font-size: 13px;
-  color: var(--t-text);
-}
-.org-tree-head p {
-  margin: 2px 0 0;
-  font-size: 11px;
-  color: var(--t-dim);
-}
-.org-tree-count {
-  flex: none;
-  font-size: 11px;
-  color: var(--t-dim);
-}
-.org-tree-body {
-  padding: 4px 10px 10px;
-  overflow-x: auto;
-}
+
 .org-directory {
   display: grid;
   gap: 8px;
@@ -1647,7 +1516,7 @@ button.org-person-name {
   font-size: 11px;
   color: var(--t-dim);
 }
-@media (max-width: 560px) {
+@media (max-width: 560px){
   .org-directory-head,
   .org-agent-row {
     align-items: flex-start;
@@ -2442,7 +2311,7 @@ button.org-person-name {
   background: var(--t-faint);
 }
 .msg-skeleton-line--short { max-width: 140px; }
-@keyframes skeleton-pulse {
+@keyframes skeleton-pulse{
   50% { opacity: 0.45; }
 }
 
@@ -2750,102 +2619,7 @@ button.org-person-name {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.team-front {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  max-width: 180px;
-  padding: 1px 6px;
-  border: 1.4px solid var(--d-blue);
-  border-radius: 0;
-  color: var(--d-blue);
-  background: var(--d-blue-soft);
-  font-size: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.team-front.is-active {
-  border-color: var(--d-green);
-  color: var(--d-green);
-  background: var(--d-green-soft);
-}
-.team-active {
-  flex: none;
-  margin-left: auto;
-  font-size: 10.5px;
-  color: var(--t-muted);
-}
-.team-residency {
-  flex: none;
-  padding: 1px 6px;
-  border: 1.4px solid var(--t-faint);
-  border-radius: 0;
-  font-size: 10px;
-  color: var(--t-dim);
-  background: var(--t-panel);
-}
-.team-residency--webhook,
-.team-residency--supervised {
-  border-color: var(--d-green);
-  color: var(--d-green);
-  background: var(--d-green-soft);
-}
-.team-residency--mixed {
-  border-color: var(--d-yellow);
-  color: var(--t-muted);
-  background: var(--d-yellow);
-}
-.team-meta {
-  margin-top: 5px;
-  color: var(--t-dim);
-  font-size: 10.5px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-.team-members {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 7px;
-}
-.team-member {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 100%;
-  padding: 3px 7px;
-  border: 1.4px solid var(--t-faint);
-  border-radius: 0;
-  color: var(--t-dim);
-  background: var(--t-panel);
-  font-size: 10.5px;
-}
-.team-member.is-active {
-  border-color: var(--d-blue);
-  color: var(--d-blue);
-  background: var(--d-blue-soft);
-}
-.team-member--empty {
-  font-style: italic;
-  border-style: dashed;
-}
-.team-member span:last-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.team-member-detail {
-  flex: 1 0 100%;
-  padding: 4px 7px;
-  border-left: 2px solid var(--t-faint);
-  color: var(--t-dim);
-  font-size: 10.5px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
+
 .team-thread {
   min-width: 0;
   border: 1.4px solid var(--t-faint);
@@ -3056,7 +2830,7 @@ button.org-person-name {
   font-size: 10.5px;
   overflow-wrap: anywhere;
 }
-@media (max-width: 640px) {
+@media (max-width: 640px){
   .host-assignment-controls {
     grid-template-columns: 1fr;
   }
@@ -3604,7 +3378,7 @@ button.org-person-name {
   transform: translateY(-2px);
   transition: opacity 60ms linear, transform 60ms linear, visibility 0s linear 60ms;
 }
-@media (min-width: 761px) {
+@media (min-width: 761px){
   .msg-agent-popover--align-end .msg-agent-card {
     left: auto;
     right: 0;
@@ -3876,7 +3650,7 @@ button.org-person-name {
 }
 /* 跳转命中高亮：目标消息短暂描边闪一下，告诉用户"就是这条"，~1.2s 后 MessageCard 自己摘掉这个 class。 */
 .msg-jump-highlight { animation: msg-jump-flash 1.2s ease-out; }
-@keyframes msg-jump-flash {
+@keyframes msg-jump-flash{
   0% {
     outline: 3px solid var(--t-accent);
     outline-offset: 2px;
@@ -4295,7 +4069,7 @@ button.org-person-name {
 .vis-seg-btn:disabled:not(.is-on) { opacity: 0.55; cursor: default; }
 /* 内容入口靠左、管理控件靠右，共用一条横向轨道。空间不足时滚动，
    邀请面板改为视口底部浮层，避免被滚动容器裁切。 */
-@media (max-width: 1759px) {
+@media (max-width: 1759px){
   .chan-toolstrip-content {
     overflow-x: auto;
     overflow-y: hidden;
@@ -4539,11 +4313,11 @@ button.org-person-name {
 .joinrequest-login-options { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .joinrequest-status-reason { padding-left: 8px; border-left: 1px solid currentColor; }
 .joinrequest-status-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: joinrequest-spin 700ms linear infinite; }
-@keyframes joinrequest-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .joinrequest-status-spinner { animation: none; } }
+@keyframes joinrequest-spin{ to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){ .joinrequest-status-spinner { animation: none; } }
 /* Keep the desktop popover bound to the viewport. This override must follow the
    base absolute rule above so top and bottom cannot constrain it to 25px. */
-@media (min-width: 761px) and (max-width: 1759px) {
+@media (min-width: 761px) and (max-width: 1759px){
   .joinlink-panel {
     position: fixed;
     left: 12px;
@@ -5075,14 +4849,11 @@ button.org-person-name {
   padding: 12px 14px 14px;
 }
 .channel-panel-body .charter-banner,
-.channel-panel-body .role-board,
 .channel-panel-body .chan-search-panel {
   margin: 0;
 }
 .channel-panel-body .charter-banner,
-.channel-panel-body .role-board {
-  box-shadow: none;
-}
+
 .channel-panel-body .charter-body .msg-body {
   max-height: none;
   overflow: visible;
@@ -5827,11 +5598,11 @@ button.org-person-name {
 .agent-join-runner-select { font-size: 12px; padding: 3px 6px; }
 .agent-join-adopt-btn { font-size: 13px; }
 
-@media (max-width: 520px) {
+@media (max-width: 520px){
   .agent-join-step-status { margin-left: 0; padding-left: 0; text-align: left; flex-basis: 100%; }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 760px){
   .agent-join-cmd { flex-direction: column; align-items: stretch; }
   .agent-join-copy { align-self: flex-end; }
 }
@@ -5875,7 +5646,7 @@ button.org-person-name {
 .outdated-agents-notice-name { font-weight: 600; }
 .outdated-agents-notice-ver { font-size: 11px; opacity: 0.8; }
 .outdated-agents-notice-upgrade { flex: none; margin-left: auto; font-size: 12px; }
-@media (max-width: 640px) {
+@media (max-width: 640px){
   .outdated-agents-notice-upgrade { margin-left: 0; }
 }
 .reply-banner {
@@ -5910,7 +5681,7 @@ button.org-person-name {
   background: var(--d-yellow);
 }
 
-@media (max-width: 760px) {
+@media (max-width: 760px){
   .reply-banner { align-items: stretch; flex-direction: column; }
   .reply-banner-dismiss { align-self: flex-start; }
   .msg-menu-trigger { opacity: 1; }
@@ -5923,7 +5694,7 @@ button.org-person-name {
   .agent-filter-clear { margin-left: 0; }
 }
 
-@media (hover: none) {
+@media (hover: none){
   .msg-menu-trigger { opacity: 1; }
 }
 
@@ -6509,8 +6280,8 @@ button.org-person-name {
   border-radius: 50%;
   animation: composer-upload-spin 0.7s linear infinite;
 }
-@keyframes composer-upload-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) {
+@keyframes composer-upload-spin{ to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){
   .composer-upload-spinner { animation-duration: 2s; }
 }
 .composer-upload-retry {
@@ -6934,7 +6705,7 @@ button.org-person-name {
   outline-offset: 2px;
 }
 
-@media (max-width: 560px) {
+@media (max-width: 560px){
   .desktop-pairing-code { font-size: 22px; }
   .pair-device > div { grid-template-columns: 1fr; gap: 3px; }
   .pair-actions .d-btn,
@@ -6997,7 +6768,7 @@ button.org-person-name {
 .home-card .d-dot { width: 9px; height: 9px; }
 
 /* ---- 窄屏：侧栏横排折叠 ---- */
-@media (max-width: 760px) {
+@media (max-width: 760px){
   .app-shell {
     width: 100%;
     max-width: 100%;
@@ -7248,19 +7019,10 @@ button.org-person-name {
   .charter-head {
     padding: 6px 8px;
   }
-  .role-board-head {
-    padding: 7px 9px;
-  }
-  .role-board-summary {
-    max-width: 52vw;
-    justify-content: flex-start;
-  }
-  .role-board-role-count {
-    display: none;
-  }
-  .role-board-body {
-    padding: 8px 9px 9px;
-  }
+  
+  
+  
+  
   .channel-panel-overlay {
     align-items: stretch;
     padding: 8px;
@@ -7286,13 +7048,8 @@ button.org-person-name {
     grid-template-columns: 1fr;
     align-items: stretch;
   }
-  .role-board-head {
-    align-items: flex-start;
-    gap: 8px;
-  }
-  .role-board-head p {
-    display: none;
-  }
+  
+  
   .mention-responsibility {
     max-width: 38vw;
   }
@@ -7368,7 +7125,7 @@ button.org-person-name {
   color: var(--t-body);
   overflow-wrap: anywhere;
 }
-@keyframes mention-toast-in {
+@keyframes mention-toast-in{
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: translateY(0); }
 }
@@ -7393,7 +7150,7 @@ button.org-person-name {
 
 /* At tablet and compact desktop widths, keep one useful header row by dropping
    copy already represented by the avatar/name. Primary account controls remain. */
-@media (min-width: 761px) and (max-width: 1100px) {
+@media (min-width: 761px) and (max-width: 1100px){
   .app-head {
     flex-wrap: nowrap;
     gap: 8px;
@@ -7411,7 +7168,7 @@ button.org-person-name {
 }
 
 /* 满铺框线布局：侧栏贴左带右框线，主区自己留白（桌面端；窄屏保留原媒体查询布局） */
-@media (min-width: 761px) {
+@media (min-width: 761px){
   .app-shell { gap: 0; padding: 0; }
   .app-side {
     padding: 14px 13px 16px;
@@ -7420,7 +7177,7 @@ button.org-person-name {
   }
   .app-main { padding: 10px 20px 14px; }
 }
-@media (max-width: 760px) {
+@media (max-width: 760px){
   .app-side { border-bottom: 1.6px solid var(--d-ink); background: var(--t-panel2); }
 }
 
@@ -7462,7 +7219,7 @@ button.org-person-name {
 .side-archived-toggle { font-family: var(--t-mono); }
 
 /* 窄屏横向频道条的滚动条别太粗 */
-@media (max-width: 760px) {
+@media (max-width: 760px){
   .side::-webkit-scrollbar { height: 6px; }
   .side::-webkit-scrollbar-thumb { border-width: 1px; }
 }
@@ -7747,84 +7504,6 @@ button.org-person-name {
 .composer-wake-tip .feature-tip-bubble { left: auto; right: 0; transform: none; }
 
 /* #187 agent 维度看板 */
-.agent-board-panel {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(220px, 1fr));
-  align-items: start;
-  gap: 10px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-.agent-board-empty { color: var(--t-muted); font-size: 13px; }
-.agent-board-lane {
-  min-width: 220px;
-  border: 1px solid var(--t-faint);
-  border-radius: 8px;
-  background: var(--t-faint, rgba(127, 127, 127, 0.06));
-  overflow: hidden;
-}
-.agent-board-lane-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--t-faint);
-}
-.agent-board-lane-title { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
-.agent-board-lane-count {
-  min-width: 20px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--t-panel, #fff);
-  color: var(--t-muted);
-  font-size: 11px;
-  text-align: center;
-}
-.agent-board-lane-cards { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
-.agent-board-lane-empty { margin: 8px 2px; color: var(--t-muted); font-size: 12px; text-align: center; }
-.agent-board-row {
-  border: 1px solid var(--t-faint);
-  border-left: 3px solid var(--t-faint);
-  border-radius: 6px;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.agent-board-row--busy { border-left-color: var(--p-busy); }
-.agent-board-row--blocked { border-left-color: var(--p-blocked); }
-.agent-board-row--idle { border-left-color: var(--t-green); }
-.agent-board-row--offline { opacity: 0.6; }
-.agent-board-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.agent-board-name { font-weight: 600; }
-.agent-board-status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--t-muted); }
-.agent-board-status--busy { color: var(--p-busy); }
-.agent-board-status--blocked { color: var(--p-blocked); }
-.agent-board-note { margin: 0; font-size: 12px; color: var(--t-muted); }
-.agent-board-counts { display: flex; gap: 12px; font-size: 12px; color: var(--t-muted); }
-.agent-board-count-blocked { color: var(--p-blocked); }
-.agent-board-task-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 3px 0 0;
-  padding: 7px 0 0;
-  border-top: 1px solid var(--t-faint);
-  list-style: none;
-}
-.agent-board-task {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 11px;
-  line-height: 1.35;
-}
-.agent-board-task-id { color: var(--t-muted); }
-.agent-board-task-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-board-task-state { color: var(--t-muted); font-size: 10px; white-space: nowrap; }
-.agent-board-task--blocked .agent-board-task-state { color: var(--p-blocked); }
 
 /* #273 全局设置面板 */
 .app-settings-btn,
@@ -7960,7 +7639,7 @@ button.org-person-name {
    聚焦时会强制放大整页。窄屏下统一提到 16px 抑制自动缩放，桌面端保持原字号
    密度不受影响。不要用 viewport 加 maximum-scale=1 的方案（破坏可访问性缩放）。
    ========================================================================== */
-@media (max-width: 760px) {
+@media (max-width: 760px){
   .settings-overlay { padding: 12px; }
   .settings-panel {
     max-height: calc(100vh - 24px);
@@ -8063,7 +7742,7 @@ button.org-person-name {
 }
 
 /* 极窄屏把编辑区与命令分两行，避免附件、提示和发送按钮挤掉正文输入宽度。 */
-@media (max-width: 400px) {
+@media (max-width: 400px){
   .composer {
     gap: 8px;
   }
@@ -8082,7 +7761,7 @@ button.org-person-name {
    可点区域提到 ≥36px，对齐既有 .chan-tool-btn 的 36px 基线。只在窄屏媒体块
    生效，桌面端视觉密度不变。
    ========================================================================== */
-@media (max-width: 760px) {
+@media (max-width: 760px){
   .chan-cat-btn {
     min-height: 36px;
     padding: 8px 10px;
@@ -8194,29 +7873,12 @@ button.org-person-name {
 .team-blog-tab--active { color: var(--t-text); border-bottom-color: var(--t-accent); font-weight: 700; }
 .team-blog-tab-no { color: var(--t-dim); font-size: 12px; }
 .team-blog-tab--active .team-blog-tab-no { color: var(--t-accent); }
-.team-blog-tab-badge {
-  padding: 0 5px; min-width: 18px; text-align: center;
-  border: 1.2px solid var(--t-faint); background: var(--t-panel);
-  color: var(--t-dim); font-size: 10.5px; line-height: 16px;
-}
-.team-blog-tab-badge--hot { color: var(--t-accent-ink); background: var(--t-accent); border-color: var(--t-accent); font-weight: 700; }
 
 .team-blog-panel { padding-top: 12px; }
 .team-blog-detail-back { margin-bottom: 2px; }
 
 /* #504 参考稿第二增量：分工卡与 Agent 状态板的信息密度。 */
-.team-blog .role-board {
-  border: 0;
-  box-shadow: none;
-  background: transparent;
-}
-.team-blog .role-board > .role-board-head {
-  padding: 0 0 10px;
-  border-bottom: 1px dashed var(--t-faint);
-  background: transparent;
-}
-.team-blog .role-board > .role-board-head h2 { display: none; }
-.team-blog .role-board-body { padding: 0; gap: 12px; }
+
 .team-blog .role-account-head { display: none; }
 .team-blog .role-account-group,
 .team-blog .role-account-list,
@@ -8241,18 +7903,11 @@ button.org-person-name {
 .team-blog .role-row--worker::before { background: var(--t-green); }
 .team-blog .role-row--reviewer::before { background: var(--d-blue); }
 .team-blog .role-live-dot,
-.agent-board-live-dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border: 1.2px solid var(--t-dim);
-  border-radius: 50%;
-  background: transparent;
-}
+
 .team-blog .role-live-dot.is-online { border-color: var(--t-green); background: var(--t-green); }
-.agent-board-live-dot.is-online { border-color: var(--t-green); background: var(--t-green); }
+
 .team-blog .role-owner { max-width: 118px; }
-.team-blog .role-text { white-space: normal; }
+
 .team-blog .role-edit-btn { padding: 3px 8px; font-size: 11px; }
 .role-unassigned-fold {
   border: 1.5px dashed var(--t-faint);
@@ -8279,80 +7934,6 @@ button.org-person-name {
   color: var(--t-text);
 }
 
-.team-blog .agent-board-panel {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  overflow: visible;
-}
-.agent-board-overview {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 7px;
-  border-bottom: 1px dashed var(--t-faint);
-}
-.agent-board-summary { color: var(--t-dim); font-size: 11px; }
-.team-blog .agent-board-lane {
-  min-width: 0;
-  border: 1.5px solid var(--t-border);
-  border-radius: 0;
-  background: var(--t-panel);
-}
-.team-blog .agent-board-lane--idle,
-.team-blog .agent-board-lane--offline { grid-column: 1 / -1; }
-.team-blog .agent-board-lane-head { padding: 7px 9px; border-color: var(--t-faint); }
-.team-blog details.agent-board-lane > summary { cursor: pointer; list-style: none; }
-.team-blog details.agent-board-lane > summary::-webkit-details-marker { display: none; }
-.team-blog details.agent-board-lane > summary::before { content: "▸"; color: var(--t-dim); }
-.team-blog details.agent-board-lane[open] > summary::before { content: "▾"; }
-.agent-board-handoff-count { margin-left: auto; color: var(--t-dim); font-size: 10.5px; }
-.team-blog .agent-board-lane-cards { padding: 9px; }
-.team-blog .agent-board-lane--idle .agent-board-lane-cards {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-.team-blog .agent-board-lane--offline .agent-board-lane-cards { gap: 0; }
-.team-blog .agent-board-row {
-  border: 1.4px solid var(--t-border);
-  border-left-width: 4px;
-  border-radius: 0;
-  background: var(--t-panel);
-  padding: 9px 10px;
-}
-.team-blog .agent-board-row--offline {
-  display: grid;
-  grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr) auto;
-  align-items: center;
-  border-width: 0 0 1px;
-  border-color: var(--t-faint);
-  opacity: 0.72;
-}
-.team-blog .agent-board-row--offline:last-child { border-bottom: 0; }
-.team-blog .agent-board-row--offline .agent-board-row-head { justify-content: flex-start; }
-.team-blog .agent-board-row--offline .agent-board-note { margin: 0; }
-.team-blog .agent-board-row--offline .agent-board-task-list { grid-column: 1 / -1; }
-.team-blog .agent-board-name { display: inline-flex; align-items: center; gap: 7px; font-family: var(--t-mono); }
-.agent-board-name--button {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: inherit;
-  cursor: pointer;
-}
-.agent-board-name--button:hover { color: var(--t-accent); }
-.team-blog .agent-board-lane-empty {
-  margin: 0;
-  padding: 8px;
-  border: 1px dashed var(--t-faint);
-  text-align: left;
-}
-
-.team-runtime,
 .timeline-tools { display: grid; gap: 14px; }
 .focus-overview .host-board-panel {
   margin: 0;
@@ -8373,38 +7954,9 @@ button.org-person-name {
   border-top: 1px dashed var(--t-faint);
 }
 
-@media (max-width: 820px) {
-  .team-blog .role-row--card { grid-template-columns: minmax(0, 1fr); }
-  .team-blog .agent-board-panel { grid-template-columns: 1fr; }
-  .team-blog .agent-board-lane,
-  .team-blog .agent-board-lane--idle,
-  .team-blog .agent-board-lane--offline { grid-column: 1; }
-  .team-blog .agent-board-lane--idle .agent-board-lane-cards { grid-template-columns: 1fr; }
-  .team-blog .agent-board-row--offline { grid-template-columns: 1fr; }
-  .agent-board-overview { align-items: flex-start; flex-direction: column; }
-}
-
-/* #504 还原度修复：看板空态与 lane 标题贴合设计源码。 */
 /* 空的忙/阻塞：去掉框和标题条，压成一行虚线占位（设计的 "忙 · 0 — 空"）。 */
-.team-blog .agent-board-lane[data-empty="true"] { border: 0; background: transparent; }
-.team-blog .agent-board-lane[data-empty="true"] .agent-board-lane-head { display: none; }
-.team-blog .agent-board-lane[data-empty="true"] .agent-board-lane-cards { padding: 0; }
-.team-blog .agent-board-lane[data-empty="true"] .agent-board-lane-empty {
-  margin: 0; padding: 8px 12px; border: 1.5px dashed var(--t-faint);
-  color: var(--t-muted); text-align: left; font-size: 12px;
-}
+
 /* 非空 lane（忙/阻塞/空闲）：标题改小 pill，不再通栏大条；离线折叠标题不动。 */
-.team-blog .agent-board-lane:not(.agent-board-lane--offline):not([data-empty="true"]) .agent-board-lane-head {
-  border-bottom: 0; padding: 9px 9px 0;
-}
-.team-blog .agent-board-lane:not(.agent-board-lane--offline) .agent-board-lane-title {
-  display: inline-block; padding: 1px 8px; border: 1.5px solid var(--t-border);
-  font-size: 11.5px; text-transform: none; letter-spacing: 0; font-weight: 600;
-}
-.team-blog .agent-board-lane--idle .agent-board-lane-title { background: var(--d-green-soft); }
-.team-blog .agent-board-lane--busy .agent-board-lane-title { background: var(--d-amber-soft); }
-.team-blog .agent-board-lane--blocked .agent-board-lane-title { background: var(--d-red-soft); }
-.team-blog .agent-board-lane:not(.agent-board-lane--offline) .agent-board-lane-count { border: 0; background: transparent; color: var(--t-dim); }
 
 /* #504 任务面板「博客风」头部 + $ grep 筛选栏，对齐 任务面板 博客风.dc.html。 */
 .task-blog-head {
@@ -8577,7 +8129,7 @@ button.org-person-name {
 .task-source-link:hover:not(:disabled) { background: var(--d-yellow); }
 .task-source-link:disabled { color: var(--t-faint); cursor: not-allowed; }
 
-@media (max-width: 760px) {
+@media (max-width: 760px){
   .task-blog-head { align-items: flex-start; }
   .task-blog-head-actions { width: 100%; margin-left: 0; }
   .task-card-open { grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; }
@@ -8785,7 +8337,7 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .roster-doing { display: flex; flex-wrap: wrap; gap: 6px; }
 .roster-actions { flex: none; display: flex; align-items: center; gap: 6px; }
 .roster-reconnect { font-size: 12px; padding: 3px 10px; }
-@media (max-width: 640px) {
+@media (max-width: 640px){
   .roster-row { flex-wrap: wrap; }
   .roster-actions { width: 100%; justify-content: flex-end; }
 }
@@ -8815,11 +8367,11 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-card--waiting { border-left-color: var(--d-amber, #b7791f); }
 .team-card--idle { border-left-color: var(--d-blue, #2b6cb0); }
 .team-card--offline { border-left-color: var(--t-faint); opacity: 0.85; }
-.team-card-head { display: flex; align-items: flex-start; gap: 8px; }
+.team-card-head { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 8px; }
 .team-card-ava { width: 30px; height: 30px; border-radius: 50%; flex: none; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; font-size: 12px; font-weight: 600; background: var(--t-panel); color: var(--t-muted); }
 .team-card-ava img { width: 100%; height: 100%; object-fit: cover; }
 .team-card-ava--agent { border-radius: 8px; }
-.team-card-id { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.team-card-id { flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .team-card-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 12.5px; color: var(--t-muted); }
 .team-card-name { font-size: 14px; font-weight: 600; color: var(--t-text); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
 .team-card-name:hover { text-decoration: underline; }
@@ -8832,7 +8384,8 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-card-resp { color: var(--t-text); }
 .team-card-unconfirmed { display: inline-flex; align-items: center; gap: 6px; color: var(--d-amber, #b7791f); }
 .team-card-rel, .team-card-squad { color: var(--t-muted); }
-.team-card-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+/* 按钮放不下时整组换到下一行靠右，别把名字/职责挤成竖排 */
+.team-card-actions { flex: 0 0 auto; margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .team-card-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; color: var(--t-muted); }
 .team-card-doing, .team-card-work { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; }
 .team-card-task { background: none; border: 0; padding: 0; color: var(--t-text); font: inherit; cursor: pointer; text-align: left; }
@@ -8863,7 +8416,7 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-unassigned-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; }
 .team-unassigned-assign { font: inherit; padding: 2px 6px; border: 1px solid var(--t-border); border-radius: 6px; background: var(--t-bg); color: var(--t-text); }
 
-@media (max-width: 640px) {
+@media (max-width: 640px){
   .team-lane-cards { grid-template-columns: 1fr; }
   .team-card-edit { grid-template-columns: 1fr; }
 }
@@ -8891,3 +8444,37 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-board-filter { margin: 0; font-size: 12.5px; color: var(--t-muted); display: flex; gap: 8px; }
 .team-card-hostbtn { color: var(--d-amber, #b7791f); }
 @media (max-width: 640px) { .team-squad-form { grid-template-columns: 1fr; } }
+
+/* AgentDetailModal 仍在用这几组类（历史命名沿用自旧 agent 看板） */
+.agent-board-name { font-weight: 600; }
+.agent-board-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 3px 0 0;
+  padding: 7px 0 0;
+  border-top: 1px solid var(--t-faint);
+  list-style: none;
+}
+.agent-board-task {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.agent-board-task-id { color: var(--t-muted); }
+.agent-board-task-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-board-task-state { color: var(--t-muted); font-size: 10px; white-space: nowrap; }
+.agent-board-task--blocked .agent-board-task-state { color: var(--p-blocked); }
+.agent-board-name--button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.agent-board-name--button:hover { color: var(--t-accent); }
