@@ -9,7 +9,8 @@ mock.module("dompurify", () => ({
   default: { addHook: () => {}, sanitize: (value: string) => value },
 }));
 
-const { TaskLedgerPanel, TeamPanel, isTaskLedgerStatusNote } = await import("./Channel");
+const { TaskLedgerPanel, isTaskLedgerStatusNote } = await import("./Channel");
+const { TeamPanel } = await import("../components/team/TeamPanel");
 
 // #204 P1②：判定哪些 system status 触发任务台账刷新（多客户端一致性）。
 describe("isTaskLedgerStatusNote (#204 P1②)", () => {

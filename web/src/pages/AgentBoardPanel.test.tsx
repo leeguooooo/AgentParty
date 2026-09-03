@@ -4,12 +4,12 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { MsgFrame, PresenceEntry, PublicDirectedDelivery, Sender, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 
+const { AgentBoardPanel } = await import("../components/team/AgentBoardPanel");
 const {
-  AgentBoardPanel,
   agentPresenceSummary,
   teamMemberOnlineNames,
   teamMemberPresenceSummary,
-} = await import("./Channel");
+} = await import("../components/team/agentBoard");
 
 function memoryStorage(seed: Record<string, string> = {}): Storage {
   const values = new Map<string, string>(Object.entries(seed));

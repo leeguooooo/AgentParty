@@ -13,7 +13,19 @@ const catchupSource = readFileSync(
   resolve(import.meta.dir, "../../components/CatchupPanel.tsx"),
   "utf8",
 );
-const localizedSurfaceSource = `${source}\n${hostBoardSource}\n${catchupSource}`;
+const divisionBoardSource = readFileSync(
+  resolve(import.meta.dir, "../../components/team/DivisionBoard.tsx"),
+  "utf8",
+);
+const teamPanelSource = readFileSync(
+  resolve(import.meta.dir, "../../components/team/TeamPanel.tsx"),
+  "utf8",
+);
+const agentBoardPanelSource = readFileSync(
+  resolve(import.meta.dir, "../../components/team/AgentBoardPanel.tsx"),
+  "utf8",
+);
+const localizedSurfaceSource = `${source}\n${hostBoardSource}\n${catchupSource}\n${divisionBoardSource}\n${teamPanelSource}\n${agentBoardPanelSource}`;
 
 const REQUIRED_KEYS = [
   "Channel.banner.archived",
