@@ -271,8 +271,7 @@ export function mentionCandidates(
       || a.display.localeCompare(b.display)
     )
     .map(({ sourceName: _sourceName, ...candidate }) => candidate);
-  const squadCandidates: MentionCandidate[] = squads
-    .filter((squad) => squad.name !== self && squad.name !== "system")
+  const squadCandidates: MentionCandidate[] = squads.filter((squad) => squad != null && squad.name !== self && squad.name !== "system")
     .map((squad) => ({
       name: squad.name,
       display: squad.title && squad.title !== "" ? squad.title : squad.name,

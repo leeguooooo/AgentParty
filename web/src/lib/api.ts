@@ -699,6 +699,16 @@ async function squadWriteError(res: Response, what: string): Promise<never> {
   throw new Error(`${what} failed (${res.status})`);
 }
 
+// 增改接口的响应既可能是 { squad } 也可能是裸记录；两种都认，认不出就抛错，绝不把 undefined 交给调用方。
+function squadFromResponse(data: unknown, what: string): ChannelSquad {
+  const obj = data as { squad?: ChannelSquad; name?: unknown } | null;
+  const squad = obj?.squad ?? (typeof obj?.name === "string" ? (obj as ChannelSquad) : undefined);
+  if (squad === undefined || typeof squad.name !== "string" || !Array.isArray(squad.members)) {
+    throw new Error(`${what} returned an unexpected body`);
+  }
+  return squad;
+}
+
 // #1060 PR C：squad 的增删改（worker 早有路由，web 之前只读）。members 是整体替换，不是追加。
 export async function createSquad(token: string, slug: string, name: string, body: SquadWriteBody): Promise<ChannelSquad> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/squads`, {
@@ -707,8 +717,7 @@ export async function createSquad(token: string, slug: string, name: string, bod
     body: JSON.stringify({ name, ...body }),
   });
   if (!res.ok) await squadWriteError(res, `POST /api/channels/${slug}/squads`);
-  const data = (await res.json()) as { squad: ChannelSquad };
-  return data.squad;
+  return squadFromResponse(await res.json(), `POST /api/channels/${slug}/squads`);
 }
 
 export async function updateSquad(token: string, slug: string, name: string, body: SquadWriteBody): Promise<ChannelSquad> {
@@ -718,8 +727,7 @@ export async function updateSquad(token: string, slug: string, name: string, bod
     body: JSON.stringify(body),
   });
   if (!res.ok) await squadWriteError(res, `PATCH /api/channels/${slug}/squads/${name}`);
-  const data = (await res.json()) as { squad: ChannelSquad };
-  return data.squad;
+  return squadFromResponse(await res.json(), `PATCH /api/channels/${slug}/squads/${name}`);
 }
 
 export async function deleteSquad(token: string, slug: string, name: string): Promise<void> {
