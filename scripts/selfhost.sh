@@ -20,6 +20,12 @@ MIN_NODE_MAJOR=22
 
 REPO="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 DATA_DIR="${AGENTPARTY_SELFHOST_DATA:-$REPO/.selfhost-state}"
+# Wrangler 在 launch() 里会 cd 到 worker/。相对状态目录若不在这里固定，预检/迁移和
+# 运行时会悄悄落到两个不同目录（例如调用方的 state 与 worker/state）。
+case "$DATA_DIR" in
+  /*) ;;
+  *) DATA_DIR="$(pwd -P)/$DATA_DIR" ;;
+esac
 HOST="${AGENTPARTY_SELFHOST_HOST:-0.0.0.0}"
 PORT="${AGENTPARTY_SELFHOST_PORT:-8787}"
 LOG="${AGENTPARTY_SELFHOST_LOG:-$DATA_DIR/worker.log}"
@@ -71,12 +77,20 @@ wrangler_js() {
   printf '%s' "$found"
 }
 
-migrate() {
-  preflight
+prepare_data_dir() {
   ( umask 077; mkdir -p "$DATA_DIR" )
   chmod 700 "$DATA_DIR"
+}
+
+apply_migrations() {
   note "应用 D1 迁移到 $DATA_DIR"
   ( cd "$REPO/worker" && node "$(wrangler_js)" d1 migrations apply agentparty --local --persist-to "$DATA_DIR" )
+}
+
+migrate() {
+  preflight
+  prepare_data_dir
+  apply_migrations
 }
 
 # 版本元数据：注入到 /api/health 的 version / commit / deployed_at。
@@ -88,14 +102,14 @@ repo_version() {
 }
 repo_commit() { git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unknown'; }
 
-# start 与 run 的公共前置：预检、数据目录、secret、迁移、.dev.vars。
-prepare() {
+# 所有运行模式的公共前置：预检、数据目录、secret、.dev.vars。
+# 迁移刻意不放在这里：受 supervisor 托管的 `serve` 会在 Wrangler 意外退出后频繁重跑，
+# 恢复路径不应重复执行只在安装/升级时需要的 schema 工作（#1061）。
+prepare_runtime() {
   preflight
   # D1 里存着**所有 token**，DO 存储里是频道全部内容：只给属主（真机实测改之前是 0755/0644）。
-  ( umask 077; mkdir -p "$DATA_DIR" )
-  chmod 700 "$DATA_DIR"
+  prepare_data_dir
   [ -n "${AGENTPARTY_ADMIN_SECRET:-}" ] || die "必须设 AGENTPARTY_ADMIN_SECRET —— 自部署没有任何登录方式，第一个 token 只能靠它铸出来（见 docs/self-host-intranet.md）。"
-  migrate
   # 凭据**绝不进 argv**：`ps -axww` 同机任何用户都看得见（真机实测：改之前那里明文躺着
   # ADMIN_SECRET，而它能铸任意 token）。改用 wrangler 的 .dev.vars，0600 只给属主。
   vars="$REPO/worker/.dev.vars"
@@ -103,8 +117,14 @@ prepare() {
   chmod 600 "$vars"
 }
 
+# start 与 run 保持一条命令即可首次启动的兼容行为：准备运行时后应用迁移。
+prepare() {
+  prepare_runtime
+  apply_migrations
+}
+
 # 用 workerd 替换当前进程（exec）：调用方的 pid 就是 worker 的 pid，退出码原样透传。
-# `run` 直接用它（systemd Type=exec / 容器入口）；`start` 通过 `_launch` 在后台用它。
+# `run` / `serve` 直接用它（systemd Type=exec / 容器入口）；`start` 通过 `_launch` 在后台用它。
 launch() {
   W="$(wrangler_js)"
   version="$(repo_version)"
@@ -120,6 +140,14 @@ launch() {
 run() {
   prepare
   note "前台启动 workerd（$HOST:${PORT}，数据在 ${DATA_DIR}）；日志走标准输出"
+  launch
+}
+
+# 给 systemd / launchd / 容器 supervisor 的快速恢复入口。安装或升级时必须先单独 migrate；
+# 意外退出后的自动重启只走这里，不再把 schema 迁移放进每次 crash recovery 的关键路径。
+serve() {
+  prepare_runtime
+  note "前台启动 workerd（不执行迁移，$HOST:${PORT}，数据在 ${DATA_DIR}）；日志走标准输出"
   launch
 }
 
@@ -189,17 +217,18 @@ status() {
 
 usage() {
   cat <<EOF
-usage: $0 <start|stop|status|run|migrate|preflight>
+usage: $0 <start|stop|status|run|serve|migrate|preflight>
 
   start      后台启动（pidfile + 日志文件），配合 stop / status
-  run        前台启动，日志走标准输出；给 systemd（Type=exec）或容器入口用
+  run        前台启动，自动迁移后运行；适合首次启动或手工运行
+  serve      前台启动，不执行迁移；先 migrate，给 supervisor 的自动重启入口用
   stop       停掉 start 起的那个进程（只认自己的 pidfile，不碰别的进程）
   status     进程与 /api/health
   migrate    只应用 D1 迁移
   preflight  只做预检（Node 版本、web 产物）
 
 环境变量：
-  AGENTPARTY_ADMIN_SECRET   必填（start / run）。铸第一个 token 用，见 docs/self-host-intranet.md
+  AGENTPARTY_ADMIN_SECRET   必填（start / run / serve）。铸第一个 token 用，见 docs/self-host-intranet.md
   AGENTPARTY_SELFHOST_DATA  状态目录，默认 <repo>/.selfhost-state（备份就备份它）
   AGENTPARTY_SELFHOST_HOST  默认 0.0.0.0
   AGENTPARTY_SELFHOST_PORT  默认 8787
@@ -209,6 +238,7 @@ EOF
 case "${1:-}" in
   start) start ;;
   run) run ;;
+  serve) serve ;;
   _launch) launch ;;
   stop) stop ;;
   status) status ;;

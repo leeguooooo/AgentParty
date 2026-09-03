@@ -177,15 +177,16 @@ party send dev "hello from the intranet"
 ### 服务命令
 
 ```sh
-sh scripts/selfhost.sh run        # 前台：预检、迁移、exec 运行时（给 systemd / 容器用）
-sh scripts/selfhost.sh start      # 后台：同上，然后脱离终端，记录 pidfile 和日志文件
+sh scripts/selfhost.sh run        # 前台：预检、迁移、exec 运行时（首次或手工运行）
+sh scripts/selfhost.sh serve      # 前台：预检、不迁移（给 supervisor 自动重启用）
+sh scripts/selfhost.sh start      # 后台：预检、迁移，然后脱离终端，记录 pidfile 和日志文件
 sh scripts/selfhost.sh stop       # 停掉 pidfile 记录的那个进程
 sh scripts/selfhost.sh status     # 进程与 /api/health
 sh scripts/selfhost.sh migrate    # 只应用未执行的 D1 迁移
 sh scripts/selfhost.sh preflight  # 只检查前置条件，不启动
 ```
 
-`run` 会用运行时进程替换当前 shell，因此拉起它的托管程序拿到的是真实 pid 和真实退出码。`start` 和 `stop` 用于交互场景；`stop` 只向自己拉起的进程发信号，并且会先核对记录的 pid 仍然属于本实例。两者都不用 `pkill`，同机上其他 workerd 进程不受影响。
+`run` 和 `serve` 都会用运行时进程替换当前 shell，因此拉起它们的托管程序拿到的是真实 pid 和真实退出码。`run` 会先应用迁移；`serve` 假定迁移已在安装或升级时完成。`start` 和 `stop` 用于交互场景；`stop` 只向自己拉起的进程发信号，并且会先核对记录的 pid 仍然属于本实例。两者都不用 `pkill`，同机上其他 workerd 进程不受影响。
 
 ### 用 systemd 托管
 
@@ -201,9 +202,9 @@ Type=exec
 WorkingDirectory=/opt/agentparty/repo
 EnvironmentFile=/etc/agentparty/selfhost.env
 Environment=PATH=/opt/node22/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/bin/sh scripts/selfhost.sh run
+ExecStart=/bin/sh scripts/selfhost.sh serve
 SuccessExitStatus=143
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
@@ -211,10 +212,14 @@ WantedBy=multi-user.target
 ```
 
 ```sh
+set -a; . /etc/agentparty/selfhost.env; set +a
+sh scripts/selfhost.sh migrate
 systemctl daemon-reload
 systemctl enable --now agentparty
 systemctl status agentparty
 ```
+
+服务首次启动前及每次升级后只运行一次 `migrate`。unit 刻意使用不执行迁移的 `serve`：Wrangler 意外退出时，systemd 可以直接恢复 HTTP 服务，不把未变化的 schema 迁移放进恢复关键路径。`Restart=always` 是 [cloudflare/workers-sdk#14926](https://github.com/cloudflare/workers-sdk/issues/14926) 的临时缓解；该上游问题会让一次本可恢复的内部连接中断仍然终止 `wrangler dev`。macOS 上的等价 launchd 服务应设置 `KeepAlive=true` 并调用 `selfhost.sh serve`，安装和升级时同样手工运行 `migrate`。
 
 systemd 用 `SIGTERM` 停止服务时运行时以状态码 143 退出，`SuccessExitStatus=143` 让它被记为正常停止。`bun` 只在构建时需要，运行时不需要，所以不必加进服务的 `PATH`。
 
@@ -243,7 +248,9 @@ git fetch --tags origin
 git checkout "$(git describe --tags --abbrev=0 origin/main)"
 bun install --frozen-lockfile
 ( cd web && bunx vite build )
-systemctl start agentparty          # 运行时起来之前会先应用新迁移
+set -a; . /etc/agentparty/selfhost.env; set +a
+sh scripts/selfhost.sh migrate      # 只应用一次本版本的新迁移
+systemctl start agentparty          # serve 启动时不重复迁移
 curl -s http://127.0.0.1:8787/api/health   # "version" 必须是新版本号
 sh scripts/selfhost-smoke.sh
 ```
@@ -288,6 +295,7 @@ server {
 | --- | --- | --- |
 | 端口在监听、TCP 能连上、所有请求挂住，零字节且日志无记录 | Node.js 低于 22。workerd 通过一个 supervisor 进程解析 D1/R2/DO 绑定，旧 Node 上它静默失败。用 bun 当 supervisor 效果相同。 | 按[安装](#安装)一节装 Node 22。`selfhost.sh` 在旧 Node 上会拒绝启动，就是为了挡住这个问题。 |
 | `POST /api/tokens` 返回 500，日志里只有这个 500 | 数据库迁移没有应用 | `sh scripts/selfhost.sh migrate` 后重启。`start` 会自动做这一步。 |
+| Wrangler 记录 `Error in ProxyController`、`Network connection lost` 后退出，页面显示「Failed to load channel list」 | 上游 Wrangler 回归 [cloudflare/workers-sdk#14926](https://github.com/cloudflare/workers-sdk/issues/14926)；持久化数据通常完好，但 HTTP 进程已退出 | 按上文用 supervisor 自动重启，并以 `selfhost.sh serve` 作为启动命令。只在安装或升级时单独运行 `migrate`。 |
 | 密钥正确却提示 `invalid admin secret` | 引导请求用了 `Authorization: Bearer` | 改用 `x-admin-secret` 请求头。 |
 | 启动时提示 `selfhost: web 还没构建` | Web 界面没有构建 | `( cd web && bunx vite build )`。如果 shell 的 `PATH` 里旧 Node 排在前面，用 `bun --bun x vite build`。 |
 | `stop` 拒绝执行：pid 已经不是我们的 wrangler | 上次非正常退出后 pidfile 里的 pid 被别的进程复用 | 确认没有我们的进程在跑（`pgrep -f "wrangler[.]js dev"`），删掉 pidfile，重新启动。 |
@@ -299,7 +307,7 @@ server {
 ## 限制
 
 - **单节点。** Durable Object「每个频道只有一个实例」的保证只在单进程内成立。两个实例共用一个状态目录不受支持，会损坏数据。高可用需要主备架构，配合共享或复制的状态目录和外部故障切换。
-- **运行模式。** 实例运行在 `wrangler dev --local` 下。它长时间运行是稳定的，上文的验证也是这样做的，但这不是 Cloudflare 官方支持的生产形态。目前没有提供独立的 `workerd serve` 配置。
+- **运行模式。** 实例运行在 `wrangler dev --local` 下，这不是 Cloudflare 官方支持的生产形态。Wrangler 4.114.0 到当前 4.128.0 存在一个尚未修复的崩溃恢复回归（[workers-sdk#14926](https://github.com/cloudflare/workers-sdk/issues/14926)），因此持久部署需要采用上面的 supervisor 配置。AgentParty 升级到包含上游修复的 Wrangler/Miniflare 后，应移除这套临时的自动重启/迁移分离方案，恢复标准的 `selfhost.sh run` 路径。目前没有提供独立的 `workerd serve` 配置。
 - **没有 SSO。** 只能用 token 登录。OIDC 可以通过 worker 的环境变量配置，但启动脚本没有覆盖这部分。
 - **发布流水线。** 版本的构建和部署面向 Cloudflare。私有实例的升级是[升级](#升级)一节里的手工流程。
 

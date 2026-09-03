@@ -205,16 +205,18 @@ v0.2.242 or newer; an older shell keeps rejecting non-loopback `http://` even af
 ### Service commands
 
 ```sh
-sh scripts/selfhost.sh run        # foreground: preflight, migrate, exec the runtime (for systemd / containers)
-sh scripts/selfhost.sh start      # background: same, then detach with a pidfile and log file
+sh scripts/selfhost.sh run        # foreground: preflight, migrate, exec the runtime (first/manual run)
+sh scripts/selfhost.sh serve      # foreground: preflight, no migration (supervisor restart path)
+sh scripts/selfhost.sh start      # background: preflight, migrate, then detach with a pidfile and log file
 sh scripts/selfhost.sh stop       # stop the process recorded in the pidfile
 sh scripts/selfhost.sh status     # pid and /api/health
 sh scripts/selfhost.sh migrate    # apply pending D1 migrations only
 sh scripts/selfhost.sh preflight  # check prerequisites without starting
 ```
 
-`run` replaces the shell with the runtime process, so the supervisor that launched it owns the
-real pid and receives the real exit status. `start` and `stop` are for interactive use; `stop`
+`run` and `serve` replace the shell with the runtime process, so the supervisor that launched one
+owns the real pid and receives the real exit status. `run` applies migrations first; `serve`
+assumes migrations were already applied during installation or upgrade. `start` and `stop` are for interactive use; `stop`
 only signals the process it started and verifies that the recorded pid still belongs to this
 instance. Neither uses `pkill`, so other workerd processes on the host are unaffected.
 
@@ -232,9 +234,9 @@ Type=exec
 WorkingDirectory=/opt/agentparty/repo
 EnvironmentFile=/etc/agentparty/selfhost.env
 Environment=PATH=/opt/node22/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/bin/sh scripts/selfhost.sh run
+ExecStart=/bin/sh scripts/selfhost.sh serve
 SuccessExitStatus=143
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
@@ -242,10 +244,20 @@ WantedBy=multi-user.target
 ```
 
 ```sh
+set -a; . /etc/agentparty/selfhost.env; set +a
+sh scripts/selfhost.sh migrate
 systemctl daemon-reload
 systemctl enable --now agentparty
 systemctl status agentparty
 ```
+
+Run `migrate` once before the service's first start and after each code upgrade. The unit deliberately
+uses `serve`, which does not migrate: if Wrangler exits unexpectedly, systemd can restore the HTTP
+service without putting an unchanged schema migration in the recovery path. `Restart=always` is a
+temporary mitigation for [cloudflare/workers-sdk#14926](https://github.com/cloudflare/workers-sdk/issues/14926),
+where a recoverable internal connection loss can still terminate `wrangler dev`. On macOS, the
+equivalent launchd service should use `KeepAlive=true` and invoke `selfhost.sh serve`; run `migrate`
+manually on install and upgrade in the same way.
 
 The runtime exits with status 143 when systemd stops it with `SIGTERM`; `SuccessExitStatus=143`
 records that as a clean stop. `bun` is not needed at run time, only for builds, so it does not
@@ -281,7 +293,9 @@ git fetch --tags origin
 git checkout "$(git describe --tags --abbrev=0 origin/main)"
 bun install --frozen-lockfile
 ( cd web && bunx vite build )
-systemctl start agentparty          # applies new migrations before the runtime comes up
+set -a; . /etc/agentparty/selfhost.env; set +a
+sh scripts/selfhost.sh migrate      # apply this release's migrations exactly once
+systemctl start agentparty          # serve starts without re-running migrations
 curl -s http://127.0.0.1:8787/api/health   # "version" must show the new release
 sh scripts/selfhost-smoke.sh
 ```
@@ -339,6 +353,7 @@ Clients then use `--server https://agentparty.example.internal`.
 | --- | --- | --- |
 | Port is listening, TCP connects, every request hangs with no bytes and no log line | Node.js older than 22. workerd resolves its D1/R2/DO bindings through a supervisor process that silently fails on old Node. Using bun as the supervisor has the same effect. | Install Node 22 as in [Installation](#installation). `selfhost.sh` refuses to start on old Node for this reason. |
 | `POST /api/tokens` returns 500; the log shows only the 500 | Database migrations not applied | `sh scripts/selfhost.sh migrate`, then restart. `start` does this automatically. |
+| Wrangler logs `Error in ProxyController`, `Network connection lost`, then exits; the UI says "Failed to load channel list" | Upstream Wrangler regression [cloudflare/workers-sdk#14926](https://github.com/cloudflare/workers-sdk/issues/14926); persisted data is normally intact but the HTTP process is gone | Run under a supervisor with automatic restart and use `selfhost.sh serve` as shown above. Run `migrate` separately only on install or upgrade. |
 | `invalid admin secret` although the secret is correct | Bootstrap request sent with `Authorization: Bearer` | Use the `x-admin-secret` header. |
 | `selfhost: web 还没构建` on start | Web UI not built | `( cd web && bunx vite build )`. If the shell still has an old Node first in `PATH`, use `bun --bun x vite build`. |
 | `stop` refuses: pid is no longer our wrangler | The pid in the pidfile was reused by another process after an unclean shutdown | Confirm nothing of ours is running (`pgrep -f "wrangler[.]js dev"`), delete the pidfile, start again. |
@@ -354,9 +369,12 @@ and prints the fix.
   process. Running two instances against a shared state directory is unsupported and will corrupt
   data. High availability requires an active/passive setup with a shared or replicated state
   directory and external failover.
-- **Runtime mode.** The instance runs under `wrangler dev --local`. It is stable over long uptimes
-  and is what the verification above used, but it is not the configuration Cloudflare supports for
-  production. A standalone `workerd serve` configuration is not provided yet.
+- **Runtime mode.** The instance runs under `wrangler dev --local`, which is not a Cloudflare-supported
+  production configuration. Wrangler 4.114.0 through the current 4.128.0 have an open crash-recovery
+  regression ([workers-sdk#14926](https://github.com/cloudflare/workers-sdk/issues/14926)), so persistent
+  installations need the supervisor setup above. Once AgentParty ships a Wrangler/Miniflare version
+  containing that fix, remove this temporary restart/migration split from the service setup and use the
+  standard `selfhost.sh run` path again. A standalone `workerd serve` configuration is not provided yet.
 - **No SSO.** Sign-in is by token only. OIDC providers can be configured through the worker's
   environment, but this is not covered by the launcher.
 - **Release pipeline.** Releases are built and deployed for Cloudflare. Self-hosted upgrades are
