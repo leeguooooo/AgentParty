@@ -137,6 +137,34 @@ describe("buildTeamBoard：一张卡一份事实", () => {
     expect(model.cards.filter((c) => c.kind === "agent").map((c) => c.name).sort()).toEqual(["bot-1", "bot-2"]);
   });
 
+  test("#1067 回归：角色指向被折叠的次级会话时，不会被误判成「无人认领」", () => {
+    const model = buildTeamBoard({
+      presence: [
+        presence("leo-a", { kind: "human", state: "online" as never, handle: "leo", display_name: "Leo", account: "acct-leo" } as never),
+        presence("leo-b", { kind: "human", state: "offline", handle: "leo", account: "acct-leo" } as never),
+      ],
+      participants: [sender("leo-a", "human"), sender("leo-b", "human")],
+      roles: [role("leo-b", "host", { responsibility: "主持" })],
+      now: NOW,
+    });
+    expect(model.unassignedRoles).toEqual([]);
+    expect(model.counts.unassignedRoles).toBe(0);
+    expect(model.cards.filter((c) => c.kind === "human")).toHaveLength(1);
+  });
+
+  test("#1067：只差大小写的两个账号仍是两个人", () => {
+    const model = buildTeamBoard({
+      presence: [
+        presence("a", { kind: "human", state: "online" as never, account: "Acct" } as never),
+        presence("b", { kind: "human", state: "online" as never, account: "acct" } as never),
+      ],
+      participants: [sender("a", "human"), sender("b", "human")],
+      roles: [],
+      now: NOW,
+    });
+    expect(model.cards.filter((c) => c.kind === "human")).toHaveLength(2);
+  });
+
   test("memberNames 限定成员全集", () => {
     const limited = buildTeamBoard({
       presence: [presence("lead"), presence("stranger")],

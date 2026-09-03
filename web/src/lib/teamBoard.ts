@@ -347,11 +347,17 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
   const personRows = buildPersonRows<TeamCard>(cards, {
     rank: (card) => LANE_ORDER[card.lane] * 10 + (card.online ? 0 : 1),
   });
-  const merged: TeamCard[] = personRows.map((row) => {
+  const merged: TeamCard[] = [];
+  // 折叠后仍要能按「任意会话名」找回代表卡：角色行、未认领判定都按会话名读。
+  const cardBySessionName = new Map<string, TeamCard>();
+  for (const row of personRows) {
     const [primary, ...rest] = row.sessions;
-    if (rest.length === 0 && row.accountCount <= 1) return primary!;
-    return { ...primary!, display: row.display, owner: row.owner, otherSessions: rest, accountCount: row.accountCount };
-  });
+    const card = rest.length === 0 && row.accountCount <= 1
+      ? primary!
+      : { ...primary!, display: row.display, owner: row.owner, otherSessions: rest, accountCount: row.accountCount };
+    merged.push(card);
+    for (const session of row.sessions) cardBySessionName.set(session.name, card);
+  }
   cards.length = 0;
   cards.push(...merged);
 
@@ -365,7 +371,8 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
   );
 
   // 未认领角色：角色表里有、成员卡里没有（指向的人不在频道）。
-  const cardNames = new Set(cards.map((card) => card.name));
+  // 含被折叠的会话名——否则角色指向次级会话时会被误判成「无人认领」。
+  const cardNames = new Set(cardBySessionName.keys());
   const unassignedRoles: TeamUnassignedRole[] = roles
     .filter((role) => !cardNames.has(role.name))
     .map((role) => ({

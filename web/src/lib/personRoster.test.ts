@@ -19,6 +19,8 @@ describe("名单按人聚合（#1067）", () => {
   test("锚点优先级：handle > account/owner > name", () => {
     expect(personAnchor(s("a", { handle: "Leo", account: "lark:on_x" }))).toEqual({ key: "handle:leo", anchor: "handle" });
     expect(personAnchor(s("a", { account: "leo@x.com" }))).toEqual({ key: "account:leo@x.com", anchor: "account" });
+    // 服务端按原值精确比较 account：只差大小写＝两个主体
+    expect(personAnchor(s("a", { account: "Leo@x.com" })).key).not.toBe(personAnchor(s("b", { account: "leo@x.com" })).key);
     expect(personAnchor(s("a", { owner: "leo@x.com" }))).toEqual({ key: "account:leo@x.com", anchor: "account" });
     expect(personAnchor(s("a"))).toEqual({ key: "name:human:a", anchor: "name" });
     // agent 是独立个体：无论 handle/account 如何，都按名字各自成行

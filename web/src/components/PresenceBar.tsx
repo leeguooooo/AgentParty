@@ -812,7 +812,9 @@ export function PresenceBar({
     return (
       <Fragment key={row.key}>
         {main}
-        {row.sessions.map((session) => renderRosterRow(session, { nested: true, key: `${row.key}:${session.name}` }))}
+        {row.sessions
+          .filter((session) => session !== row.primary)
+          .map((session) => renderRosterRow(session, { nested: true, key: `${row.key}:${session.name}` }))}
       </Fragment>
     );
   }

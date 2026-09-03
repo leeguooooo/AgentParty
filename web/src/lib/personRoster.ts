@@ -61,7 +61,8 @@ export function personAnchor(item: PersonLike): { key: string; anchor: PersonAnc
   const handle = norm(item.handle);
   if (handle !== null) return { key: `handle:${handle.toLowerCase()}`, anchor: "handle" };
   const account = norm(item.account) ?? norm(item.owner);
-  if (account !== null) return { key: `account:${account.toLowerCase()}`, anchor: "account" };
+  // account 在服务端按原值精确比较，只差大小写的两个账号是两个主体——不能折叠大小写。
+  if (account !== null) return { key: `account:${account}`, anchor: "account" };
   return { key: `name:human:${item.name}`, anchor: "name" };
 }
 
