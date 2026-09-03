@@ -5,14 +5,6 @@ import { ChannelStrings } from "./Channel";
 // #150 / #168 / #171 分工面板重排 + 组织关系展示 + agent 规则入口新增的文案，
 // 中英双语必须齐备，且中文不能等于英文（防止漏翻/占位英文糊弄过关）。
 const DIVISION_KEYS = [
-  "Channel.roles.channelLead",
-  "Channel.roles.reportsTo",
-  "Channel.roles.reportsToExternal",
-  "Channel.roles.syncToCharter",
-  "Channel.roles.syncingCharter",
-  "Channel.roles.syncHeading",
-  "Channel.roles.syncEmpty",
-  "Channel.roles.openAgentRules",
 ] as const;
 
 describe("Channel division/rules-cluster strings (#150 #168 #171)", () => {

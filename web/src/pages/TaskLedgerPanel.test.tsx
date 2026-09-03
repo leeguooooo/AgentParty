@@ -10,7 +10,6 @@ mock.module("dompurify", () => ({
 }));
 
 const { TaskLedgerPanel, isTaskLedgerStatusNote } = await import("./Channel");
-const { TeamPanel } = await import("../components/team/TeamPanel");
 
 // #204 P1②：判定哪些 system status 触发任务台账刷新（多客户端一致性）。
 describe("isTaskLedgerStatusNote (#204 P1②)", () => {
@@ -342,33 +341,6 @@ describe("TaskLedgerPanel detail actions", () => {
   });
 });
 
-describe("TeamPanel touch details (#357)", () => {
-  test("member detail is a button that expands the title content inline", async () => {
-    const member = {
-      name: "worker-a", parentAgent: "lead", rootAgent: "lead", teamId: "squad-a", depth: 1,
-      state: "working", role: "worker" as const, residency: "supervised" as const, active: true, connected: true,
-      lastSeen: 1_700_000_000_000, expiresAt: null,
-    };
-    let r!: ReactTestRenderer;
-    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage({ ap_locale: "en" }) });
-    await act(async () => {
-      r = create(<LocaleProvider><TeamPanel teams={[{
-        key: "lead::squad-a", rootAgent: "lead", teamId: "squad-a", parentAgents: ["lead"],
-        activeCount: 1, staleCount: 0, memberCount: 1, maxDepth: 1, residency: "supervised",
-        expiresAt: null, lastSeen: member.lastSeen, frontAgent: null, members: [member],
-      }]} /></LocaleProvider>);
-    });
-    renderer = r;
-    const button = r.root.find((n) => n.type === "button" && n.props.className.includes("team-member"));
-    expect(button.props["aria-expanded"]).toBe(false);
-    await act(async () => button.props.onClick());
-    expect(button.props["aria-expanded"]).toBe(true);
-    expect(allText(r)).toContain("parent: lead");
-    expect(allText(r)).toContain("residency: always-on (supervised)");
-  });
-});
-
-// #271(a)：按受理人筛选看板。
 describe("TaskLedgerPanel assignee filter (#271)", () => {
   const filterTasks = () => [
     task({ id: 1, title: "alpha-task", assignee: { name: "worker-a", kind: "agent" } }),

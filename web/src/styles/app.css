@@ -8789,3 +8789,81 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
   .roster-row { flex-wrap: wrap; }
   .roster-actions { width: 100%; justify-content: flex-end; }
 }
+
+/* ===== 团队看板（#1060 PR B）：一个面板替代 分工 / 团队 / agent 泳道 / 组织树 ===== */
+.team-board { display: flex; flex-direction: column; gap: 14px; }
+.team-board-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+.team-board-title { margin: 0; font-size: 15px; font-weight: 600; }
+.team-board-counts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 12.5px; color: var(--t-muted); }
+.team-board-count { display: inline-flex; align-items: center; gap: 5px; }
+.team-board-empty { margin: 0; color: var(--t-muted); font-size: 13px; }
+
+.team-lane { display: flex; flex-direction: column; gap: 8px; }
+.team-lane-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: 13px; font-weight: 600; }
+.team-lane-count { font-weight: 500; color: var(--t-muted); }
+.team-lane-hint { font-weight: 400; font-size: 12px; color: var(--t-muted); }
+.team-lane-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--t-faint); flex: none; }
+.team-lane--blocked .team-lane-dot, .team-board-count--blocked .team-lane-dot { background: var(--d-red, #c0392b); }
+.team-lane--working .team-lane-dot, .team-board-count--working .team-lane-dot { background: var(--d-green, #2f855a); }
+.team-lane--waiting .team-lane-dot, .team-board-count--waiting .team-lane-dot { background: var(--d-amber, #b7791f); }
+.team-lane--idle .team-lane-dot, .team-board-count--idle .team-lane-dot { background: var(--d-blue, #2b6cb0); }
+.team-lane-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+
+.team-card { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--t-border); border-radius: 10px; background: var(--t-panel); border-left-width: 3px; }
+.team-card--blocked { border-left-color: var(--d-red, #c0392b); }
+.team-card--working { border-left-color: var(--d-green, #2f855a); }
+.team-card--waiting { border-left-color: var(--d-amber, #b7791f); }
+.team-card--idle { border-left-color: var(--d-blue, #2b6cb0); }
+.team-card--offline { border-left-color: var(--t-faint); opacity: 0.85; }
+.team-card-head { display: flex; align-items: flex-start; gap: 8px; }
+.team-card-ava { width: 30px; height: 30px; border-radius: 50%; flex: none; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; font-size: 12px; font-weight: 600; background: var(--t-panel); color: var(--t-muted); }
+.team-card-ava img { width: 100%; height: 100%; object-fit: cover; }
+.team-card-ava--agent { border-radius: 8px; }
+.team-card-id { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.team-card-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 12.5px; color: var(--t-muted); }
+.team-card-name { font-size: 14px; font-weight: 600; color: var(--t-text); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.team-card-name:hover { text-decoration: underline; }
+.team-card-owner { color: var(--t-muted); }
+.team-card-host { font-weight: 600; color: var(--d-amber, #b7791f); }
+.team-card-host--stale { color: var(--t-faint); text-decoration: line-through; }
+.team-card-role { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--t-border); font-size: 12px; color: var(--t-text); }
+.team-card-role--host { border-color: var(--d-amber, #b7791f); color: var(--d-amber, #b7791f); }
+.team-card-role--none { color: var(--t-faint); border-style: dashed; }
+.team-card-resp { color: var(--t-text); }
+.team-card-unconfirmed { display: inline-flex; align-items: center; gap: 6px; color: var(--d-amber, #b7791f); }
+.team-card-rel, .team-card-squad { color: var(--t-muted); }
+.team-card-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.team-card-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; color: var(--t-muted); }
+.team-card-doing, .team-card-work { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; }
+.team-card-task { background: none; border: 0; padding: 0; color: var(--t-text); font: inherit; cursor: pointer; text-align: left; }
+.team-card-task:hover { text-decoration: underline; }
+.team-card-activity { color: var(--t-muted); font-family: var(--t-mono); font-size: 12px; }
+.team-card-muted { color: var(--t-muted); }
+.team-card-chip { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--t-border); font-size: 12px; color: var(--t-muted); }
+.team-card-chip--blocked { border-color: var(--d-red, #c0392b); color: var(--d-red, #c0392b); }
+.team-card-chip--warn { border-color: var(--d-amber, #b7791f); color: var(--d-amber, #b7791f); }
+.team-card-chip--busy { border-color: var(--d-green, #2f855a); color: var(--d-green, #2f855a); }
+.team-card-chip--paused { color: var(--t-faint); }
+.team-card-linkbtn { background: none; border: 0; padding: 0; color: var(--t-link); font: inherit; cursor: pointer; }
+.team-card-linkbtn:hover { text-decoration: underline; }
+.team-card-linkbtn:disabled { opacity: 0.5; cursor: default; }
+
+.team-card-edit { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; padding: 8px 10px; border: 1px dashed var(--t-border); border-radius: 8px; font-size: 12.5px; }
+.team-card-edit label { display: flex; flex-direction: column; gap: 3px; }
+.team-card-edit label > span { color: var(--t-muted); font-size: 12px; }
+.team-card-edit label:nth-child(2) { grid-column: 1 / -1; }
+.team-card-edit input, .team-card-edit select { font: inherit; padding: 4px 6px; border: 1px solid var(--t-border); border-radius: 6px; background: var(--t-bg); color: var(--t-text); }
+.team-card-edit-error { grid-column: 1 / -1; margin: 0; color: var(--d-red, #c0392b); }
+.team-card-edit-actions { grid-column: 1 / -1; display: flex; gap: 6px; }
+
+.team-unassigned { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px dashed var(--d-amber, #b7791f); border-radius: 10px; }
+.team-unassigned h3 { margin: 0; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.team-unassigned p { margin: 0; font-size: 12.5px; }
+.team-unassigned ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.team-unassigned-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; }
+.team-unassigned-assign { font: inherit; padding: 2px 6px; border: 1px solid var(--t-border); border-radius: 6px; background: var(--t-bg); color: var(--t-text); }
+
+@media (max-width: 640px) {
+  .team-lane-cards { grid-template-columns: 1fr; }
+  .team-card-edit { grid-template-columns: 1fr; }
+}

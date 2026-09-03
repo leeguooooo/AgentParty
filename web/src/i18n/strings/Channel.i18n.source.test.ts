@@ -13,19 +13,9 @@ const catchupSource = readFileSync(
   resolve(import.meta.dir, "../../components/CatchupPanel.tsx"),
   "utf8",
 );
-const divisionBoardSource = readFileSync(
-  resolve(import.meta.dir, "../../components/team/DivisionBoard.tsx"),
-  "utf8",
-);
-const teamPanelSource = readFileSync(
-  resolve(import.meta.dir, "../../components/team/TeamPanel.tsx"),
-  "utf8",
-);
-const agentBoardPanelSource = readFileSync(
-  resolve(import.meta.dir, "../../components/team/AgentBoardPanel.tsx"),
-  "utf8",
-);
-const localizedSurfaceSource = `${source}\n${hostBoardSource}\n${catchupSource}\n${divisionBoardSource}\n${teamPanelSource}\n${agentBoardPanelSource}`;
+const teamBoardSource = readFileSync(resolve(import.meta.dir, "../../components/team/TeamBoard.tsx"), "utf8");
+const teamShellSource = readFileSync(resolve(import.meta.dir, "../../components/team/TeamShell.tsx"), "utf8");
+const localizedSurfaceSource = `${source}\n${hostBoardSource}\n${catchupSource}\n${teamBoardSource}\n${teamShellSource}`;
 
 const REQUIRED_KEYS = [
   "Channel.banner.archived",
@@ -79,21 +69,6 @@ const REQUIRED_KEYS = [
   "Channel.filter.modeAria",
   "Channel.filter.kindAria",
   "Channel.empty.content",
-  "Channel.team.aria",
-  "Channel.team.meta.root",
-  "Channel.team.meta.parent",
-  "Channel.team.meta.parents",
-  "Channel.team.meta.depth",
-  "Channel.team.meta.expires",
-  "Channel.team.meta.seen",
-  "Channel.team.front",
-  "Channel.team.frontTitle",
-  "Channel.team.active",
-  "Channel.team.noWorkers",
-  "Channel.team.memberTitle",
-  "Channel.agentBoard.aria",
-  "Channel.agents.pausedUntil",
-  "Channel.agents.pausedManual",
   "Channel.hostBoard.aria",
   "Channel.hostBoard.human",
   "Channel.hostBoard.assignAria",
