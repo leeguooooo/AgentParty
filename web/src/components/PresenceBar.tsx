@@ -25,7 +25,7 @@ interface Props {
   removingName?: string | null;
   /** 踢人失败的原因，显示在名单弹窗顶部。 */
   removeError?: string | null;
-  onRemoveParticipant?: (name: string) => void;
+  onRemoveParticipant?: (name: string, alsoNames?: readonly string[]) => void;
   // 人为暂停/恢复某 agent 的接待（#180）。resumeAt=null 即开放式暂停（手动恢复）。
   pausingName?: string | null;
   onPauseAgent?: (name: string, resumeAt: number | null) => void;
@@ -593,7 +593,15 @@ export function PresenceBar({
 
   function renderRosterRow(
     it: Item,
-    opts: { display?: string; badge?: ReactElement | null; accountsBadge?: ReactElement | null; nested?: boolean; key?: string } = {},
+    opts: {
+      display?: string;
+      badge?: ReactElement | null;
+      accountsBadge?: ReactElement | null;
+      nested?: boolean;
+      key?: string;
+      /** 这一行代表的人名下的全部会话名——踢出要一起移除。 */
+      sessionNames?: readonly string[];
+    } = {},
   ) {
     const shownDisplay = opts.display ?? it.display;
     const reach = avatarReach(it, now);
@@ -777,7 +785,7 @@ export function PresenceBar({
               type="button"
               disabled={removingName === it.name}
               title={t("PresenceBar.kickTitle", { name: it.name })}
-              onClick={() => onRemoveParticipant(it.name)}
+              onClick={() => onRemoveParticipant(it.name, opts.sessionNames)}
             >
               {t("PresenceBar.kick")}
             </button>
@@ -806,6 +814,7 @@ export function PresenceBar({
           </button>
         )
         : null,
+      sessionNames: row.sessions.map((session) => session.name),
       accountsBadge: row.accountCount > 1
         ? (
           <span className="t-mono presence-duplicate" title={t("PresenceBar.roster.multiAccountTitle")}>
@@ -945,11 +954,11 @@ export function PresenceBar({
               </button>
             </header>
             <div className="channel-panel-body presence-roster-body">
+              {removeError !== null && <p className="roster-error" role="alert">{removeError}</p>}
               {rankedItems.length === 0 ? (
                 <p className="t-mono presence-empty">{t("PresenceBar.empty")}</p>
               ) : (
                 <>
-                {removeError !== null && <p className="roster-error" role="alert">{removeError}</p>}
                 <ul className="roster-list" aria-label={t("PresenceBar.roster.listLabel")}>
                   {personRows.filter((row) => !row.stale).map((row) => renderPersonRow(row))}
                 </ul>

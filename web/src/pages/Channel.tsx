@@ -2049,6 +2049,8 @@ export function ChannelPage({
   const [removingName, setRemovingName] = useState<string | null>(null);
   const [restoringName, setRestoringName] = useState<string | null>(null);
   const [kickError, setKickError] = useState<string | null>(null);
+  // 踢出与「恢复成员」共用过 kickError；名单只该显示踢出的失败原因（CodeRabbit）。
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [removedChannelMemberSnapshots, setRemovedChannelMemberSnapshots] = useState<
     Record<string, RemovedChannelMemberSnapshot>
   >({});
@@ -2643,12 +2645,23 @@ export function ChannelPage({
       .finally(() => setRestoringName(null));
   }, [removingName, restoreParticipantProjection, restoringName, slug, token, t]);
 
-  const removeParticipant = useCallback((name: string) => {
+  const removeParticipant = useCallback((name: string, alsoNames: readonly string[] = []) => {
     if (removingName !== null || restoringName !== null) return;
-    const ok = window.confirm(t("Channel.kick.confirm", { name }));
+    // #1070：名单一行 = 一个人。踢一个人要连他名下其它会话一起移除，
+    // 否则「跨账号/多会话的同一个人」只被踢掉代表身份，其余会话仍留在频道里（Codex stop-review）。
+    const extra = alsoNames.filter((other) => other !== name);
+    const ok = window.confirm(
+      extra.length === 0
+        ? t("Channel.kick.confirm", { name })
+        : t("Channel.kick.confirmSessions", { name, count: extra.length + 1 }),
+    );
     if (!ok) return;
+    for (const other of extra) {
+      void kickParticipant(token, slug, other, "remove").catch(() => undefined);
+    }
     setRemovingName(name);
     setKickError(null);
+    setRemoveError(null);
     kickParticipant(token, slug, name, "remove")
       .then((result) => {
         // A broadcast failure is not a removal failure: the server keeps the
@@ -2662,9 +2675,13 @@ export function ChannelPage({
         }
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
-        else if (err instanceof ForbiddenError) setKickError(t("Channel.kick.forbidden"));
-        else setKickError(t("Channel.kick.failed"));
+        if (err instanceof AuthError) {
+          authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+          return;
+        }
+        const message = err instanceof ForbiddenError ? t("Channel.kick.forbidden") : t("Channel.kick.failed");
+        setKickError(message);
+        setRemoveError(message);
       })
       .finally(() => setRemovingName(null));
   }, [
@@ -4471,7 +4488,7 @@ export function ChannelPage({
         // #1070：名单里直接踢人/踢 agent——之前这个能力只藏在「管理」面板里。
         onRemoveParticipant={canModerate && !state.archived ? removeParticipant : undefined}
         removingName={removingName}
-        removeError={kickError}
+        removeError={removeError}
         onPauseAgent={pauseAgentReception}
         onResumeAgent={resumeAgentReception}
         roles={channelRoles}
