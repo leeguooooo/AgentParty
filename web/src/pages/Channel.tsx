@@ -4468,6 +4468,10 @@ export function ChannelPage({
         publicWatch={localWatch}
         canModerate={canModerate}
         pausingName={pausingName}
+        // #1070：名单里直接踢人/踢 agent——之前这个能力只藏在「管理」面板里。
+        onRemoveParticipant={canModerate && !state.archived ? removeParticipant : undefined}
+        removingName={removingName}
+        removeError={kickError}
         onPauseAgent={pauseAgentReception}
         onResumeAgent={resumeAgentReception}
         roles={channelRoles}

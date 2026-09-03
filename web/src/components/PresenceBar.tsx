@@ -23,6 +23,8 @@ interface Props {
   publicWatch?: boolean; // #381：public_watch 时徽章文案显「WATCH」（观看公开）区分纯 public
   canModerate?: boolean;
   removingName?: string | null;
+  /** 踢人失败的原因，显示在名单弹窗顶部。 */
+  removeError?: string | null;
   onRemoveParticipant?: (name: string) => void;
   // 人为暂停/恢复某 agent 的接待（#180）。resumeAt=null 即开放式暂停（手动恢复）。
   pausingName?: string | null;
@@ -409,6 +411,7 @@ export function PresenceBar({
   isPublic = false,
   publicWatch = false,
   canModerate = false,
+  removeError = null,
   removingName = null,
   onRemoveParticipant,
   pausingName = null,
@@ -946,6 +949,7 @@ export function PresenceBar({
                 <p className="t-mono presence-empty">{t("PresenceBar.empty")}</p>
               ) : (
                 <>
+                {removeError !== null && <p className="roster-error" role="alert">{removeError}</p>}
                 <ul className="roster-list" aria-label={t("PresenceBar.roster.listLabel")}>
                   {personRows.filter((row) => !row.stale).map((row) => renderPersonRow(row))}
                 </ul>

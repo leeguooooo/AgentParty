@@ -712,6 +712,43 @@ function renderWith(entry: PresenceEntry, extra: Record<string, unknown>, open =
 }
 
 // 模块②（#1047）：名单弹窗从分组卡片 + 悬停浮层改成平铺成员表——一人一行、人话状态、一行一个主动作。
+describe("名单里的踢出（#1070）", () => {
+  test("版主可直接踢人或踢 agent；非版主看不到；system 行没有踢出", () => {
+    const removed: string[] = [];
+    const onRemoveParticipant = (name: string) => { removed.push(name); };
+    const now = Date.now();
+    const presence = {
+      leo: { name: "leo", kind: "human", state: "online", ts: now, last_seen: now, live: true, account: "acct-leo", handle: "leo" },
+      bot: { name: "bot", kind: "agent", state: "waiting", ts: now, last_seen: now, live: true },
+      system: { name: "system", kind: "agent", state: "waiting", ts: now, last_seen: now, live: true },
+    };
+    const participants = [{ name: "leo", kind: "human", owner: "acct-leo", handle: "leo" }, { name: "bot", kind: "agent" }, { name: "system", kind: "agent" }];
+    const render = (canModerate: boolean) => {
+      let next!: ReactTestRenderer;
+      void act(() => {
+        next = create(
+          createElement(
+            LocaleProvider,
+            null,
+            createElement(PresenceBar, { presence, participants, status: "open", canModerate, onRemoveParticipant, initialRosterOpen: true } as never),
+          ),
+        );
+      });
+      renderer = next;
+      return next;
+    };
+    const asMod = render(true);
+    const kicks = asMod.root.findAll((n) => n.type === "button" && n.props.className === "presence-kick");
+    expect(kicks).toHaveLength(2);
+    act(() => kicks[0]!.props.onClick());
+    expect(removed).toHaveLength(1);
+    act(() => asMod.unmount());
+
+    const asGuest = render(false);
+    expect(asGuest.root.findAll((n) => n.type === "button" && n.props.className === "presence-kick")).toHaveLength(0);
+  });
+});
+
 describe("头像堆叠按人去重（#1067）", () => {
   test("同一个人的多个会话只占一张头像，角标显示会话数；无身份的历史会话不进堆叠", () => {
     let next!: ReactTestRenderer;
