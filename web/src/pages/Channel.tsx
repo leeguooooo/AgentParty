@@ -2,6 +2,7 @@
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { TeamBoard, type TeamRoleDraft } from "../components/team/TeamBoard";
+import type { TeamSquadDraft } from "../components/team/TeamSquads";
 import { TeamShell } from "../components/team/TeamShell";
 import { buildTeamBoard } from "../lib/teamBoard";
 import { guessJoinPackHarness } from "../lib/joinPack";
@@ -53,6 +54,9 @@ import {
   fetchChannelIdentities,
   fetchChannelRoles,
   fetchSquads,
+  createSquad,
+  updateSquad,
+  deleteSquad,
   fetchMessages,
   fetchMessagesWithRetry,
   fetchTaskSummary,
@@ -3795,6 +3799,41 @@ export function ChannelPage({
     if (ok && draft.reportsTo !== undefined) setReportsTo(name, draft.reportsTo);
     return ok;
   }, [saveRole, setReportsTo]);
+  // #1060 PR C：squad 增删改。members 整体替换；成功后本地列表就地更新，不等下一次拉取。
+  const [squadSaving, setSquadSaving] = useState<string | null>(null);
+  const [squadError, setSquadError] = useState<string | null>(null);
+  const squadWrite = useCallback(async (key: string, run: () => Promise<void>): Promise<boolean> => {
+    if (squadSaving !== null) return false;
+    setSquadSaving(key);
+    setSquadError(null);
+    try {
+      await run();
+      return true;
+    } catch (err: unknown) {
+      if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+      else if (err instanceof ForbiddenError) setSquadError(t("TeamBoard.squad.forbidden"));
+      else if (err instanceof ValidationError) setSquadError(err.message);
+      else setSquadError(t("TeamBoard.squad.saveFailed"));
+      return false;
+    } finally {
+      setSquadSaving(null);
+    }
+  }, [squadSaving, t]);
+  const createTeamSquad = useCallback((name: string, draft: TeamSquadDraft) =>
+    squadWrite("__new__", async () => {
+      const saved = await createSquad(token, slug, name, draft);
+      setChannelSquads((current) => [...current.filter((s) => s.name !== saved.name), saved]);
+    }), [squadWrite, token, slug]);
+  const updateTeamSquad = useCallback((name: string, draft: TeamSquadDraft) =>
+    squadWrite(name, async () => {
+      const saved = await updateSquad(token, slug, name, draft);
+      setChannelSquads((current) => current.map((s) => (s.name === saved.name ? saved : s)));
+    }), [squadWrite, token, slug]);
+  const deleteTeamSquad = useCallback((name: string) =>
+    squadWrite(name, async () => {
+      await deleteSquad(token, slug, name);
+      setChannelSquads((current) => current.filter((s) => s.name !== name));
+    }), [squadWrite, token, slug]);
   const reconnectAgent = useMemo(
     () =>
       canMintAgent && accountKey !== null && !state.archived
@@ -4687,6 +4726,12 @@ export function ChannelPage({
                 onOpenAgentDetail={openTeamMember}
                 onOpenTask={openFocusedTask}
                 onReconnect={reconnectAgent}
+                onAssignHost={canModerate && !state.archived ? assignChannelHost : undefined}
+                squadSaving={squadSaving}
+                squadError={squadError}
+                onCreateSquad={canModerate && !state.archived ? createTeamSquad : undefined}
+                onUpdateSquad={canModerate && !state.archived ? updateTeamSquad : undefined}
+                onDeleteSquad={canModerate && !state.archived ? deleteTeamSquad : undefined}
               />
             </TeamShell>
           )}

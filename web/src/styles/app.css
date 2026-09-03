@@ -8867,3 +8867,27 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
   .team-lane-cards { grid-template-columns: 1fr; }
   .team-card-edit { grid-template-columns: 1fr; }
 }
+
+/* 团队看板 · 小队（#1060 PR C） */
+.team-squads { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--t-border); border-radius: 10px; }
+.team-squad-create { margin-left: auto; }
+.team-squad-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.team-squad { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-radius: 8px; border: 1px solid transparent; }
+.team-squad.is-active { border-color: var(--d-blue, #2b6cb0); background: color-mix(in srgb, var(--d-blue, #2b6cb0) 6%, transparent); }
+.team-squad-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12.5px; }
+.team-squad-name { background: none; border: 0; padding: 0; font: inherit; font-weight: 600; color: var(--t-text); cursor: pointer; }
+.team-squad-name:hover { text-decoration: underline; }
+.team-squad-members { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.team-card-chip--lead { border-color: var(--d-amber, #b7791f); color: var(--d-amber, #b7791f); }
+.team-squad-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; padding: 8px 10px; border: 1px dashed var(--t-border); border-radius: 8px; font-size: 12.5px; }
+.team-squad-form label { display: flex; flex-direction: column; gap: 3px; }
+.team-squad-form label > span, .team-squad-form-members > span { color: var(--t-muted); font-size: 12px; }
+.team-squad-form input, .team-squad-form select { font: inherit; padding: 4px 6px; border: 1px solid var(--t-border); border-radius: 6px; background: var(--t-bg); color: var(--t-text); }
+.team-squad-form-members { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; }
+.team-squad-picker { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.team-squad-pick { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--t-border); font-size: 12px; cursor: pointer; }
+.team-squad-pick.is-on { border-color: var(--d-blue, #2b6cb0); color: var(--d-blue, #2b6cb0); }
+.team-squad-pick input { margin: 0; }
+.team-board-filter { margin: 0; font-size: 12.5px; color: var(--t-muted); display: flex; gap: 8px; }
+.team-card-hostbtn { color: var(--d-amber, #b7791f); }
+@media (max-width: 640px) { .team-squad-form { grid-template-columns: 1fr; } }

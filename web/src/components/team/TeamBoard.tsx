@@ -4,6 +4,7 @@ import { useT, type TFunc } from "../../i18n/useT";
 import "../../i18n/strings/TeamBoard";
 import { presenceStateLabel } from "../../lib/presenceLabels";
 import { TEAM_LANES, type TeamBoardModel, type TeamCard, type TeamLane, type TeamUnassignedRole } from "../../lib/teamBoard";
+import { TeamSquads, type TeamSquadDraft } from "./TeamSquads";
 
 /** 与 Channel.tsx 的 RoleDraft 同形，避免组件依赖页面文件。 */
 export interface TeamRoleDraft {
@@ -25,6 +26,13 @@ export interface TeamBoardProps {
   onOpenTask?: (id: number) => void;
   /** 离线 / 叫不醒的 agent 一键接回（复用名单弹窗的接回引导）。 */
   onReconnect?: (name: string) => void;
+  /** #1060 PR C：把某个 agent 设为频道主持（走角色写路径）。 */
+  onAssignHost?: (name: string) => Promise<boolean>;
+  squadSaving?: string | null;
+  squadError?: string | null;
+  onCreateSquad?: (name: string, draft: TeamSquadDraft) => Promise<boolean>;
+  onUpdateSquad?: (name: string, draft: TeamSquadDraft) => Promise<boolean>;
+  onDeleteSquad?: (name: string) => Promise<boolean>;
 }
 
 const ROLE_OPTIONS: readonly CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
@@ -142,6 +150,7 @@ function Card({
   onOpenAgentDetail,
   onOpenTask,
   onReconnect,
+  onAssignHost,
 }: {
   card: TeamCard;
   members: TeamCard[];
@@ -157,9 +166,11 @@ function Card({
   onOpenAgentDetail?: (name: string) => void;
   onOpenTask?: (id: number) => void;
   onReconnect?: (name: string) => void;
+  onAssignHost?: (name: string) => Promise<boolean>;
 }) {
   const t = useT();
   const isAgent = card.kind !== "human";
+  const canAssignHost = canModerate && onAssignHost !== undefined && isAgent && card.role.role !== "host" && card.lane !== "offline";
   const stateText = card.presence === null || card.presence.state === ("online" as never)
     ? (card.online ? t("TeamBoard.status.online") : presenceStateLabel("offline", t))
     : presenceStateLabel(card.presence.state, t);
@@ -221,6 +232,11 @@ function Card({
           {canReconnect && (
             <button type="button" className="d-btn d-btn--primary team-card-reconnect" onClick={() => onReconnect!(card.name)} title={t("TeamBoard.action.reconnectTitle")}>
               {t("TeamBoard.action.reconnect")}
+            </button>
+          )}
+          {canAssignHost && !editing && (
+            <button type="button" className="d-btn team-card-hostbtn" disabled={saving} onClick={() => { void onAssignHost!(card.name); }} title={t("TeamBoard.action.assignHostTitle", { name: card.display })}>
+              ★ {t("TeamBoard.action.assignHost")}
             </button>
           )}
           {showEdit && !editing && (
@@ -366,9 +382,26 @@ export function TeamBoard({
   onOpenAgentDetail,
   onOpenTask,
   onReconnect,
+  onAssignHost,
+  squadSaving = null,
+  squadError = null,
+  onCreateSquad,
+  onUpdateSquad,
+  onDeleteSquad,
 }: TeamBoardProps) {
   const t = useT();
   const [editing, setEditing] = useState<string | null>(null);
+  // squad 筛选：只看某个小队的成员；小队被删掉时自动回到全部。
+  const [squadFilter, setSquadFilter] = useState<string | null>(null);
+  useEffect(() => {
+    if (squadFilter !== null && !model.squads.some((squad) => squad.name === squadFilter)) setSquadFilter(null);
+  }, [squadFilter, model.squads]);
+  const laneCards = useMemo(() => {
+    if (squadFilter === null) return model.lanes;
+    const squad = model.squads.find((s) => s.name === squadFilter);
+    const allowed = new Set([...(squad?.members ?? []), ...(squad?.leader ? [squad.leader] : [])]);
+    return model.lanes.map(({ lane, cards }) => ({ lane, cards: cards.filter((card) => allowed.has(card.name)) }));
+  }, [model.lanes, model.squads, squadFilter]);
   // 正在编辑的成员离开了看板 → 关掉表单，别留一个指向空成员的编辑态。
   useEffect(() => {
     if (editing !== null && !model.cards.some((card) => card.name === editing)) setEditing(null);
@@ -403,9 +436,28 @@ export function TeamBoard({
         onDeleteRole={onDeleteRole}
       />
 
-      {model.cards.length === 0 && <p className="team-board-empty">{t("TeamBoard.empty")}</p>}
+      <TeamSquads
+        squads={model.squads}
+        members={model.cards}
+        canModerate={canModerate}
+        saving={squadSaving}
+        error={squadError}
+        filter={squadFilter}
+        onFilter={setSquadFilter}
+        onCreate={onCreateSquad}
+        onUpdate={onUpdateSquad}
+        onDelete={onDeleteSquad}
+      />
 
-      {model.lanes.map(({ lane, cards }) => cards.length > 0 && (
+      {model.cards.length === 0 && <p className="team-board-empty">{t("TeamBoard.empty")}</p>}
+      {squadFilter !== null && (
+        <p className="team-board-filter">
+          {t("TeamBoard.squad.filtering", { name: squadFilter })}
+          <button type="button" className="team-card-linkbtn" onClick={() => setSquadFilter(null)}>{t("TeamBoard.squad.filterClear")}</button>
+        </p>
+      )}
+
+      {laneCards.map(({ lane, cards }) => cards.length > 0 && (
         <section key={lane} className={`team-lane team-lane--${lane}`} aria-label={laneLabel[lane]} data-lane={lane}>
           <h3 className="team-lane-head">
             <i className="team-lane-dot" aria-hidden="true" />
@@ -431,6 +483,7 @@ export function TeamBoard({
                 onOpenAgentDetail={onOpenAgentDetail}
                 onOpenTask={onOpenTask}
                 onReconnect={onReconnect}
+                onAssignHost={onAssignHost}
               />
             ))}
           </ul>

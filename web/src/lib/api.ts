@@ -680,6 +680,56 @@ export async function fetchSquads(token: string, slug: string): Promise<ChannelS
   return data.squads;
 }
 
+export interface SquadWriteBody {
+  title?: string | null;
+  description?: string | null;
+  members?: string[];
+  leader?: string | null;
+}
+
+async function squadWriteError(res: Response, what: string): Promise<never> {
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 404) throw new Error("squad not found");
+  if (res.status === 410) throw new Error("channel is archived");
+  if (res.status === 400) {
+    const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new ValidationError(body?.error?.message ?? "invalid squad");
+  }
+  throw new Error(`${what} failed (${res.status})`);
+}
+
+// #1060 PR C：squad 的增删改（worker 早有路由，web 之前只读）。members 是整体替换，不是追加。
+export async function createSquad(token: string, slug: string, name: string, body: SquadWriteBody): Promise<ChannelSquad> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/squads`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ name, ...body }),
+  });
+  if (!res.ok) await squadWriteError(res, `POST /api/channels/${slug}/squads`);
+  const data = (await res.json()) as { squad: ChannelSquad };
+  return data.squad;
+}
+
+export async function updateSquad(token: string, slug: string, name: string, body: SquadWriteBody): Promise<ChannelSquad> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/squads/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await squadWriteError(res, `PATCH /api/channels/${slug}/squads/${name}`);
+  const data = (await res.json()) as { squad: ChannelSquad };
+  return data.squad;
+}
+
+export async function deleteSquad(token: string, slug: string, name: string): Promise<void> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/squads/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) await squadWriteError(res, `DELETE /api/channels/${slug}/squads/${name}`);
+}
+
 export async function createTask(
   token: string,
   slug: string,
