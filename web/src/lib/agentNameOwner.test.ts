@@ -24,4 +24,8 @@ describe("agent 默认名前缀（#1043）", () => {
   test("me 为空时退回 slug", () => {
     expect(agentNameOwnerLabel(null, "ludo")).toBe("ludo");
   });
+  test("连 slug 都是不透明 id 时退回中性的 agent", () => {
+    expect(agentNameOwnerLabel(null, "ou_9f8e7d6c5b4a3210")).toBe("agent");
+    expect(agentNameOwnerLabel(me({ name: "lark-3f9a8b7c6d5e" }), "lark-3f9a8b7c6d5e")).toBe("agent");
+  });
 });
