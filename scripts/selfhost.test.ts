@@ -188,10 +188,15 @@ describe("自部署预检（#selfhost）", () => {
       expect(code()).not.toMatch(/\bpkill\b/);
     });
 
-    test("两处创建数据目录都要收紧权限（少一处就等于漏一条路径）", () => {
+    test("迁移与运行路径共用收紧权限的数据目录准备", () => {
       const src = code();
-      expect(src.split('chmod 700 "$DATA_DIR"').length - 1).toBe(2);
-      expect(src.split('umask 077; mkdir -p "$DATA_DIR"').length - 1).toBe(2);
+      const dataDirFn = src.slice(src.indexOf("prepare_data_dir() {"), src.indexOf("apply_migrations() {"));
+      expect(dataDirFn).toContain('chmod 700 "$DATA_DIR"');
+      expect(dataDirFn).toMatch(/umask 077; mkdir -p "\$DATA_DIR"/);
+      const migrateFn = src.slice(src.indexOf("migrate() {"), src.indexOf("repo_version() {"));
+      const runtimeFn = src.slice(src.indexOf("prepare_runtime() {"), src.indexOf("prepare() {"));
+      expect(migrateFn).toContain("prepare_data_dir");
+      expect(runtimeFn).toContain("prepare_data_dir");
     });
 
     test("pidfile 内容不是 pid ⇒ 拒绝并清掉，绝不拿它去 kill", () => {
@@ -220,7 +225,7 @@ describe("自部署预检（#selfhost）", () => {
 // `run`：前台 exec，给 systemd（Type=exec）/ 容器入口用。真机上 Type=forking + pidfile 的形态
 // 有两个毛病：systemd 只能靠 cgroup 盯一个「不是自己孩子」的进程；stop 时 node 以 143 退出
 // 被记成 failed。前台 exec 之后 systemd 直接持有 worker 的 pid，这两条都消失。
-describe("run：前台 exec + 版本元数据", () => {
+describe("run / serve：前台 exec + 版本元数据", () => {
   const fs = require("node:fs") as typeof import("node:fs");
 
   /** 假 repo：假 node 把自己的 pid 与 argv 记下来再按指定退出码退出；带 wrangler 占位与版本号。 */
@@ -233,9 +238,11 @@ describe("run：前台 exec + 版本元数据", () => {
     writeFileSync(join(dir, "node_modules", "wrangler", "bin", "wrangler.js"), "");
     writeFileSync(join(dir, "cli", "package.json"), JSON.stringify({ name: "x", version: "1.2.3" }));
     const record = join(dir, "node.record");
+    const calls = join(dir, "node.calls");
     writeFileSync(
       join(dir, "bin", "node"),
       `#!/bin/sh\n[ "$1" = "-v" ] && { echo v22.14.0; exit 0; }\n` +
+        `printf '%s\\n' "$*" >> "${calls}"\n` +
         // migrate 那次也会经过这里（d1 migrations apply）：只记录 dev 那次
         `case "$*" in *" dev "*) printf '%s\\n%s\\n' "$$" "$*" > "${record}"; exit ${exitCode} ;; esac\nexit 0\n`,
     );
@@ -249,11 +256,11 @@ describe("run：前台 exec + 版本元数据", () => {
       AGENTPARTY_ADMIN_SECRET: "s3cret",
       AGENTPARTY_SELFHOST_DATA: join(dir, "state"),
     };
-    return { dir, copy, env, record };
+    return { dir, copy, env, record, calls };
   }
 
   test("run 把自己 exec 成 worker：pid 不变、退出码透传", async () => {
-    const { dir, copy, env, record } = runSandbox(7);
+    const { dir, copy, env, record, calls } = runSandbox(7);
     try {
       const { spawn } = require("node:child_process") as typeof import("node:child_process");
       const child = spawn("sh", [copy, "run"], { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -265,6 +272,24 @@ describe("run：前台 exec + 版本元数据", () => {
       expect(Number(pid)).toBe(child.pid as number);
       expect(argv).toContain(" dev --local ");
       expect(argv).toContain(`--persist-to ${join(dir, "state")}`);
+      expect(fs.readFileSync(calls, "utf8")).toContain("d1 migrations apply agentparty --local");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serve 跳过迁移并 exec worker：给 supervisor 的重启路径不做 schema 工作", async () => {
+    const { dir, copy, env, record, calls } = runSandbox(7);
+    try {
+      const { spawn } = require("node:child_process") as typeof import("node:child_process");
+      const child = spawn("sh", [copy, "serve"], { env, stdio: ["ignore", "pipe", "pipe"] });
+      const status = await new Promise<number | null>((r) => child.on("exit", (c) => r(c)));
+      expect(status).toBe(7);
+      const [pid, argv] = fs.readFileSync(record, "utf8").split("\n");
+      expect(Number(pid)).toBe(child.pid as number);
+      expect(argv).toContain(" dev --local ");
+      expect(fs.readFileSync(calls, "utf8")).not.toContain("d1 migrations apply");
+      expect(fs.readFileSync(join(dir, "worker", ".dev.vars"), "utf8")).toContain("ADMIN_SECRET=s3cret");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -288,22 +313,39 @@ describe("run：前台 exec + 版本元数据", () => {
     }
   });
 
-  test("run 与 start 共用同一套前置：没设 ADMIN_SECRET 一样拒绝", () => {
+  test("run / serve 与 start 共用同一套前置：没设 ADMIN_SECRET 一样拒绝", () => {
     const { dir, copy, env } = runSandbox(0);
     try {
       const { AGENTPARTY_ADMIN_SECRET: _drop, ...noSecret } = env;
-      const r = spawnSync("sh", [copy, "run"], { env: noSecret, encoding: "utf8" });
-      expect(r.status).not.toBe(0);
-      expect(`${r.stdout}${r.stderr}`).toContain("AGENTPARTY_ADMIN_SECRET");
+      for (const command of ["run", "serve"]) {
+        const r = spawnSync("sh", [copy, command], { env: noSecret, encoding: "utf8" });
+        expect(r.status).not.toBe(0);
+        expect(`${r.stdout}${r.stderr}`).toContain("AGENTPARTY_ADMIN_SECRET");
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("usage 列出 run", () => {
+  test("usage 列出 run 与 serve，并说清迁移边界", () => {
     const r = spawnSync("sh", [script], { encoding: "utf8" });
     expect(`${r.stdout}${r.stderr}`).toMatch(/^\s*run\s+前台/m);
+    expect(`${r.stdout}${r.stderr}`).toMatch(/^\s*serve\s+前台启动，不执行迁移/m);
   });
+});
+
+describe("#1061：supervisor 恢复路径文档", () => {
+  for (const name of ["self-host-intranet.md", "self-host-intranet.zh.md"]) {
+    test(`${name} 用 serve 自动重启，并把迁移留在安装/升级`, () => {
+      const doc = require("node:fs").readFileSync(resolve(import.meta.dir, "..", "docs", name), "utf8") as string;
+      expect(doc).toContain("ExecStart=/bin/sh scripts/selfhost.sh serve");
+      expect(doc).not.toContain("ExecStart=/bin/sh scripts/selfhost.sh run");
+      expect(doc).toContain("Restart=always");
+      expect(doc).toContain("sh scripts/selfhost.sh migrate");
+      expect(doc).toContain("cloudflare/workers-sdk/issues/14926");
+      expect(doc).toContain("4.128.0");
+    });
+  }
 });
 
 // smoke 真机跑到第 6 次才暴露的两个坑：`?limit=5` 返回最旧 5 条（自己那条读不到 ⇒ 误报失败）；
