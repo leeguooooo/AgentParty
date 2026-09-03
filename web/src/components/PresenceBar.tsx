@@ -508,11 +508,13 @@ export function PresenceBar({
         note: null,
         ts: entry?.ts ?? null,
         owner: null,
-        account: owner,
+        // 服务端身份表（identities）带着账号与「人话」显示名：离线行照样可信，
+        // 否则同一个人的离线会话既显示成原始 id、又因缺账号无法与在线会话归并（#1067）。
+        account: owner ?? identities?.[name]?.account ?? null,
         handle: null,
         ...meta,
         displayName: null,
-        display: assigned?.display ?? name,
+        display: assigned?.display ?? identities?.[name]?.display ?? name,
       };
     }
     if (entry && entry.state !== "offline") {

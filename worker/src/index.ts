@@ -6981,6 +6981,26 @@ app.get("/api/channels/:slug/identities", async (c) => {
     }
   }
 
+  // #1067：桌面端/OIDC 登录的人类会话名就是账号本身（lark:on_…），这类会话没有 tokens 行，
+  // 账号在上面几步都补不上——名字直接就是答案，只要 account_profiles 里确有这个账号。
+  const selfNamedCandidates = [...identities.values()]
+    .filter((entry) => entry.account === undefined && entry.name.includes(":"))
+    .map((entry) => entry.name);
+  if (selfNamedCandidates.length > 0) {
+    const placeholders = selfNamedCandidates.map(() => "?").join(",");
+    const known = await c.env.DB
+      .prepare(`SELECT account FROM account_profiles WHERE account IN (${placeholders})`)
+      .bind(...selfNamedCandidates)
+      .all<{ account: string }>()
+      .catch(() => ({ results: [] as { account: string }[] }));
+    const knownAccounts = new Set(known.results.map((row) => row.account));
+    for (const entry of [...identities.values()]) {
+      if (entry.account === undefined && knownAccounts.has(entry.name)) {
+        add({ ...entry, kind: entry.kind ?? "human", account: entry.name });
+      }
+    }
+  }
+
   const humanAccounts = new Set(
     [...identities.values()]
       .filter((identity) => identity.kind === "human" && identity.account !== undefined)
