@@ -11,15 +11,18 @@ test("permanent member removal clears local channel snapshots only after the API
   expect(callbackEnd).toBeGreaterThan(callbackStart);
 
   const callback = source.slice(callbackStart, callbackEnd);
-  const request = callback.indexOf('kickParticipant(token, slug, name, "remove")');
-  const success = callback.indexOf(".then((result) => {", request);
-  const localRemoval = callback.indexOf("applyAuthoritativeParticipantRemoval(result.removal)");
+  // #1070 起这段改成 async/await（要逐个 await 附属会话），断言随之从 .then 链改为 await 顺序。
+  // #1070 起本地投影收进 applyRemovalResult 助手，主/附属会话共用；助手只在 await 之后被调用。
+  const helperDef = callback.indexOf("const applyRemovalResult = (");
+  const request = callback.indexOf('applyRemovalResult(name, await kickParticipant(token, slug, name, "remove"))');
 
-  expect(request).toBeGreaterThanOrEqual(0);
-  expect(success).toBeGreaterThan(request);
-  expect(localRemoval).toBeGreaterThan(success);
-  expect(callback.slice(0, success)).not.toContain("applyAuthoritativeParticipantRemoval");
+  expect(helperDef).toBeGreaterThanOrEqual(0);
+  expect(request).toBeGreaterThan(helperDef);
+  // 投影只此一处，杜绝「API 还没回就先清本地」
+  expect(callback.match(/applyAuthoritativeParticipantRemoval\(result\.removal\)/g)).toHaveLength(1);
   expect(callback).toContain("result?.removal");
+  // 附属会话的回包也要投影，否则广播失败时页面还显示着已删的会话（Codex stop-review 第三轮）
+  expect(callback).toContain('applyRemovalResult(other, await kickParticipant(token, slug, other, "remove"))');
 });
 
 test("only an explicit restored response releases local tombstones and refreshes roster authorities", () => {
@@ -38,7 +41,7 @@ test("only an explicit restored response releases local tombstones and refreshes
   const callbackEnd = source.indexOf("const pauseAgentReception = useCallback", callbackStart);
   const callback = source.slice(callbackStart, callbackEnd);
   const restoredBranch = callback.indexOf("if (result?.restored === true)");
-  const restoreCall = callback.indexOf("restoreParticipantProjection(name)", restoredBranch);
+  const restoreCall = callback.indexOf("restoreParticipantProjection(target)", restoredBranch);
   const removalBranch = callback.indexOf("else if (result?.removal", restoreCall);
   const applyRemoval = callback.indexOf("applyAuthoritativeParticipantRemoval(result.removal)", removalBranch);
 
@@ -46,7 +49,7 @@ test("only an explicit restored response releases local tombstones and refreshes
   expect(restoreCall).toBeGreaterThan(restoredBranch);
   expect(removalBranch).toBeGreaterThan(restoreCall);
   expect(applyRemoval).toBeGreaterThan(removalBranch);
-  expect(callback.match(/restoreParticipantProjection\(name\)/g)).toHaveLength(1);
+  expect(callback.match(/restoreParticipantProjection\(target\)/g)).toHaveLength(1);
 });
 
 test("websocket participant removal uses the same role and roster cleanup path", () => {
@@ -208,4 +211,25 @@ test("admin re-add sends the removed row account and name before releasing local
   expect(callback.slice(failure)).not.toContain("restoreParticipantProjection(member.name)");
   expect(source).toContain("onRestoreMember={restoreRemovedParticipant}");
   expect(source).toContain("restoringMember={restoringName}");
+});
+
+// #1070：名单一行 = 一个人。踢一个人要把他名下全部会话都移除；附属会话失败不能吞掉，
+// 否则 UI 在谎报「全部移除」（Codex stop-review 两轮）。
+test("bulk kick awaits every extra session and reports leftovers instead of swallowing failures", () => {
+  const start = source.indexOf("const removeParticipant = useCallback((name: string, alsoNames");
+  const end = source.indexOf("const restoreParticipant", start) >= 0
+    ? source.indexOf("const restoreParticipant", start)
+    : start + 4000;
+  const body = source.slice(start, end);
+
+  expect(start).toBeGreaterThanOrEqual(0);
+  // 附属会话逐个 await，并把失败收进 leftovers
+  expect(body).toContain('applyRemovalResult(other, await kickParticipant(token, slug, other, "remove"))');
+  expect(body).toContain("leftovers.push(other)");
+  // 绝不能再出现「静默吞掉」的写法
+  expect(body).not.toContain(".catch(() => undefined)");
+  // 有残留时必须报出来
+  expect(body).toContain("Channel.kick.partial");
+  // 确认框要说清楚会一起移除几个会话
+  expect(body).toContain("Channel.kick.confirmSessions");
 });
