@@ -2662,10 +2662,22 @@ export function ChannelPage({
     void (async () => {
       const leftovers: string[] = [];
       let authFailed = false;
+      // A broadcast failure is not a removal failure: the server keeps the
+      // tombstone active and returns it so the requester can project it
+      // locally. restored:true is the only response allowed to release a
+      // tombstone after an authoritative same-name rejoin.
+      // 附属会话的回包同样要投影——丢掉它，广播失败时页面会继续显示已删除的会话（Codex stop-review 第三轮）。
+      const applyRemovalResult = (target: string, result: Awaited<ReturnType<typeof kickParticipant>>) => {
+        if (result?.restored === true) {
+          restoreParticipantProjection(target);
+        } else if (result?.removal !== null && result?.removal !== undefined) {
+          applyAuthoritativeParticipantRemoval(result.removal);
+        }
+      };
       try {
         for (const other of extra) {
           try {
-            await kickParticipant(token, slug, other, "remove");
+            applyRemovalResult(other, await kickParticipant(token, slug, other, "remove"));
           } catch (err: unknown) {
             if (err instanceof AuthError) {
               authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
@@ -2677,16 +2689,7 @@ export function ChannelPage({
         }
         if (authFailed) return;
         try {
-          const result = await kickParticipant(token, slug, name, "remove");
-          // A broadcast failure is not a removal failure: the server keeps the
-          // tombstone active and returns it so the requester can project it
-          // locally. restored:true is the only response allowed to release a
-          // tombstone after an authoritative same-name rejoin.
-          if (result?.restored === true) {
-            restoreParticipantProjection(name);
-          } else if (result?.removal !== null && result?.removal !== undefined) {
-            applyAuthoritativeParticipantRemoval(result.removal);
-          }
+          applyRemovalResult(name, await kickParticipant(token, slug, name, "remove"));
         } catch (err: unknown) {
           if (err instanceof AuthError) {
             authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
