@@ -1,4 +1,5 @@
 import type {
+  AgentActivity,
   ChannelRoleAssignment,
   ChannelSquad,
   CollaborationRole,
@@ -33,7 +34,7 @@ export interface TeamCardDoing {
   taskStartedAt: number | null;
   heartbeatAt: number | null;
   /** hook 上报的活动（#602）。 */
-  activity: PresenceEntry["activity"] | null;
+  activity: AgentActivity | null;
   repo: string | null;
   branch: string | null;
   worktree: string | null;
@@ -291,7 +292,8 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
       paused: entry?.paused === true,
       busy: entry?.busy === true,
       queueDepth: entry?.queue_depth ?? 0,
-      waitingOwnerCount: entry?.waiting_owner_count ?? 0,
+      // 服务端 waiting_owner_count 只在 >0 时下发；本地定向投递里的 waiting_owner 同样算「等 owner」。
+      waitingOwnerCount: Math.max(entry?.waiting_owner_count ?? 0, memberDeliveries.filter((d) => d.state === "waiting_owner").length),
       unhandledMentions: entry?.unhandled_mention_count ?? 0,
       lastSeen: entry?.last_seen ?? entry?.ts ?? null,
       clientVersion: entry?.client_version ?? null,
