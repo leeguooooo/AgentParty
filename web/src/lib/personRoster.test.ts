@@ -54,6 +54,18 @@ describe("名单按人聚合（#1067）", () => {
     expect(rows[0]!.display).toBe("Leo");
   });
 
+  test("一半会话有 handle、一半只有 account 时仍并成一行（离线行拿不到 handle）", () => {
+    const rows = buildPersonRows([
+      s("leo", { handle: "leo", account: "lark:on_2260", state: "online" }),
+      s("lark:on_2260", { account: "lark:on_2260", state: "offline" }),
+      s("someone-else", { account: "lark:on_9999", state: "offline" }),
+    ]);
+    expect(rows).toHaveLength(2);
+    const leo = rows.find((r) => r.anchor === "handle")!;
+    expect(leo.sessions.map((x) => x.name).sort()).toEqual(["lark:on_2260", "leo"]);
+    expect(leo.display).toBe("leo");
+  });
+
   test("显示名永不落到不透明账号串上", () => {
     const rows = buildPersonRows([s("lark:on_acda4d", { account: "lark:on_acda4d", display: "lark:on_acda4d" })]);
     expect(rows[0]!.display).toBe("lark:on_acda4d"); // 无可读名时保留原样，但……

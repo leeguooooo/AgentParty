@@ -712,6 +712,37 @@ function renderWith(entry: PresenceEntry, extra: Record<string, unknown>, open =
 }
 
 // 模块②（#1047）：名单弹窗从分组卡片 + 悬停浮层改成平铺成员表——一人一行、人话状态、一行一个主动作。
+describe("离线行的身份回填（#1067）", () => {
+  test("离线会话用服务端身份表的显示名与账号，从而能与在线会话并成一行", () => {
+    let next!: ReactTestRenderer;
+    void act(() => {
+      next = create(
+        createElement(
+          LocaleProvider,
+          null,
+          createElement(PresenceBar, {
+            presence: {
+              "lark:on_2260": { name: "lark:on_2260", kind: "human", state: "offline", ts: Date.now() - 90_000, last_seen: Date.now() - 90_000 },
+              leo: { name: "leo", kind: "human", state: "online", ts: Date.now(), last_seen: Date.now(), live: true, account: "lark:on_2260", handle: "leo" },
+            },
+            participants: [{ name: "leo", kind: "human", owner: "lark:on_2260", handle: "leo" }],
+            identities: {
+              "lark:on_2260": { display: "leo", kind: "human", account: "lark:on_2260" },
+              leo: { display: "leo", kind: "human", account: "lark:on_2260" },
+            },
+            status: "open",
+            initialRosterOpen: true,
+          } as never),
+        ),
+      );
+    });
+    renderer = next;
+    const rows = next.root.findAll((n) => n.type === "li" && typeof n.props["data-name"] === "string");
+    expect(rows).toHaveLength(1);
+    expect(nodesWithClass(next, "roster-name").map((n) => String(n.children.join("")))).toEqual(["leo"]);
+  });
+});
+
 describe("presence roster flat list (#1047)", () => {
   const NOW = Date.now();
   const agent = (name: string, over: Record<string, unknown> = {}): PresenceEntry =>

@@ -110,6 +110,25 @@ export function buildPersonRows<T extends PersonLike>(items: T[], options: Build
     else existing.sessions.push(item);
   }
 
+  // 同一个人可能一半会话有 handle、另一半只有 account（离线行拿不到 handle）：
+  // 先把 handle 组占用的账号登记下来，再把只有 account 的组并进去，否则同一个人还是两行。
+  const keyByAccount = new Map<string, string>();
+  for (const [key, group] of groups) {
+    if (group.anchor !== "handle") continue;
+    for (const session of group.sessions) {
+      const account = norm(session.account) ?? norm(session.owner);
+      if (account !== null && !keyByAccount.has(account)) keyByAccount.set(account, key);
+    }
+  }
+  for (const [key, group] of [...groups]) {
+    if (group.anchor !== "account") continue;
+    const account = key.slice("account:".length);
+    const target = keyByAccount.get(account);
+    if (target === undefined || target === key) continue;
+    groups.get(target)!.sessions.push(...group.sessions);
+    groups.delete(key);
+  }
+
   const rows: PersonRow<T>[] = [];
   for (const [key, { anchor, sessions }] of groups) {
     const ordered = [...sessions].sort((a, b) => rank(a) - rank(b));
