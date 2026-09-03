@@ -117,6 +117,54 @@ describe("buildTeamBoard：一张卡一份事实", () => {
     expect(model.counts.unassignedRoles).toBe(1);
   });
 
+  test("#1067：同一个人的多个会话/多个账号折成一张卡，agent 不受影响", () => {
+    const model = buildTeamBoard({
+      presence: [
+        presence("leo-a", { kind: "human", state: "online" as never, handle: "leo", display_name: "Leo", account: "lark-email:leo@x.com" } as never),
+        presence("leo-b", { kind: "human", state: "offline", handle: "leo", account: "lark:on_2260" } as never),
+        presence("bot-1", { owner: "leo@x.com" }),
+        presence("bot-2", { owner: "leo@x.com" }),
+      ],
+      participants: [sender("leo-a", "human"), sender("leo-b", "human"), sender("bot-1"), sender("bot-2")],
+      roles: [],
+      now: NOW,
+    });
+    const human = model.cards.filter((c) => c.kind === "human");
+    expect(human).toHaveLength(1);
+    expect(human[0]!.display).toBe("Leo");
+    expect(human[0]!.otherSessions).toHaveLength(1);
+    expect(human[0]!.accountCount).toBe(2);
+    expect(model.cards.filter((c) => c.kind === "agent").map((c) => c.name).sort()).toEqual(["bot-1", "bot-2"]);
+  });
+
+  test("#1067 回归：角色指向被折叠的次级会话时，不会被误判成「无人认领」", () => {
+    const model = buildTeamBoard({
+      presence: [
+        presence("leo-a", { kind: "human", state: "online" as never, handle: "leo", display_name: "Leo", account: "acct-leo" } as never),
+        presence("leo-b", { kind: "human", state: "offline", handle: "leo", account: "acct-leo" } as never),
+      ],
+      participants: [sender("leo-a", "human"), sender("leo-b", "human")],
+      roles: [role("leo-b", "host", { responsibility: "主持" })],
+      now: NOW,
+    });
+    expect(model.unassignedRoles).toEqual([]);
+    expect(model.counts.unassignedRoles).toBe(0);
+    expect(model.cards.filter((c) => c.kind === "human")).toHaveLength(1);
+  });
+
+  test("#1067：只差大小写的两个账号仍是两个人", () => {
+    const model = buildTeamBoard({
+      presence: [
+        presence("a", { kind: "human", state: "online" as never, account: "Acct" } as never),
+        presence("b", { kind: "human", state: "online" as never, account: "acct" } as never),
+      ],
+      participants: [sender("a", "human"), sender("b", "human")],
+      roles: [],
+      now: NOW,
+    });
+    expect(model.cards.filter((c) => c.kind === "human")).toHaveLength(2);
+  });
+
   test("memberNames 限定成员全集", () => {
     const limited = buildTeamBoard({
       presence: [presence("lead"), presence("stranger")],

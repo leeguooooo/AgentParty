@@ -1,10 +1,11 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
 import { autoWakeReachable, evaluateHostLease, PRESENCE_TIMEOUT_MS, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import { isOpaqueAccount } from "@agentparty/shared/identity";
 import { agentHue } from "../lib/agentColor";
 import { disambiguatorForIdentity, type IdentityDisplayMap } from "../lib/identityDisplay";
+import { buildPersonRows, type PersonRow } from "../lib/personRoster";
 import { IdentityDisambiguator } from "./IdentityDisambiguator";
 import { gitContextChip } from "../lib/gitContext";
 import { fmtRel } from "../lib/time";
@@ -566,7 +567,28 @@ export function PresenceBar({
   // 模块②（#1047）：名单弹窗从「按 owner 分组卡片 + 悬停浮层 + 展开/折叠」改成平铺成员表——
   // 一人一行：头像（同头部堆叠）· 名字 · 人话状态 · 正在干什么 · 一个主动作（接回 / 暂停 / 恢复）。
   // 技术细节（config/lineage/workflow…）不再塞 title，点名字进 AgentDetailModal 看。
-  function renderRosterRow(it: Item) {
+  // #1067：名单按「人」成行——同一账号的多个会话、以及同一个人的多个账号（handle 对齐）折成一行；
+  // 无身份信息的历史离线会话折进「历史会话」，不再平铺。
+  const personRows = useMemo(
+    () => {
+      const rows = buildPersonRows(rankedItems, { rank: (item) => rankedItems.indexOf(item) });
+      return rows.sort((a, b) => rankedItems.indexOf(a.primary) - rankedItems.indexOf(b.primary));
+    },
+    [rankedItems],
+  );
+  const staleRows = personRows.filter((row) => row.stale);
+  // 计数口径 = 人数（不含历史会话），与名单可见行数一致。
+  const visiblePeople = personRows.filter((row) => !row.stale);
+  const totalPeople = visiblePeople.length;
+  const livePeople = visiblePeople.filter((row) => row.sessions.some((s) => s.state !== "offline")).length;
+  const [expandedPerson, setExpandedPerson] = useState<string | null>(null);
+  const [staleOpen, setStaleOpen] = useState(false);
+
+  function renderRosterRow(
+    it: Item,
+    opts: { display?: string; badge?: ReactElement | null; accountsBadge?: ReactElement | null; nested?: boolean; key?: string } = {},
+  ) {
+    const shownDisplay = opts.display ?? it.display;
     const reach = avatarReach(it, now);
     const liveness = livenessBadge(it);
     const wakeability = wakeabilityBadge(it, now);
@@ -610,27 +632,29 @@ export function PresenceBar({
     const doing = task !== null || busy !== null || waitingOwner !== null || unhandledMention !== null || activityChip !== null || gitChip !== null;
     return (
       <li
-        key={it.name}
-        className={`roster-row roster-row--${reach}`}
+        key={opts.key ?? it.name}
+        className={`roster-row roster-row--${reach}${opts.nested === true ? " roster-row--session" : ""}`}
         data-name={it.name}
         data-reach={reach}
         data-kind={it.kind}
-        style={{ "--ah": agentHue(it.display) } as CSSProperties}
+        style={{ "--ah": agentHue(shownDisplay) } as CSSProperties}
       >
         <span className={`presence-ava presence-ava--${it.kind}`} data-reach={reach} aria-hidden="true">
-          {src ? <img src={src} alt="" /> : <span className="presence-ava-initial">{it.display.trim().charAt(0).toUpperCase()}</span>}
+          {src ? <img src={src} alt="" /> : <span className="presence-ava-initial">{shownDisplay.trim().charAt(0).toUpperCase()}</span>}
           <i className="presence-ava-dot" />
         </span>
         <div className="roster-main">
           <div className="roster-head">
             {onOpenAgentDetail !== undefined ? (
               <button type="button" className="roster-name" title={t("PresenceBar.roster.detail", { name: it.name })} onClick={() => openAgentDetail(it.name)}>
-                {it.display}
+                {shownDisplay}
               </button>
             ) : (
-              <span className="roster-name">{it.display}</span>
+              <span className="roster-name">{shownDisplay}</span>
             )}
-            <IdentityDisambiguator code={it.disambiguator} />
+            {opts.nested === true && <IdentityDisambiguator code={it.disambiguator} />}
+            {opts.badge}
+            {opts.accountsBadge}
             <span className={`t-mono presence-kind presence-kind--${it.kind}`}>{it.kind}</span>
             {readableOwner !== null && <span className="t-mono presence-owner">· {readableOwner}</span>}
             {role !== null && <span className="t-mono presence-agent-role">{role}</span>}
@@ -756,6 +780,46 @@ export function PresenceBar({
     );
   }
 
+  // 一个人一行：代表会话决定状态与操作，其余会话折叠在「N 个会话」后面。
+  function renderPersonRow(row: PersonRow<Item>) {
+    const extra = row.sessions.length - 1;
+    const open = expandedPerson === row.key;
+    const main = renderRosterRow(row.primary, {
+      display: row.display,
+      badge: extra > 0
+        ? (
+          <button
+            type="button"
+            className="t-mono roster-sessions-toggle"
+            aria-expanded={open}
+            onClick={() => setExpandedPerson(open ? null : row.key)}
+            title={t("PresenceBar.roster.sessionsTitle", { count: row.sessions.length })}
+          >
+            {t("PresenceBar.roster.sessions", { count: row.sessions.length })} {open ? "▾" : "▸"}
+          </button>
+        )
+        : null,
+      accountsBadge: row.accountCount > 1
+        ? (
+          <span className="t-mono presence-duplicate" title={t("PresenceBar.roster.multiAccountTitle")}>
+            {t("PresenceBar.roster.multiAccount", { count: row.accountCount })}
+          </span>
+        )
+        : null,
+      key: row.key,
+    });
+    if (!open) return main;
+    return (
+      <Fragment key={row.key}>
+        {main}
+        {row.sessions
+          .filter((session) => session !== row.primary)
+          .map((session) => renderRosterRow(session, { nested: true, key: `${row.key}:${session.name}` }))}
+      </Fragment>
+    );
+  }
+
+
   return (
     <div className="presence-bar">
       <div className="presence-head">
@@ -801,7 +865,7 @@ export function PresenceBar({
                 )}
               </span>
             )}
-            <span className="t-mono presence-summary">{t("PresenceBar.liveCount", { live: liveGroups, total: totalGroups })}</span>
+            <span className="t-mono presence-summary">{t("PresenceBar.liveCount", { live: livePeople, total: totalPeople })}</span>
             <span className="presence-toggle-arrow" aria-hidden="true">{rosterOpen ? "▾" : "▸"}</span>
           </button>
           {isPublic && (
@@ -863,7 +927,7 @@ export function PresenceBar({
             <header className="channel-panel-head">
               <div className="channel-panel-titlebox">
                 <h2 id="presence-roster-title">{t("PresenceBar.dialogTitle")}</h2>
-                <p className="t-mono">{t("PresenceBar.liveCount", { live: liveGroups, total: totalGroups })}</p>
+                <p className="t-mono">{t("PresenceBar.liveCount", { live: livePeople, total: totalPeople })}</p>
               </div>
               <button ref={rosterCloseRef} className="d-btn channel-panel-close" type="button" aria-label={t("PresenceBar.close")} onClick={closeRoster}>
                 {t("PresenceBar.close")}
@@ -873,9 +937,24 @@ export function PresenceBar({
               {rankedItems.length === 0 ? (
                 <p className="t-mono presence-empty">{t("PresenceBar.empty")}</p>
               ) : (
+                <>
                 <ul className="roster-list" aria-label={t("PresenceBar.roster.listLabel")}>
-                  {rankedItems.map((item) => renderRosterRow(item))}
+                  {personRows.filter((row) => !row.stale).map((row) => renderPersonRow(row))}
                 </ul>
+                {staleRows.length > 0 && (
+                  <div className="roster-stale">
+                    <button type="button" className="t-mono roster-stale-toggle" aria-expanded={staleOpen} onClick={() => setStaleOpen(!staleOpen)}>
+                      {t("PresenceBar.roster.stale", { count: staleRows.length })} {staleOpen ? "▾" : "▸"}
+                    </button>
+                    <p className="t-mono roster-stale-hint">{t("PresenceBar.roster.staleHint")}</p>
+                    {staleOpen && (
+                      <ul className="roster-list" aria-label={t("PresenceBar.roster.stale", { count: staleRows.length })}>
+                        {staleRows.map((row) => renderPersonRow(row))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                </>
               )}
             </div>
           </section>

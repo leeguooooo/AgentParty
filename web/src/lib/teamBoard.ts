@@ -11,6 +11,7 @@ import type {
 } from "@agentparty/shared";
 import { isOpaqueAccount } from "@agentparty/shared/identity";
 import type { ChannelIdentity } from "./api";
+import { buildPersonRows } from "./personRoster";
 import { resolveTeamMemberView, type TeamMemberRole, type TeamMemberView } from "./teamMember";
 import type { TeamSummary } from "./teams";
 
@@ -58,6 +59,14 @@ export interface TeamCard {
   /** 可读的归属人；不透明账号 id 一律 null。 */
   owner: string | null;
   account: string | null;
+  handle: string | null;
+  displayName: string | null;
+  /** #1067：同一个人的其它会话（本卡是代表）。人按 handle/account 聚合，agent 恒为空。 */
+  otherSessions: TeamCard[];
+  /** 这个人名下有几个不同账号串（>1 说明登录路径岔开了）。 */
+  accountCount: number;
+  /** 给 personRoster 用的聚合字段（= presence 状态，离线为 "offline"）。 */
+  state: string;
   avatarUrl: string | null;
   avatarThumb: string | null;
   lane: TeamLane;
@@ -288,6 +297,11 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
       kind: view.kind,
       owner: readable(view.owner),
       account: view.account,
+      handle: nonBlank(entry?.handle) ?? nonBlank(participant?.handle) ?? nonBlank(identity?.handle),
+      displayName: nonBlank(entry?.display_name) ?? nonBlank(participant?.display_name),
+      otherSessions: [],
+      accountCount: 1,
+      state: lane === "offline" ? "offline" : (entry?.state ?? "online"),
       avatarUrl: entry?.avatar_url ?? null,
       avatarThumb: entry?.avatar_thumb ?? null,
       lane,
@@ -329,6 +343,24 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
     });
   }
 
+  // #1067：人按 handle/account 折成一行（agent 各自成行）；被折起来的会话挂在代表卡的 otherSessions 上。
+  const personRows = buildPersonRows<TeamCard>(cards, {
+    rank: (card) => LANE_ORDER[card.lane] * 10 + (card.online ? 0 : 1),
+  });
+  const merged: TeamCard[] = [];
+  // 折叠后仍要能按「任意会话名」找回代表卡：角色行、未认领判定都按会话名读。
+  const cardBySessionName = new Map<string, TeamCard>();
+  for (const row of personRows) {
+    const [primary, ...rest] = row.sessions;
+    const card = rest.length === 0 && row.accountCount <= 1
+      ? primary!
+      : { ...primary!, display: row.display, owner: row.owner, otherSessions: rest, accountCount: row.accountCount };
+    merged.push(card);
+    for (const session of row.sessions) cardBySessionName.set(session.name, card);
+  }
+  cards.length = 0;
+  cards.push(...merged);
+
   cards.sort((a, b) =>
     LANE_ORDER[a.lane] - LANE_ORDER[b.lane]
     // 同泳道：有主持权的靠前，然后 agent 先于人（人不需要被「盯」），最后按名字稳定。
@@ -339,7 +371,8 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
   );
 
   // 未认领角色：角色表里有、成员卡里没有（指向的人不在频道）。
-  const cardNames = new Set(cards.map((card) => card.name));
+  // 含被折叠的会话名——否则角色指向次级会话时会被误判成「无人认领」。
+  const cardNames = new Set(cardBySessionName.keys());
   const unassignedRoles: TeamUnassignedRole[] = roles
     .filter((role) => !cardNames.has(role.name))
     .map((role) => ({

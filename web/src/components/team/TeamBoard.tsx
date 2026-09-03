@@ -197,6 +197,16 @@ function Card({
             )}
             <span className={`presence-kind presence-kind--${card.kind}`}>{t(`TeamBoard.kind.${card.kind === "human" ? "human" : "agent"}`)}</span>
             {card.owner !== null && <span className="team-card-owner">· {card.owner}</span>}
+            {card.otherSessions.length > 0 && (
+              <span className="team-card-sessions" title={t("TeamBoard.person.sessionsTitle")}>
+                {t("TeamBoard.person.sessions", { count: card.otherSessions.length + 1 })}
+              </span>
+            )}
+            {card.accountCount > 1 && (
+              <span className="team-card-accounts" title={t("TeamBoard.person.accountsTitle")}>
+                {t("TeamBoard.person.accounts", { count: card.accountCount })}
+              </span>
+            )}
             {card.host !== null && (
               <span
                 className={`team-card-host team-card-host--${card.host.lease}`}
