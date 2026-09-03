@@ -11,14 +11,13 @@ test("permanent member removal clears local channel snapshots only after the API
   expect(callbackEnd).toBeGreaterThan(callbackStart);
 
   const callback = source.slice(callbackStart, callbackEnd);
-  const request = callback.indexOf('kickParticipant(token, slug, name, "remove")');
-  const success = callback.indexOf(".then((result) => {", request);
+  // #1070 起这段改成 async/await（要逐个 await 附属会话），断言随之从 .then 链改为 await 顺序。
+  const request = callback.indexOf('const result = await kickParticipant(token, slug, name, "remove")');
   const localRemoval = callback.indexOf("applyAuthoritativeParticipantRemoval(result.removal)");
 
   expect(request).toBeGreaterThanOrEqual(0);
-  expect(success).toBeGreaterThan(request);
-  expect(localRemoval).toBeGreaterThan(success);
-  expect(callback.slice(0, success)).not.toContain("applyAuthoritativeParticipantRemoval");
+  expect(localRemoval).toBeGreaterThan(request);
+  expect(callback.slice(0, request)).not.toContain("applyAuthoritativeParticipantRemoval");
   expect(callback).toContain("result?.removal");
 });
 
@@ -208,4 +207,25 @@ test("admin re-add sends the removed row account and name before releasing local
   expect(callback.slice(failure)).not.toContain("restoreParticipantProjection(member.name)");
   expect(source).toContain("onRestoreMember={restoreRemovedParticipant}");
   expect(source).toContain("restoringMember={restoringName}");
+});
+
+// #1070：名单一行 = 一个人。踢一个人要把他名下全部会话都移除；附属会话失败不能吞掉，
+// 否则 UI 在谎报「全部移除」（Codex stop-review 两轮）。
+test("bulk kick awaits every extra session and reports leftovers instead of swallowing failures", () => {
+  const start = source.indexOf("const removeParticipant = useCallback((name: string, alsoNames");
+  const end = source.indexOf("const restoreParticipant", start) >= 0
+    ? source.indexOf("const restoreParticipant", start)
+    : start + 4000;
+  const body = source.slice(start, end);
+
+  expect(start).toBeGreaterThanOrEqual(0);
+  // 附属会话逐个 await，并把失败收进 leftovers
+  expect(body).toContain("await kickParticipant(token, slug, other, \"remove\")");
+  expect(body).toContain("leftovers.push(other)");
+  // 绝不能再出现「静默吞掉」的写法
+  expect(body).not.toContain(".catch(() => undefined)");
+  // 有残留时必须报出来
+  expect(body).toContain("Channel.kick.partial");
+  // 确认框要说清楚会一起移除几个会话
+  expect(body).toContain("Channel.kick.confirmSessions");
 });

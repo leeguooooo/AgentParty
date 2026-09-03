@@ -2647,8 +2647,8 @@ export function ChannelPage({
 
   const removeParticipant = useCallback((name: string, alsoNames: readonly string[] = []) => {
     if (removingName !== null || restoringName !== null) return;
-    // #1070：名单一行 = 一个人。踢一个人要连他名下其它会话一起移除，
-    // 否则「跨账号/多会话的同一个人」只被踢掉代表身份，其余会话仍留在频道里（Codex stop-review）。
+    // #1070：名单一行 = 一个人。踢一个人要连他名下其它会话一起移除，否则「跨账号/多会话的同一个人」
+    // 只被踢掉代表身份，其余会话仍留在频道里。附属会话的失败**不能吞**——吞了就等于谎报「全部移除」。
     const extra = alsoNames.filter((other) => other !== name);
     const ok = window.confirm(
       extra.length === 0
@@ -2656,34 +2656,57 @@ export function ChannelPage({
         : t("Channel.kick.confirmSessions", { name, count: extra.length + 1 }),
     );
     if (!ok) return;
-    for (const other of extra) {
-      void kickParticipant(token, slug, other, "remove").catch(() => undefined);
-    }
     setRemovingName(name);
     setKickError(null);
     setRemoveError(null);
-    kickParticipant(token, slug, name, "remove")
-      .then((result) => {
-        // A broadcast failure is not a removal failure: the server keeps the
-        // tombstone active and returns it so the requester can project it
-        // locally. restored:true is the only response allowed to release a
-        // tombstone after an authoritative same-name rejoin.
-        if (result?.restored === true) {
-          restoreParticipantProjection(name);
-        } else if (result?.removal !== null && result?.removal !== undefined) {
-          applyAuthoritativeParticipantRemoval(result.removal);
+    void (async () => {
+      const leftovers: string[] = [];
+      let authFailed = false;
+      try {
+        for (const other of extra) {
+          try {
+            await kickParticipant(token, slug, other, "remove");
+          } catch (err: unknown) {
+            if (err instanceof AuthError) {
+              authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+              authFailed = true;
+              break;
+            }
+            leftovers.push(other);
+          }
         }
-      })
-      .catch((err: unknown) => {
-        if (err instanceof AuthError) {
-          authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+        if (authFailed) return;
+        try {
+          const result = await kickParticipant(token, slug, name, "remove");
+          // A broadcast failure is not a removal failure: the server keeps the
+          // tombstone active and returns it so the requester can project it
+          // locally. restored:true is the only response allowed to release a
+          // tombstone after an authoritative same-name rejoin.
+          if (result?.restored === true) {
+            restoreParticipantProjection(name);
+          } else if (result?.removal !== null && result?.removal !== undefined) {
+            applyAuthoritativeParticipantRemoval(result.removal);
+          }
+        } catch (err: unknown) {
+          if (err instanceof AuthError) {
+            authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+            return;
+          }
+          const message = err instanceof ForbiddenError ? t("Channel.kick.forbidden") : t("Channel.kick.failed");
+          setKickError(message);
+          setRemoveError(message);
           return;
         }
-        const message = err instanceof ForbiddenError ? t("Channel.kick.forbidden") : t("Channel.kick.failed");
-        setKickError(message);
-        setRemoveError(message);
-      })
-      .finally(() => setRemovingName(null));
+        // 主会话成功但附属会话有失败：明说哪几个还在，别让人以为已经踢干净。
+        if (leftovers.length > 0) {
+          const message = t("Channel.kick.partial", { names: leftovers.join("、"), count: leftovers.length });
+          setKickError(message);
+          setRemoveError(message);
+        }
+      } finally {
+        setRemovingName(null);
+      }
+    })();
   }, [
     applyAuthoritativeParticipantRemoval,
     removingName,
