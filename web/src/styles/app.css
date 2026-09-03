@@ -8367,11 +8367,11 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-card--waiting { border-left-color: var(--d-amber, #b7791f); }
 .team-card--idle { border-left-color: var(--d-blue, #2b6cb0); }
 .team-card--offline { border-left-color: var(--t-faint); opacity: 0.85; }
-.team-card-head { display: flex; align-items: flex-start; gap: 8px; }
+.team-card-head { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 8px; }
 .team-card-ava { width: 30px; height: 30px; border-radius: 50%; flex: none; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; font-size: 12px; font-weight: 600; background: var(--t-panel); color: var(--t-muted); }
 .team-card-ava img { width: 100%; height: 100%; object-fit: cover; }
 .team-card-ava--agent { border-radius: 8px; }
-.team-card-id { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.team-card-id { flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .team-card-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 12.5px; color: var(--t-muted); }
 .team-card-name { font-size: 14px; font-weight: 600; color: var(--t-text); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
 .team-card-name:hover { text-decoration: underline; }
@@ -8384,7 +8384,8 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-card-resp { color: var(--t-text); }
 .team-card-unconfirmed { display: inline-flex; align-items: center; gap: 6px; color: var(--d-amber, #b7791f); }
 .team-card-rel, .team-card-squad { color: var(--t-muted); }
-.team-card-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+/* 按钮放不下时整组换到下一行靠右，别把名字/职责挤成竖排 */
+.team-card-actions { flex: 0 0 auto; margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .team-card-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; color: var(--t-muted); }
 .team-card-doing, .team-card-work { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; }
 .team-card-task { background: none; border: 0; padding: 0; color: var(--t-text); font: inherit; cursor: pointer; text-align: left; }
