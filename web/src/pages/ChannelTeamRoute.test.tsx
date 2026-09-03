@@ -4,7 +4,7 @@ import { useState } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { AgentDetailPanel } from "../components/AgentDetailModal";
 import { ChannelAdminView } from "../components/ChannelAdminView";
-import { TeamTabs } from "../components/TeamTabs";
+import { TeamShell } from "../components/team/TeamShell";
 import { LocaleProvider } from "../i18n/locale";
 import { ChannelPanelModal } from "./Channel";
 
@@ -205,28 +205,26 @@ describe("Channel Team member route", () => {
     expect(focusedMember).toBe("worker-a");
   });
 
-  test("ordinary Team detail Back returns to the Team board route, not Admin Members", () => {
+  test("ordinary Team detail Back returns to the Team board, not Admin Members", () => {
     let focusedBack = 0;
-    let focusedTabId: string | null = null;
+    let focusedBoard = 0;
 
     function TeamMemberRoute() {
       const [showDetail, setShowDetail] = useState(false);
       return (
         <LocaleProvider>
           <ChannelPanelModal title="Team" hideHeader onClose={() => {}}>
-            <TeamTabs
-              initialTab="board"
-              stats={{ roles: 1, online: 1, offline: 0, unclaimed: 0, pendingClaims: 0 }}
-              division={<div>DIVISION</div>}
-              board={(
-                <button type="button" data-team-member-open onClick={() => setShowDetail(true)}>
-                  OPEN
-                </button>
-              )}
+            <TeamShell
               detail={showDetail ? <article data-team-member-detail>DETAIL</article> : null}
               detailBackLabel="Back to team"
               onBackFromDetail={() => setShowDetail(false)}
-            />
+            >
+              <div className="team-board" tabIndex={-1}>
+                <button type="button" data-team-member-open onClick={() => setShowDetail(true)}>
+                  OPEN
+                </button>
+              </div>
+            </TeamShell>
           </ChannelPanelModal>
         </LocaleProvider>
       );
@@ -236,18 +234,11 @@ describe("Channel Team member route", () => {
       renderer = create(<TeamMemberRoute />, {
         createNodeMock(element) {
           const props = element.props as Record<string, unknown>;
-          if (element.type === "button" && props.role === "tab") {
-            return {
-              focus: () => {
-                focusedTabId = typeof props.id === "string" ? props.id : null;
-              },
-            };
-          }
-          if (
-            element.type === "button"
-            && String(props.className).includes("team-blog-detail-back")
-          ) {
+          if (element.type === "button" && String(props.className).includes("team-blog-detail-back")) {
             return { focus: () => { focusedBack += 1; } };
+          }
+          if (element.type === "section" && String(props.className).includes("team-shell")) {
+            return { querySelector: () => ({ focus: () => { focusedBoard += 1; } }) };
           }
           return null;
         },
@@ -257,17 +248,15 @@ describe("Channel Team member route", () => {
     const r = renderer!;
     act(() => r.root.findByProps({ "data-team-member-open": true }).props.onClick());
     expect(focusedBack).toBe(1);
-    expect(r.root.findByProps({ role: "tablist" }).props.hidden).toBe(true);
+    expect(r.root.findByProps({ className: "team-blog-panel team-shell-body" }).props.hidden).toBe(true);
 
     const back = r.root.findAllByType("button")
       .find((button) => String(button.props.className).includes("team-blog-detail-back"))!;
     act(() => back.props.onClick());
 
-    const teamTabs = r.root.findAllByProps({ role: "tab" });
-    expect(teamTabs.map((tab) => tab.props["aria-selected"])).toEqual([false, true]);
-    expect(r.root.findAllByProps({ role: "tabpanel" }).map((panel) => panel.props.hidden))
-      .toEqual([true, false]);
-    expect(focusedTabId).toContain("team-tab-board");
+    expect(r.root.findByProps({ className: "team-blog-panel team-shell-body" }).props.hidden).toBe(false);
+    expect(r.root.findAllByProps({ "data-team-member-detail": true })).toHaveLength(0);
+    expect(focusedBoard).toBe(1);
     expect(r.root.findAll((node) => node.props["data-admin-section"] !== undefined)).toHaveLength(0);
   });
 

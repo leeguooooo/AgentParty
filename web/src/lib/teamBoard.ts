@@ -10,7 +10,7 @@ import type {
   TaskRecord,
 } from "@agentparty/shared";
 import { isOpaqueAccount } from "@agentparty/shared/identity";
-import type { IdentityDisplayMap } from "./identityDisplay";
+import type { ChannelIdentity } from "./api";
 import { resolveTeamMemberView, type TeamMemberRole, type TeamMemberView } from "./teamMember";
 import type { TeamSummary } from "./teams";
 
@@ -116,7 +116,8 @@ export interface BuildTeamBoardInput {
   presence: PresenceEntry[];
   participants: Sender[];
   roles: ChannelRoleAssignment[];
-  identities?: IdentityDisplayMap;
+  /** 频道身份表（/api 的 identities）：display / handle / kind / account。 */
+  identities?: ChannelIdentity[];
   tasks?: TaskRecord[];
   deliveries?: PublicDirectedDelivery[];
   hostBoard?: HostBoard | null;
@@ -177,12 +178,13 @@ export function teamLaneOf(
   return "idle";
 }
 
-function memberDisplay(view: TeamMemberView, presence: PresenceEntry | null, participant: Sender | null): string {
+function memberDisplay(view: TeamMemberView, presence: PresenceEntry | null, participant: Sender | null, identity: ChannelIdentity | undefined): string {
   return (
     nonBlank(presence?.display_name)
     ?? nonBlank(participant?.display_name)
     ?? nonBlank(presence?.handle)
     ?? nonBlank(participant?.handle)
+    ?? nonBlank(identity?.handle)
     ?? view.display
   );
 }
@@ -206,6 +208,7 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
   const participantByName = new Map(participants.map((p) => [p.name, p]));
   const roleByName = new Map(roles.map((role) => [role.name, role]));
   const hostByName = new Map((hostBoard?.hosts ?? []).map((host) => [host.name, host]));
+  const identityByName = new Map((identities ?? []).map((identity) => [identity.name, identity]));
 
   const tasksByName = new Map<string, TaskRecord[]>();
   const tasksById = new Map<number, TaskRecord>();
@@ -263,7 +266,7 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
   for (const name of names) {
     const entry = presenceByName.get(name) ?? null;
     const participant = participantByName.get(name) ?? null;
-    const identity = identities?.[name];
+    const identity = identityByName.get(name);
     const view = resolveTeamMemberView({
       name,
       assignment: roleByName.get(name) ?? null,
@@ -281,7 +284,7 @@ export function buildTeamBoard(input: BuildTeamBoardInput): TeamBoardModel {
 
     cards.push({
       name,
-      display: memberDisplay(view, entry, participant),
+      display: memberDisplay(view, entry, participant, identity),
       kind: view.kind,
       owner: readable(view.owner),
       account: view.account,

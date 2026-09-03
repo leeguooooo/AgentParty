@@ -144,10 +144,9 @@ test("mention and Team projections use current roster authority instead of histo
   expect(mentionProjection).toContain("removedMemberNames");
   expect(mentionProjection).toContain("authoritativeMemberNames");
   expect(source).toContain("memberNames: authoritativeMemberNames");
-  expect(source).toContain("memberNames={authoritativeMemberNames}");
 });
 
-test("participant removal immediately clears identity, role, draft and open detail projections", () => {
+test("participant removal immediately clears identity, role and open detail projections", () => {
   const start = source.indexOf("const applyParticipantRemoval = useCallback");
   const end = source.indexOf("const loadCharter = useCallback", start);
   const callback = source.slice(start, end);
@@ -156,7 +155,6 @@ test("participant removal immediately clears identity, role, draft and open deta
   expect(callback).toContain("identity.name !== removal.name");
   expect(callback).toContain("setChannelRoles");
   expect(callback).toContain("role.name !== removal.name");
-  expect(callback).toContain("delete next[removal.name]");
   expect(callback).toContain("current?.name === removal.name ? null : current");
 });
 

@@ -48,7 +48,7 @@ function delivery(id: string, target: string, state: PublicDirectedDelivery["sta
 function model() {
   return buildTeamBoard({
     presence: [
-      presence("lead", { state: "working", current_task: 7, role: "host", role_source: "channel" }),
+      presence("lead", { state: "working", current_task: 7, role: "host", role_source: "assigned" }),
       presence("worker-a", { state: "waiting", context: { repo: "leeguooooo/AgentParty", branch: "feat/x" } }),
       presence("worker-b", { state: "waiting", role: "worker", role_source: "self" }),
       presence("old", { state: "offline", last_seen: NOW - 3_600_000 * 2 }),

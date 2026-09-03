@@ -1,14 +1,13 @@
 // 频道页：presence 条 + 实时消息流 + 内联错误条幅 + 插话框。
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { TeamBoard, type TeamRoleDraft } from "../components/team/TeamBoard";
+import { TeamShell } from "../components/team/TeamShell";
+import { buildTeamBoard } from "../lib/teamBoard";
 import { guessJoinPackHarness } from "../lib/joinPack";
 import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type MsgFrame, type ParticipantRemovedFrame, type PresenceEntry, type PublicDirectedDelivery, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailPanel } from "../components/AgentDetailModal";
-import { TeamTabs } from "../components/TeamTabs";
-import { DivisionBoard } from "../components/team/DivisionBoard";
-import { TeamPanel } from "../components/team/TeamPanel";
-import { AgentBoardPanel } from "../components/team/AgentBoardPanel";
 import { teamMemberOnlineNames } from "../components/team/agentBoard";
 import { AgentJoin, type JoinGuideSession } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
@@ -122,7 +121,7 @@ import { summarizeReplyPreview } from "../lib/replyPreview";
 import { fmtTime } from "../lib/time";
 import { groupTeamMessages, summarizeTeams, type TeamMessageThread } from "../lib/teams";
 import { resolveTeamMemberView } from "../lib/teamMember";
-import { roleDraftFrom, teamRoleBuckets, type RoleDraft } from "../lib/channelRoles";
+import type { RoleDraft } from "../lib/channelRoles";
 import { ChannelSocket } from "../lib/ws";
 import { channelReducer, initialChannelState } from "../state";
 import { useT } from "../i18n/useT";
@@ -2092,9 +2091,6 @@ export function ChannelPage({
   const [taskActionError, setTaskActionError] = useState<string | null>(null);
   const [taskCreating, setTaskCreating] = useState(false);
   const [taskCreateError, setTaskCreateError] = useState<string | null>(null);
-  const [roleDrafts, setRoleDrafts] = useState<Record<string, RoleDraft>>({});
-  const [newRoleName, setNewRoleName] = useState("");
-  const [newRoleDraft, setNewRoleDraft] = useState<RoleDraft>({ role: "worker", responsibility: "" });
   const [roleSaving, setRoleSaving] = useState<string | null>(null);
   const [roleError, setRoleError] = useState<string | null>(null);
   const [hostAssignError, setHostAssignError] = useState<string | null>(null);
@@ -2333,12 +2329,6 @@ export function ChannelPage({
       const next = current.filter((role) => role.name !== removal.name);
       return next.length === current.length ? current : next;
     });
-    setRoleDrafts((current) => {
-      if (!(removal.name in current)) return current;
-      const next = { ...current };
-      delete next[removal.name];
-      return next;
-    });
     setMemberDetailRoute((current) => current?.name === removal.name ? null : current);
   }, []);
 
@@ -2380,7 +2370,6 @@ export function ChannelPage({
         if (requestId !== channelRolesRequestRef.current) return;
         const currentRoles = roles.filter((role) => !removedChannelMembersRef.current.has(role.name));
         setChannelRoles(currentRoles);
-        setRoleDrafts(Object.fromEntries(currentRoles.map((role) => [role.name, roleDraftFrom(role)])));
         setRoleError(null);
       })
       .catch((err: unknown) => {
@@ -3443,66 +3432,6 @@ export function ChannelPage({
     updateCharterEditing,
   ]);
 
-  // issue #150：分工面板「同步到公告」——DivisionBoard 已经把分工内容拼好、合并进
-  // 现有公告文本，这里只负责落盘，复用与 saveCharter 相同的 setChannelCharter 写路径
-  // 和错误处理，唯一区别是写入的文本来自调用方而不是 charterDraft 状态。
-  const syncDivisionToCharter = useCallback((nextText: string) => {
-    if (charterSaving) return;
-    if (charter === null) {
-      void loadCharter();
-      return;
-    }
-    const requestId = beginCharterWriteRequest();
-    if (requestId === null) return;
-    let reloadAfterConflict = false;
-    setCharterError(null);
-    setChannelCharter(token, slug, nextText, charter.charter_rev)
-      .then((body) => {
-        if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
-        setCharter(body);
-        if (!charterEditingRef.current) {
-          setCharterDraft(body.charter ?? "");
-          updateCharterEditing(false);
-        }
-        writeSeenCharterRev(slug, body.charter_rev);
-        setSeenCharterRev(body.charter_rev);
-      })
-      .catch((err: unknown) => {
-        if (!canApplyCharterWrite(charterRequestGenerationRef.current, requestId)) return;
-        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
-        else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
-        else if (err instanceof ConflictError) {
-          reloadAfterConflict = true;
-          setCharterError(tRef.current("Channel.charter.error.conflict"));
-        } else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
-        else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
-      })
-      .finally(() => {
-        const finished = finishCharterWriteRequest(requestId);
-        if (finished && reloadAfterConflict) void loadCharter(true);
-      });
-  }, [
-    beginCharterWriteRequest,
-    charter,
-    charterSaving,
-    finishCharterWriteRequest,
-    loadCharter,
-    slug,
-    token,
-    updateCharterEditing,
-  ]);
-
-  // issue #171：分工面板到 AgentTokens（已有的 project-agent 规则查看/编辑面板，
-  // commit 7f7e8e1）的入口——复用 setAdminSurface（关掉分工弹层，打开 AgentTokens），
-  // 不重复造轮子。
-  const openAgentRulesFromDivision = useCallback(() => {
-    setAdminSurface("agentTokens", true);
-  }, [setAdminSurface]);
-  const openAgentRulesFor = useCallback((name: string) => {
-    setAgentManagerTarget(name);
-    setAdminSurface("agentTokens", true);
-  }, [setAdminSurface]);
-
   const saveLoopGuard = useCallback(() => {
     if (guardSaving !== null) return;
     const limit = Number(localLoopGuardLimit);
@@ -3585,10 +3514,6 @@ export function ChannelPage({
       .finally(() => setGuardSaving(null));
   }, [guardSaving, slug, t, token, workflowGuardLimit]);
 
-  const updateRoleDraft = useCallback((name: string, next: RoleDraft) => {
-    setRoleDrafts((current) => ({ ...current, [name]: next }));
-  }, []);
-
   const saveRole = useCallback(async (
     rawName: string,
     roleDraft: RoleDraft,
@@ -3608,19 +3533,6 @@ export function ChannelPage({
         const previous = current.find((role) => role.name === saved.name);
         return [...current.filter((role) => role.name !== saved.name), { ...previous, ...saved }];
       });
-      setRoleDrafts((current) => {
-        if (!removedChannelMembersRef.current.has(saved.name)) {
-          return { ...current, [saved.name]: roleDraftFrom(saved) };
-        }
-        if (!(saved.name in current)) return current;
-        const next = { ...current };
-        delete next[saved.name];
-        return next;
-      });
-      if (savingKey === "__new__") {
-        setNewRoleName("");
-        setNewRoleDraft({ role: "worker", responsibility: "" });
-      }
       return true;
     } catch (err: unknown) {
       if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
@@ -3673,11 +3585,6 @@ export function ChannelPage({
     deleteChannelRole(token, slug, name)
       .then(() => {
         setChannelRoles((current) => current.filter((role) => role.name !== name));
-        setRoleDrafts((current) => {
-          const next = { ...current };
-          delete next[name];
-          return next;
-        });
       })
       .catch((err: unknown) => {
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
@@ -3860,6 +3767,49 @@ export function ChannelPage({
     // Channel 挂载即拉完整台账，因此 Focus 里的 host actions 不依赖用户先打开 Tasks。
     () => buildHostBoard(slug, Object.values(state.presence), state.messages, tasks, teamNow, { loopGuardActive: state.loopGuard !== null }),
     [slug, state.loopGuard, state.messages, state.presence, tasks, teamNow],
+  );
+
+  // #1060 PR B：团队看板模型——presence / 角色 / 任务 / 投递 / 主持 / 血缘 / squad 合成一张成员卡。
+  const nowTick = Date.now();
+  const teamBoardModel = useMemo(
+    () =>
+      buildTeamBoard({
+        presence: Object.values(state.presence),
+        participants: state.participants,
+        roles: channelRoles,
+        identities: channelIdentities,
+        tasks,
+        deliveries: Object.values(state.directedDeliveries),
+        hostBoard,
+        teams: teamSummaries,
+        squads: channelSquads,
+        memberNames: authoritativeMemberNames,
+        now: nowTick,
+      }),
+    // nowTick 只用于「最近 N 分钟前」这类相对时间，随其它依赖一起刷新即可，不单独驱动重算。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.presence, state.participants, channelRoles, channelIdentities, tasks, state.directedDeliveries, hostBoard, teamSummaries, channelSquads, authoritativeMemberNames],
+  );
+  const saveTeamRole = useCallback(async (name: string, draft: TeamRoleDraft): Promise<boolean> => {
+    const ok = await saveRole(name, { role: draft.role, responsibility: draft.responsibility });
+    if (ok && draft.reportsTo !== undefined) setReportsTo(name, draft.reportsTo);
+    return ok;
+  }, [saveRole, setReportsTo]);
+  const reconnectAgent = useMemo(
+    () =>
+      canMintAgent && accountKey !== null && !state.archived
+        ? (name: string) =>
+            openJoinGuide({
+              name,
+              command: `party recover ${slug}`,
+              mode: "interactive",
+              harness: guessJoinPackHarness(name),
+              runner: "codex",
+              recover: true,
+              token: null,
+            })
+        : undefined,
+    [canMintAgent, accountKey, state.archived, openJoinGuide, slug],
   );
   const identityDisplay = useMemo(
     () =>
@@ -4112,19 +4062,6 @@ export function ChannelPage({
   // Team 头部和 Members 列表必须使用同一口径：presence 自报是「待确认」，不能再次
   // 计入「未认领」。此前这里传空 selfRoles，实机会把 3 个待确认 + 10 个未分工显示成
   // 13 个未认领，而 Members 折叠区仍是 10。
-  const offlineMemberCount = teamIdentityStats.offline;
-  const teamRoleSummary = useMemo(
-    () => teamRoleBuckets(
-      channelRoles,
-      state.presence,
-      channelIdentities,
-      state.participants,
-      t,
-    ),
-    [channelIdentities, channelRoles, state.participants, state.presence, t],
-  );
-  const pendingRoleClaimCount = teamRoleSummary.selfReported.length;
-  const unclaimedTeamCount = teamRoleSummary.unassigned.length;
   // 频道常驻焦点栏（#682）：跨成员把任务台账 + presence/status + 未闭合决策聚成「球在谁手里」。
   // teamNow 已每秒推进（团队面板复用），焦点的 staleness/时间判定跟着刷新，无需另起计时器。
   const channelFocus = useMemo(
@@ -4731,77 +4668,27 @@ export function ChannelPage({
             </section>
           )}
           {activePanel === "team" && (
-            // Team 只保留两个闭环：成员/正式分工，以及可下钻任务或消息的工作视图。
-            // 原协调杂物页已拆到 Focus、消息时间线和频道级 catch-up。
-            <TeamTabs
+            // #1060 PR B：一个看板替代 分工 / 团队 / agent 泳道 / 组织树。点卡片 → 面板内展开成员详情。
+            <TeamShell
               onClose={closeChannelPanel}
               closeDisabled={roleSaving !== null}
-              stats={{
-                roles: structuredRoleCount,
-                online: onlineMemberCount,
-                offline: offlineMemberCount,
-                unclaimed: unclaimedTeamCount,
-                pendingClaims: pendingRoleClaimCount,
-                people: teamIdentityStats.people,
-                agents: teamIdentityStats.agents,
-              }}
-              division={
-                <DivisionBoard
-                  canModerate={canModerate}
-                  slug={slug}
-                  roles={channelRoles}
-                  roleDrafts={roleDrafts}
-                  roleError={roleError}
-                  roleSaving={roleSaving}
-                  roleName={newRoleName}
-                  roleDraft={newRoleDraft}
-                  identities={channelIdentities}
-                  presence={state.presence}
-                  participants={state.participants}
-                  onlineNames={memberOnlineNames}
-                  forceOpen
-                  onRoleDraft={updateRoleDraft}
-                  onNewRoleName={setNewRoleName}
-                  onNewRoleDraft={setNewRoleDraft}
-                  onSaveRole={saveRole}
-                  onSetReportsTo={setReportsTo}
-                  onDeleteRole={clearRole}
-                  charterText={charter?.charter ?? null}
-                  onSyncToCharter={syncDivisionToCharter}
-                  syncingCharter={charterSaving}
-                  canManageAgentRules={canMintAgent && accountKey !== null}
-                  manageableAgentAccount={accountKey}
-                  onOpenAgentRules={openAgentRulesFromDivision}
-                  onOpenAgentRulesFor={openAgentRulesFor}
-                  onOpenAgentDetail={openTeamMember}
-                />
-              }
-              board={(
-                <div className="team-runtime">
-                  <AgentBoardPanel
-                    presence={Object.values(state.presence)}
-                    participants={state.participants}
-                    tasks={tasks}
-                    deliveries={Object.values(state.directedDeliveries)}
-                    messages={state.messages}
-                    onOpenAgentDetail={openTeamMember}
-                    onOpenTask={openFocusedTask}
-                    onOpenMessage={async (seq) => {
-                      const located = await navigateToMessage(seq);
-                      if (located) {
-                        skipPanelFocusRestoreRef.current = true;
-                        closeChannelPanel();
-                      }
-                    }}
-                    memberNames={authoritativeMemberNames}
-                  />
-                  <TeamPanel teams={teamSummaries} />
-                </div>
-              )}
               detail={memberDetailRoute?.source === "team" ? memberDetailContent : null}
               detailBackLabel={t("Channel.team.member.back")}
               onBackFromDetail={closeMemberDetail}
-            />
+            >
+              <TeamBoard
+                model={teamBoardModel}
+                now={nowTick}
+                canModerate={canModerate}
+                roleSaving={roleSaving}
+                roleError={roleError}
+                onSaveRole={saveTeamRole}
+                onDeleteRole={clearRole}
+                onOpenAgentDetail={openTeamMember}
+                onOpenTask={openFocusedTask}
+                onReconnect={reconnectAgent}
+              />
+            </TeamShell>
           )}
           {activePanel === "focus" && (
             <ChannelFocusPanel

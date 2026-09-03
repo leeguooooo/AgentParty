@@ -64,7 +64,7 @@ describe("buildTeamBoard：一张卡一份事实", () => {
   ];
   const model = buildTeamBoard({
     presence: [
-      presence("lead", { state: "working", current_task: 7, role: "host", role_source: "channel" }),
+      presence("lead", { state: "working", current_task: 7, role: "host", role_source: "assigned" }),
       presence("worker-a", { state: "waiting", owner: "lark:on_opaque", context: { repo: "leeguooooo/AgentParty", branch: "feat/x" } }),
       presence("worker-b", { state: "waiting", role: "worker", role_source: "self" }),
       presence("leo", { kind: "human", state: "online" as never, display_name: "Leo" }),
