@@ -712,6 +712,37 @@ function renderWith(entry: PresenceEntry, extra: Record<string, unknown>, open =
 }
 
 // 模块②（#1047）：名单弹窗从分组卡片 + 悬停浮层改成平铺成员表——一人一行、人话状态、一行一个主动作。
+describe("头像堆叠按人去重（#1067）", () => {
+  test("同一个人的多个会话只占一张头像，角标显示会话数；无身份的历史会话不进堆叠", () => {
+    let next!: ReactTestRenderer;
+    const now = Date.now();
+    void act(() => {
+      next = create(
+        createElement(
+          LocaleProvider,
+          null,
+          createElement(PresenceBar, {
+            presence: {
+              leo: { name: "leo", kind: "human", state: "online", ts: now, last_seen: now, live: true, account: "acct-leo", handle: "leo" },
+              "leo-old": { name: "leo-old", kind: "human", state: "offline", ts: now - 90_000, last_seen: now - 90_000, account: "acct-leo" },
+              "lark:on_ghost": { name: "lark:on_ghost", kind: "human", state: "offline", ts: now - 900_000, last_seen: now - 900_000 },
+              bot: { name: "bot", kind: "agent", state: "waiting", ts: now, last_seen: now, live: true },
+            },
+            participants: [{ name: "leo", kind: "human", owner: "acct-leo", handle: "leo" }, { name: "bot", kind: "agent" }],
+            status: "open",
+          } as never),
+        ),
+      );
+    });
+    renderer = next;
+    const avatars = next.root.findAll(
+      (n) => n.type === "span" && typeof n.props.className === "string" && n.props.className.startsWith("presence-ava presence-ava--"),
+    );
+    expect(avatars.map((a) => a.props["data-name"])).toEqual(["leo", "bot"]);
+    expect(String(avatars[0]!.props.title)).toContain("2");
+  });
+});
+
 describe("离线行的身份回填（#1067）", () => {
   test("离线会话用服务端身份表的显示名与账号，从而能与在线会话并成一行", () => {
     let next!: ReactTestRenderer;

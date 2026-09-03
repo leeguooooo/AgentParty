@@ -550,8 +550,24 @@ export function PresenceBar({
       presenceRank(a, now) - presenceRank(b, now) ||
       a.display.localeCompare(b.display),
   );
-  const stackItems = rankedItems.slice(0, PRESENCE_STACK_MAX);
-  const hiddenStack = Math.max(0, rankedItems.length - stackItems.length);
+  // #1067：名单按「人」成行——同一账号的多个会话、以及同一个人的多个账号（handle 对齐）折成一行；
+  // 无身份信息的历史离线会话折进「历史会话」，不再平铺。
+  const personRows = useMemo(
+    () => {
+      const rows = buildPersonRows(rankedItems, { rank: (item) => rankedItems.indexOf(item) });
+      return rows.sort((a, b) => rankedItems.indexOf(a.primary) - rankedItems.indexOf(b.primary));
+    },
+    [rankedItems],
+  );
+  const staleRows = personRows.filter((row) => row.stale);
+  // 计数口径 = 人数（不含历史会话），与名单可见行数一致。
+  const visiblePeople = personRows.filter((row) => !row.stale);
+  const totalPeople = visiblePeople.length;
+  const livePeople = visiblePeople.filter((row) => row.sessions.some((s) => s.state !== "offline")).length;
+  // 头像堆叠也按「人」——同一个人的多个会话、以及无身份的历史会话都不该各占一张头像（#1067）。
+  const stackRows = personRows.filter((row) => !row.stale);
+  const stackItems = stackRows.slice(0, PRESENCE_STACK_MAX);
+  const hiddenStack = Math.max(0, stackRows.length - stackItems.length);
   useModalFocusTrap({
     active: rosterOpen,
     containerRef: rosterDialogRef,
@@ -569,20 +585,6 @@ export function PresenceBar({
   // 模块②（#1047）：名单弹窗从「按 owner 分组卡片 + 悬停浮层 + 展开/折叠」改成平铺成员表——
   // 一人一行：头像（同头部堆叠）· 名字 · 人话状态 · 正在干什么 · 一个主动作（接回 / 暂停 / 恢复）。
   // 技术细节（config/lineage/workflow…）不再塞 title，点名字进 AgentDetailModal 看。
-  // #1067：名单按「人」成行——同一账号的多个会话、以及同一个人的多个账号（handle 对齐）折成一行；
-  // 无身份信息的历史离线会话折进「历史会话」，不再平铺。
-  const personRows = useMemo(
-    () => {
-      const rows = buildPersonRows(rankedItems, { rank: (item) => rankedItems.indexOf(item) });
-      return rows.sort((a, b) => rankedItems.indexOf(a.primary) - rankedItems.indexOf(b.primary));
-    },
-    [rankedItems],
-  );
-  const staleRows = personRows.filter((row) => row.stale);
-  // 计数口径 = 人数（不含历史会话），与名单可见行数一致。
-  const visiblePeople = personRows.filter((row) => !row.stale);
-  const totalPeople = visiblePeople.length;
-  const livePeople = visiblePeople.filter((row) => row.sessions.some((s) => s.state !== "offline")).length;
   const [expandedPerson, setExpandedPerson] = useState<string | null>(null);
   const [staleOpen, setStaleOpen] = useState(false);
 
@@ -839,24 +841,28 @@ export function PresenceBar({
           >
             {stackItems.length > 0 && (
               <span className="presence-stack">
-                {stackItems.map((item) => {
+                {stackItems.map((row) => {
+                  const item = row.primary;
                   const reach = avatarReach(item, now);
                   const reachText = t(item.paused && item.kind === "agent" ? "PresenceBar.reach.paused" : `PresenceBar.reach.${reach}`);
                   const dup = item.connectionCount > 1 ? ` · ×${item.connectionCount}` : "";
-                  const src = item.avatarThumb ?? item.avatarUrl;
+                  // 一个人有多个会话时，头像上的角标显示会话数（连接数只描述单个会话）。
+                  const sessions = row.sessions.length;
+                  const badge = sessions > 1 ? sessions : item.connectionCount > 1 ? item.connectionCount : 0;
+                  const src = row.sessions.map((s) => s.avatarThumb ?? s.avatarUrl).find((u) => u !== null && u !== undefined) ?? null;
                   return (
                     <span
-                      key={item.name}
-                      className={`presence-ava presence-ava--${item.kind}`}
+                      key={row.key}
+                      className={`presence-ava presence-ava--${row.kind}`}
                       data-reach={reach}
                       data-name={item.name}
-                      title={`${item.display} · ${reachText}${dup}`}
-                      style={{ "--ah": agentHue(item.display) } as CSSProperties}
+                      title={`${row.display} · ${reachText}${sessions > 1 ? ` · ${t("PresenceBar.roster.sessions", { count: sessions })}` : dup}`}
+                      style={{ "--ah": agentHue(row.display) } as CSSProperties}
                     >
-                      {src ? <img src={src} alt="" /> : <span className="presence-ava-initial">{item.display.trim().charAt(0).toUpperCase()}</span>}
+                      {src ? <img src={src} alt="" /> : <span className="presence-ava-initial">{row.display.trim().charAt(0).toUpperCase()}</span>}
                       {/* 状态点（飞书式右下角小圆点）：比只靠描边颜色更易读 */}
                       <i className="presence-ava-dot" aria-hidden="true" />
-                      {item.connectionCount > 1 && <i className="presence-ava-dup t-mono">×{item.connectionCount}</i>}
+                      {badge > 0 && <i className="presence-ava-dup t-mono">×{badge}</i>}
                     </span>
                   );
                 })}
