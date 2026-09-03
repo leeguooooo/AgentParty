@@ -3822,12 +3822,12 @@ export function ChannelPage({
   const createTeamSquad = useCallback((name: string, draft: TeamSquadDraft) =>
     squadWrite("__new__", async () => {
       const saved = await createSquad(token, slug, name, draft);
-      setChannelSquads((current) => [...current.filter((s) => s.name !== saved.name), saved]);
+      setChannelSquads((current) => [...current.filter((s) => s !== undefined && s.name !== saved.name), saved]);
     }), [squadWrite, token, slug]);
   const updateTeamSquad = useCallback((name: string, draft: TeamSquadDraft) =>
     squadWrite(name, async () => {
       const saved = await updateSquad(token, slug, name, draft);
-      setChannelSquads((current) => current.map((s) => (s.name === saved.name ? saved : s)));
+      setChannelSquads((current) => current.filter((s) => s !== undefined).map((s) => (s.name === saved.name ? saved : s)));
     }), [squadWrite, token, slug]);
   const deleteTeamSquad = useCallback((name: string) =>
     squadWrite(name, async () => {
