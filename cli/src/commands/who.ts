@@ -2,6 +2,8 @@
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
 import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type RuntimePeerDiscovery, type SenderKind, type TaskLeaseScope, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
+import { listChannels } from "../rest";
+import { activeChannelSlugs, buildGlobalWho, globalWhoDisplay, renderGlobalRow } from "./who-global";
 import { resolveChannel } from "../config";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis, shouldSurfaceCodexWakeDiagnosis } from "../wake-diagnosis";
 import { claudeDormantToSurface, diagnoseClaudeDormantSessions, formatClaudeDormantDiagnosis } from "../claude-armed-listener";
@@ -860,8 +862,9 @@ export async function run(argv: string[]): Promise<number> {
   }
   const channel = resolveChannel(str(flags.channel) ?? positionals[0]);
   if (!channel) {
-    console.error("no channel, pass one or bind with: party init --channel C");
-    return 1;
+    // #1074：没有频道时不再报错退出——聚合「我已加入的所有频道」，回答「我能到达谁」。
+    // 频道内 who 的诊断细节（为什么叫不醒）仍需显式给频道，这里只解决「先找到人」。
+    return runGlobalWho(cfg, flags.json === true);
   }
   if (!isSlug(channel)) {
     console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
@@ -961,4 +964,50 @@ export async function run(argv: string[]): Promise<number> {
   } catch (e) {
     return handleRestError(e);
   }
+}
+
+/**
+ * `party who` 无频道时的全局视图（#1074）。逐频道拉 presence 后按人聚合。
+ * 任一频道拉取失败只跳过它并在末尾如实说明——不能因为一个频道坏掉就让整条命令没输出。
+ */
+async function runGlobalWho(cfg: { server: string; token: string; name?: string }, json: boolean): Promise<number> {
+  let channels;
+  try {
+    channels = activeChannelSlugs(await listChannels(cfg.server, cfg.token));
+  } catch (err: unknown) {
+    return handleRestError(err);
+  }
+  if (channels.length === 0) {
+    console.error("no channels yet — join one first: party join --server URL --channel SLUG --as NAME");
+    return 1;
+  }
+  const snapshots: Array<{ slug: string; presence: PresenceEntry[] }> = [];
+  const failed: string[] = [];
+  for (const slug of channels) {
+    try {
+      snapshots.push({ slug, presence: await fetchPresence(cfg.server, cfg.token, slug) });
+    } catch {
+      failed.push(slug);
+    }
+  }
+  const now = Date.now();
+  const rows = buildGlobalWho({ channels: snapshots, ...(cfg.name === undefined ? {} : { self: cfg.name }), now });
+  if (json) {
+    for (const row of rows) console.log(JSON.stringify(row));
+    if (failed.length > 0) console.error(`could not read presence for: ${failed.join(", ")}`);
+    return 0;
+  }
+  if (rows.length === 0) {
+    console.log(`no one reachable across ${channels.length} channel(s) yet`);
+    return 0;
+  }
+  console.log(`reachable across ${snapshots.length} channel(s) — pass a channel for wake diagnostics:`);
+  for (const row of rows) {
+    const entry = snapshots
+      .flatMap((snapshot) => snapshot.presence)
+      .find((candidate) => candidate.name === row.name);
+    console.log("  " + renderGlobalRow(row, entry === undefined ? row.name : globalWhoDisplay(entry), now));
+  }
+  if (failed.length > 0) console.log(`\ncould not read presence for: ${failed.join(", ")}`);
+  return 0;
 }
