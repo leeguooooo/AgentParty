@@ -99,6 +99,9 @@ test("codex 的起会话提示必须讲明要批准 hook，且说明未批准时
   expect(zh).toMatch(/交互式/);
   for (const line of lines) {
     expect(line).toContain("codex exec");
-    expect(line).toMatch(/ChatGPT/);
   }
+  // 各语言分别钉住限定词：只写 /ChatGPT/ 的话，文案退化成光提 "ChatGPT" 而不说是**桌面版**
+  // 也照样绿——而「桌面版」正是这个例外的全部内容。
+  expect(en).toMatch(/ChatGPT Desktop/);
+  expect(zh).toMatch(/ChatGPT 桌面版/);
 });
