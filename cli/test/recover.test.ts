@@ -323,7 +323,7 @@ describe("party recover —— 第 2～4 步复用 join 的第 0/3/4 步", () =>
     mock = startRestMock();
     seedBinding({ harness: "codex" });
     const logs: string[] = [];
-    const code = await runRecover(opts(), deps(logs));
+    const code = await runRecover(opts({ verbose: true }), deps(logs));
     const out = logs.join("\n");
 
     expect(code).toBe(0);

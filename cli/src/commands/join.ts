@@ -77,6 +77,7 @@ import {
 import { resolveClaudeDefaultArgs, type ClaudeDefaultArgsResolution } from "../claude-default-args";
 import { claudeLaunchPlan } from "./claude-launch";
 import { STEP_INDENT, runSteps, type Step, type StepResult } from "../onboarding/steps";
+import { processStyle, styleFor, type Style } from "../onboarding/color";
 import { verifyWakeRoundTrip, type VerifyWakeDeps } from "../onboarding/verify-wake";
 import { normalizeWakeLang, resolveWakeLang, type WakeLang } from "../wake-note-i18n";
 import { findHarnessAncestor } from "../join-binding";
@@ -94,7 +95,7 @@ export { probeClaudeArmedListener };
 const JOIN_FLAGS = ["server", "channel", "as", "harness", "mention", "lang"];
 /** 每一步「做完重跑」的那条命令——引导幂等，修好了就再跑同一条。 */
 const RERUN = "party join";
-const HELP = `usage: AGENTPARTY_TOKEN='<token>' party join --server URL --channel SLUG --as NAME [--harness codex|claude|other] [--mention name] [--lang zh|en] [--yes] [--coexist]
+const HELP = `usage: AGENTPARTY_TOKEN='<token>' party join --server URL --channel SLUG --as NAME [--harness codex|claude|other] [--mention name] [--lang zh|en] [--yes] [--coexist] [--verbose]
 
 One command that does the whole join as guided steps (#987/#988):
   第 0 步 版本      CLI version; claude plugin installed + aligned to the CLI (#961/#985)
@@ -133,7 +134,8 @@ Options:
                  \`party init --coexist\`); default is replace
   --lang zh|en   language of the wake notes injected into this agent's session (stored in
                  config, passed to \`party init --lang\`). Omit to auto-detect from the
-                 agent's own recent channel messages (#1003)`;
+                 agent's own recent channel messages (#1003)
+  --verbose      印出过了的步骤里的每一条子检查；缺省只印异常的那些（没过的步骤永远全印）`;
 
 // 每一步的结果。level 决定它在自检里怎么呈现；gate=true 的步骤决定「就绪 / 还差」。
 type StepLevel = "ok" | "skip" | "warn" | "fail";
@@ -206,6 +208,8 @@ interface CodexWakeLayerState {
 
 /** 注入点：测试喂假 spawn（不碰真机的 claude/codex 二进制），其余走真实 init/hook/send。 */
 export interface JoinDeps {
+  /** 着色器；测试与非 TTY 不给＝不着色（真机由 defaultJoinDeps 按 TTY/NO_COLOR 决定）。 */
+  style?: Style;
   spawn: typeof spawnSync;
   initRun: (argv: string[]) => Promise<number>;
   hookRun: (argv: string[]) => Promise<number>;
@@ -290,6 +294,8 @@ export interface JoinOptions {
   token: string;
   /** #1003：唤醒文案语言的显式覆盖（`--lang zh|en`），交给 party init 写进 config；缺省 null＝自动判定。 */
   lang?: WakeLang | null;
+  /** #1073：`--verbose` 把过了的步骤里的 ✓/· 子项也印出来；缺省只印异常子项。 */
+  verbose?: boolean;
 }
 
 function configFileName(agentName: string, slug: string): string {
@@ -762,6 +768,41 @@ function outcomeLine(name: string, outcome: StepOutcome): string {
   return `${symbol(outcome.level)} ${name}: ${outcome.msg}`;
 }
 
+
+// #1073 收篇幅：join 里跑的子命令（party init / party send）会把自己那套逐行日志直接打到
+// stdout——「created channel / bound channel / config written / runtime / sent seq=1」一次六七行，
+// 而这些都已经被第 1 步那一行摘要概括了。成功就吞掉，**失败或 --verbose 才原样回放**：出问题时
+// 那几行往往是唯一线索，绝不能真丢。
+//
+// 只包 init/send 这两个非交互子命令。hook install 可能要人按键批准，吞它的输出＝让人对着空屏等。
+async function quietSubcommand(
+  run: () => Promise<number>,
+  opts: { verbose: boolean; log: (line: string) => void },
+): Promise<number> {
+  const buffered: string[] = [];
+  const capture = (...args: unknown[]) => {
+    buffered.push(args.map((a) => (typeof a === "string" ? a : String(a))).join(" "));
+  };
+  const realLog = console.log;
+  const realError = console.error;
+  console.log = capture;
+  console.error = capture;
+  let code: number;
+  try {
+    code = await run();
+  } catch (e) {
+    console.log = realLog;
+    console.error = realError;
+    for (const line of buffered) opts.log(`${STEP_INDENT}${line}`);
+    throw e;
+  } finally {
+    console.log = realLog;
+    console.error = realError;
+  }
+  if (code !== 0 || opts.verbose) for (const line of buffered) opts.log(`${STEP_INDENT}${line}`);
+  return code;
+}
+
 /**
  * 第 0 步 版本：CLI 版本；claude 档还要插件装到位、已启用、与 CLI 同版（#961/#985）。
  * rerun 只进修法文案里的「然后重跑 …」（recover 传自己的那条）。
@@ -849,7 +890,7 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       if (harnessKnown) initArgs.push("--harness", harness);
       if (opts.coexist) initArgs.push("--coexist");
       if (opts.lang !== undefined && opts.lang !== null) initArgs.push("--lang", opts.lang);
-      const initCode = await deps.initRun(initArgs);
+      const initCode = await quietSubcommand(() => deps.initRun(initArgs), { verbose: ctx.opts.verbose === true, log: deps.log });
       if (initCode !== 0) {
         return {
           ok: false,
@@ -893,7 +934,7 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       // 报到（#597）。init 只写配置不发言，必须补这一条，否则网页/频道里看不到你。能 @ 邀请人就 @。
       const sendArgs = [`👋 ${agentName} 报到，来参与协作`, "--channel", slug];
       if (opts.mention !== null) sendArgs.push("--mention", opts.mention);
-      const sendCode = await deps.sendRun(sendArgs);
+      const sendCode = await quietSubcommand(() => deps.sendRun(sendArgs), { verbose: ctx.opts.verbose === true, log: deps.log });
       if (sendCode !== 0) {
         return {
           ok: false,
@@ -1207,14 +1248,16 @@ export async function runJoin(opts: JoinOptions, deps: JoinDeps): Promise<number
   const steps: Step<JoinCtx>[] = harness === "other"
     ? [versionStep(), identityStep(harnessKnown), receiveModeStep()]
     : [versionStep(), identityStep(harnessKnown), receiveModeStep(), wakeableSessionStep()];
-  let outcome = await runSteps({ steps, ctx, log: deps.log, rerun: RERUN });
+  const style = deps.style ?? styleFor(false);
+  const verbose = opts.verbose === true;
+  let outcome = await runSteps({ steps, ctx, log: deps.log, rerun: RERUN, style, verbose });
   // 第 4 步单独一轮：第 3 步选了「在这个终端起」时它不在 join 里跑（验证挪进新会话，#989），其余照旧接着跑。
   if (outcome.ok && harness !== "other" && !ctx.launchAfterJoin) {
-    outcome = await runSteps({ steps: [verifyStep()], ctx, log: deps.log, rerun: RERUN, firstIndex: 4 });
+    outcome = await runSteps({ steps: [verifyStep()], ctx, log: deps.log, rerun: RERUN, firstIndex: 4, style, verbose });
   }
   deps.log("");
   if (!outcome.ok) {
-    deps.log(`接入停在第 ${outcome.stoppedAt.index} 步（${outcome.stoppedAt.title}）——做完上面那一条，重跑同一条 ${RERUN}。`);
+    deps.log(style.bad(`接入停在第 ${outcome.stoppedAt.index} 步（${outcome.stoppedAt.title}）——做完上面那一条，重跑同一条 ${RERUN}。`));
     // 这句是整段引导存在的理由：这类失败**没有任何报错**，不明说就没人知道自己坏了。
     deps.log("在这一步完成之前：@ 你可能不会有任何反应，而且不会有任何报错——别人只会以为你在忙。");
     return 1;
@@ -1292,8 +1335,8 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { flags } = parseArgs(argv, { booleans: ["yes", "coexist"] });
-  const unknown = unknownFlagError(flags, [...JOIN_FLAGS, "yes", "coexist"]);
+  const { flags } = parseArgs(argv, { booleans: ["yes", "coexist", "verbose"] });
+  const unknown = unknownFlagError(flags, [...JOIN_FLAGS, "yes", "coexist", "verbose"]);
   if (unknown !== null) {
     console.error(unknown);
     return 1;
@@ -1356,7 +1399,7 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   return runJoin(
-    { server, channel: slug, agentName, harnessFlag, mention, yes: flags.yes === true, coexist: flags.coexist === true, token, lang },
+    { server, channel: slug, agentName, harnessFlag, mention, yes: flags.yes === true, coexist: flags.coexist === true, token, lang, verbose: flags.verbose === true },
     defaultJoinDeps(slug),
   );
 }
@@ -1376,6 +1419,7 @@ export function codexSessionIdFromEnvironment(env: NodeJS.ProcessEnv): string | 
 
 export function defaultJoinDeps(slug: string): JoinDeps {
   return {
+    style: processStyle(),
     spawn: spawnSync,
     initRun: (a) => import("./init").then((m) => m.run(a)),
     hookRun: (a) => import("./hook").then((m) => m.run(a)),

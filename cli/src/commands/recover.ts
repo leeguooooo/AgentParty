@@ -26,10 +26,11 @@ import { type JoinPackHarness, mcpServerName } from "@agentparty/shared/onboardi
 import { RestError, fetchMe, type Identity } from "../rest";
 import { isSlug } from "../validation";
 import { runSteps, type Step } from "../onboarding/steps";
+import { processStyle } from "../onboarding/color";
 import { completionLine, defaultJoinDeps, verifyStep, versionStep, wakeableSessionStep, type JoinCtx, type JoinDeps } from "./join";
 
 const RECOVER_FLAGS = ["harness"];
-const HELP = `usage: party recover <channel> [--harness codex|claude|other] [--yes]
+const HELP = `usage: party recover <channel> [--harness codex|claude|other] [--yes] [--verbose]
 
 Recover / reconnect an identity this machine already joined (#991) — no need to remember
 the original \`party join\` line or its token. Guided steps, same engine as \`party join\`:
@@ -65,6 +66,8 @@ export interface RecoverOptions {
   channel: string;
   harnessFlag: JoinPackHarness | null;
   yes: boolean;
+  /** #1073：印出过了的步骤里的每一条子检查；缺省只印异常的那些。 */
+  verbose?: boolean;
 }
 
 /** 第 1 步找回的结果，第 2～4 步靠它组 ctx。 */
@@ -245,13 +248,15 @@ export async function runRecover(opts: RecoverOptions, deps: RecoverDeps): Promi
   };
   // 第 2 步是 join 的第 0 步，第 3/4 步是 join 的第 3/4 步——同一份实现，只换 rerun 文案。
   const steps: Step<RecoverCtx>[] = [recoverIdentityStep(rerun), versionStep(rerun), ...harnessGatedWakeSteps()];
-  const outcome = await runSteps({ steps, ctx, log: deps.log, rerun, firstIndex: 1 });
+  // 与 join 同一套呈现：着色 + 过了的步骤只印异常子项（#1073）。
+  const style = processStyle();
+  const outcome = await runSteps({ steps, ctx, log: deps.log, rerun, firstIndex: 1, style, verbose: opts.verbose === true });
   deps.log("");
   if (outcome.ok) {
     deps.log(completionLine(ctx, "恢复完成"));
     return 0;
   }
-  deps.log(`恢复停在第 ${outcome.stoppedAt.index} 步（${outcome.stoppedAt.title}）——做完上面那一条，重跑同一条 ${rerun}。`);
+  deps.log(style.bad(`恢复停在第 ${outcome.stoppedAt.index} 步（${outcome.stoppedAt.title}）——做完上面那一条，重跑同一条 ${rerun}。`));
   deps.log("在这一步完成之前：@ 你可能不会有任何反应，而且不会有任何报错——别人只会以为你在忙。");
   return 1;
 }
@@ -284,8 +289,8 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { flags, positionals } = parseArgs(argv, { booleans: ["yes"] });
-  const unknown = unknownFlagError(flags, [...RECOVER_FLAGS, "yes"]);
+  const { flags, positionals } = parseArgs(argv, { booleans: ["yes", "verbose"] });
+  const unknown = unknownFlagError(flags, [...RECOVER_FLAGS, "yes", "verbose"]);
   if (unknown !== null) {
     console.error(unknown);
     return 1;
@@ -310,7 +315,7 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   const harnessFlag = (harnessFlagRaw ?? null) as JoinPackHarness | null;
-  return runRecover({ channel: slug, harnessFlag, yes: flags.yes === true }, defaultRecoverDeps(slug));
+  return runRecover({ channel: slug, harnessFlag, yes: flags.yes === true, verbose: flags.verbose === true }, defaultRecoverDeps(slug));
 }
 
 export function defaultRecoverDeps(slug: string): RecoverDeps {

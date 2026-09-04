@@ -433,7 +433,7 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     const d = deps(record, {}, logs);
     d.startCodexWakeLayer = async () => ({ action: "skip", reason: "already-serving", detail: "#dev 上本身份已有 serve 在跑（pid 777）" });
     d.codexWakeLayerLive = async () => ({ pid: 777, source: "serve-lock" });
-    const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
+    const code = await runJoin(baseOpts({ harnessFlag: "codex", verbose: true }), d);
     const out = logs.join("\n");
     expect(code).toBe(0);
     expect(out).toContain("已有唤醒层在跑");
@@ -669,11 +669,36 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(existsSync(configPath())).toBe(false);
   });
 
+  // #1073 收篇幅：party init / party send 自己那套逐行日志（created channel / config written /
+  // sent seq=1 …）已被第 1 步的一行摘要概括，成功时不该再刷一屏。但失败时它们往往是唯一线索，
+  // 必须原样回放——吞掉证据比啰嗦严重得多。
+  test("子命令的流水账：成功时吞掉，失败时原样回放", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    const ok = deps([], {}, logs);
+    const realInit = ok.initRun;
+    ok.initRun = async (a) => {
+      console.log("created channel dev");
+      return realInit(a);
+    };
+    expect(await runJoin(baseOpts({ harnessFlag: "claude" }), ok)).toBe(0);
+    expect(logs.join("\n")).not.toContain("created channel dev");
+
+    const logs2: string[] = [];
+    const bad = deps([], {}, logs2);
+    bad.initRun = async () => {
+      console.log("token 被拒：403");
+      return 1;
+    };
+    expect(await runJoin(baseOpts({ harnessFlag: "claude" }), bad)).toBe(1);
+    expect(logs2.join("\n")).toContain("token 被拒：403");
+  });
+
   test("重复接入：mcp get 命中已注册 ⇒ 跳过 add，不再叠一个常驻进程（#898）", async () => {
     mock = startRestMock();
     const record: string[][] = [];
     const logs: string[] = [];
-    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { mcpAlreadyRegistered: true }, logs));
+    const code = await runJoin(baseOpts({ harnessFlag: "claude", verbose: true }), deps(record, { mcpAlreadyRegistered: true }, logs));
 
     expect(code).toBe(0);
     // 探到了（get 跑过），但**没有** add——每个注册在每个会话里都是一个常驻进程。
@@ -813,7 +838,7 @@ describe("party join claude 档 —— 武装监听闸（#979）", () => {
     const logs: string[] = [];
     const d = deps(record, {}, logs);
     d.claudeSelfSession = () => ({ pid: process.pid, sessionId, name: "agentparty-83", hops: 2 });
-    await runJoin(baseOpts({ harnessFlag: "claude" }), d);
+    await runJoin(baseOpts({ harnessFlag: "claude", verbose: true }), d);
     const entry = listClaudeSessions().find((candidate) => candidate.session_id === sessionId);
     expect(entry).toMatchObject({
       pid: process.pid,
