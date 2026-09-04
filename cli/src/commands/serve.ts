@@ -61,7 +61,7 @@ import {
   unreadFromCursor,
   writeStatuslineCache,
 } from "../statusline-cache";
-import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchRecentMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
+import { ackDelivery, downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchRecentMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
 import { attemptWakeProxy, socketWakeProxyForwarder, type WakeProxyDeps } from "../serve-wake-proxy";
 import { detectWakeLang } from "../wake-note-i18n";
@@ -101,7 +101,7 @@ const COMMON_PROTOCOL_REMINDER =
 const ADVISORY_FRONT_REMINDER =
   " 你是留在主频道沟通和调度的 front agent。简短对话和一次只读路由检查可直接处理；代码修改、多步排查、浏览器/运维及其它耗时工作，优先交给 harness 的 subagent/worker，让它回报证据由你汇总。" +
   " 这是兼容模式（CLI 不能证明 worker 已启动）：harness 支持子 agent 就委派；确实无法创建 worker 时，就在本会话内把活干完，不要只报 blocked 停住。" +
-  " 你的最终输出会由 serve 自动发回本频道（上下文里的 reply_to 已指好这条）——直接把回复写成你的输出即可，" +
+  " 你的最终输出会由 serve 自动发回本频道（上下文里的 reply_to 已指好这条）——直接把回复写成你的输出即可；确实无需频道回复时只输出 NO_REPLY，serve 会结清 execution 且不发消息。" +
   "【不要自己调用 `party send`】：会重复投递，且常驻的 codex runner 跑在无网络沙箱里根本发不出去、还会把『连接失败』误写进回复。" +
   " 同理 `party history` / `party decision ask` 等直连服务的 CLI 在该沙箱也会失败——上下文已含 charter 与 recent，据此作答；" +
   " 确需 owner 决策或更多上下文却当前拿不到时，在你的输出里说清（由 serve 发回频道请人跟进），不要反复重试直连命令。";
@@ -1191,6 +1191,8 @@ export interface BuiltinRunnerOptions {
   authSourceFile?: string;
   now?: () => number;
   post?: typeof postMessage;
+  /** Terminal no-reply REST acknowledgement; injectable for tests. */
+  acknowledgeDelivery?: typeof ackDelivery;
   /** 交付物上传（#109）；默认真 REST。测试注入 mock。 */
   uploadAttachment?: typeof uploadAttachment;
   /** 模型 session 落盘后自报给频道 presence（issue #522）。 */
@@ -1235,6 +1237,8 @@ export interface SdkRunnerOptions {
   codexFactory?: (options?: CodexClientOptions) => CodexLike | Promise<CodexLike>;
   now?: () => number;
   post?: typeof postMessage;
+  /** Terminal no-reply REST acknowledgement; injectable for tests. */
+  acknowledgeDelivery?: typeof ackDelivery;
   /** 交付物上传（#109）；默认真 REST。测试注入 mock。 */
   uploadAttachment?: typeof uploadAttachment;
   /** 模型 session 落盘后自报给频道 presence（issue #522）。 */
@@ -2298,6 +2302,11 @@ interface RunnerDeliveryOutcome {
   autoDecision?: AutoDecisionContinuation;
 }
 
+export function isRunnerNoReply(text: string): boolean {
+  const normalized = text.trim();
+  return normalized === "" || normalized === "NO_REPLY";
+}
+
 const MAX_AUTO_DECISION_CONTINUATIONS = 4;
 
 function autoDecisionContinuationPrompt(decision: AutoDecisionContinuation): string {
@@ -2322,10 +2331,36 @@ async function deliverRunnerResult(opts: {
   attachmentRoot?: string | null;
   attachments?: RunnerAttachment[];
   responseSource?: ResponseSource;
+  acknowledgeDelivery?: typeof ackDelivery;
 }): Promise<RunnerDeliveryOutcome> {
   const routed = opts.route === undefined
     ? { replyTo: opts.frame.seq, text: opts.text }
     : await opts.route(opts.frame, opts.text, opts.marker, opts.delivery ?? null);
+  // A default reception runner's empty/NO_REPLY result is a terminal signal,
+  // never prose. Settling the existing delivery avoids creating the reverse
+  // directed execution that would wake the peer and self-excite both agents.
+  if (
+    opts.route === undefined &&
+    (opts.attachments?.length ?? 0) === 0 &&
+    isRunnerNoReply(routed.text)
+  ) {
+    if (opts.delivery !== null && opts.delivery !== undefined) {
+      const acknowledged = await (opts.acknowledgeDelivery ?? ackDelivery)(
+        opts.server,
+        opts.token,
+        opts.channel,
+        opts.delivery.id,
+      );
+      if (
+        acknowledged.delivery.id !== opts.delivery.id ||
+        acknowledged.delivery.state !== "replied" ||
+        acknowledged.delivery.reply_seq !== null
+      ) {
+        throw new Error(`server did not terminally acknowledge delivery ${opts.delivery.id} without a reply`);
+      }
+    }
+    return {};
+  }
   const delivered = await deliverRunnerMessage({
     post: opts.post,
     upload: opts.upload,
@@ -3467,6 +3502,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
             session: baseSession.wakes > 0 ? "resumed" : "started",
             trigger_seq: frame.seq,
           },
+          acknowledgeDelivery: opts.acknowledgeDelivery,
         });
         if (outcome.autoDecision === undefined) {
           appendRunnerLog(
@@ -3894,6 +3930,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
               session: finalSid === null ? "unavailable" : oldSid === null ? "started" : "resumed",
               trigger_seq: frame.seq,
             },
+            acknowledgeDelivery: opts.acknowledgeDelivery,
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

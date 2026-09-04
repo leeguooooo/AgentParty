@@ -61,7 +61,7 @@ describe("injectFromName / senderInjectFromName（#986：主名只放友好名�
     // 指针正文本身不变：仍是 channel+seq。
     expect(note).toContain("#dev");
     expect(note).toContain("seq 7");
-    expect(note).toContain("--reply-to 7");
+    expect(note).toContain('party reply 7 "<your reply>"');
   });
 
   test("单发信人 ⇒ from-name 恰为 `leo`（owner 真机形态：人类账号技术 ID + display_name）", () => {

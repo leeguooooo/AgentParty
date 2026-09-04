@@ -46,10 +46,17 @@ function startRest(): void {
       }
       if (url.pathname === "/api/channels/dev/messages" && req.method === "POST") {
         const frame = body as Record<string, unknown>;
+        const request = frame.decision_request as Record<string, unknown> | undefined;
         return Response.json({
           seq: 7,
-          ...(frame.decision_request !== undefined
-            ? { decision_request: frame.decision_request, decision_resolution: decisionResolution }
+          ...(request !== undefined
+            ? {
+                decision_request: {
+                  ...request,
+                  options: request.kind === "approval" ? ["approve", "reject"] : request.options,
+                },
+                decision_resolution: decisionResolution,
+              }
             : {}),
         });
       }

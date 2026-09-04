@@ -12,6 +12,7 @@ import {
   fetchMessages,
   handleRestError,
   listChannelDecisions,
+  listPendingChannelDecisions,
   postMessage,
   recordChannelDecision,
   respondDecision,
@@ -44,7 +45,8 @@ ask     upload a plan/question for a human to approve/reject or answer 1/2/3.
 respond a human (or moderator) settles a pending decision. Positional choice is
         approve|reject for approval requests, or a 1-based index / option text.
 mode    approval keeps requests pending for a human; unattended auto-resolves.
-list    show the channel's authoritative active decisions; --all includes up to 200 recent history rows.
+list    show durable pending requests plus authoritative active decisions;
+        --all includes up to 200 recent decision-ledger history rows.
 record  append an owner/assigned-host decision. An existing topic must be changed with --supersedes.
 
 Options:
@@ -273,7 +275,26 @@ export async function askDecision(
   const posted = await postMessage(auth.server, auth.token, channel, payload);
   const { seq } = posted;
   advanceCursorPastOwnMessage(channel, seq);
+  const acceptedRequest = posted.decision_request;
   const immediate = posted.decision_resolution;
+  const expectedOptions = decisionRequest.kind === "approval"
+    ? ["approve", "reject"]
+    : decisionRequest.options;
+  if (
+    acceptedRequest === undefined ||
+    immediate === undefined ||
+    (immediate.state !== "pending" && immediate.state !== "auto_resolved") ||
+    acceptedRequest.kind !== decisionRequest.kind ||
+    acceptedRequest.prompt !== decisionRequest.prompt ||
+    !Array.isArray(acceptedRequest.options) ||
+    acceptedRequest.options.length !== expectedOptions.length ||
+    acceptedRequest.options.some((option, index) => option !== expectedOptions[index])
+  ) {
+    throw new Error(
+      `decision request was not accepted by the server (message #${seq} may exist, but no matching durable ` +
+        "pending/auto-resolved decision was created)",
+    );
+  }
   // A serve-owned work must never park its single runner in a local poll loop. The Worker has
   // durably moved it to waiting_owner and released the next delivery; owner resolution will create
   // a new owner_answer delivery for the same work/continuation.
@@ -289,8 +310,8 @@ export async function askDecision(
     ...(state === "auto_resolved" && immediate?.chosen_option !== undefined
       ? { chosen_option: immediate.chosen_option }
       : {}),
-    ...(posted.decision_request !== undefined ? { decision_request: posted.decision_request } : {}),
-    ...(immediate !== undefined ? { decision_resolution: immediate } : {}),
+    decision_request: acceptedRequest,
+    decision_resolution: immediate,
     continuation,
   };
 }
@@ -537,9 +558,22 @@ async function runList(argv: string[]): Promise<number> {
       channel,
       flags.all === true ? "all" : "active",
     );
+    const pendingDecisions = await listPendingChannelDecisions(auth.server, auth.token, channel);
     if (flags.json === true) {
-      console.log(JSON.stringify({ type: "channel_decision_list", channel, decisions, truncated }));
+      console.log(JSON.stringify({
+        type: "channel_decision_list",
+        channel,
+        pending_decisions: pendingDecisions,
+        decisions,
+        truncated,
+      }));
       return 0;
+    }
+    console.log(`pending decision requests: ${pendingDecisions.length}`);
+    for (const pending of pendingDecisions) {
+      console.log(sanitizeSingleLine(
+        `- #${pending.seq} from @${pending.asker}${pending.waiting_on_me ? " (waiting on me)" : ""}: ${pending.prompt}`,
+      ));
     }
     console.log(
       `${flags.all === true ? "recent decision ledger" : "active decisions"}: ${decisions.length}${truncated ? " (truncated)" : ""}`,

@@ -4296,6 +4296,58 @@ describe("Claude Channel directed-delivery ledger", () => {
     await first;
     expect(posts).toBe(1);
   });
+
+  test("a journal cleanup failure after remote no-reply ACK remains locally retryable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ap-no-reply-journal-retry-"));
+    try {
+      let failNextCommit = false;
+      const journal = new DeliveryRecoveryJournal(join(root, "journal.json"), "dev", "claude", {
+        persist(commit) {
+          if (failNextCommit) {
+            failNextCommit = false;
+            throw Object.assign(new Error("journal disk full"), { code: "ENOSPC" });
+          }
+          commit();
+        },
+      });
+      const fake = fakeConnection();
+      let acknowledgements = 0;
+      const bridge = new ClaudeChannelDeliveryBridge({
+        channel: "dev",
+        connection: fake.connection,
+        recoveryJournal: journal,
+        notify: async () => {},
+        postReply: async () => ({ seq: 99 }),
+        acknowledgeDelivery: async (ref) => {
+          acknowledgements += 1;
+          return { deliveryId: String(ref), deduped: acknowledgements > 1 };
+        },
+        confirmDeliveryUpdate: async (update) => update.state,
+        leaseRenewIntervalMs: 60_000,
+        out: () => {},
+      });
+      await bridge.handleFrame(welcomeDirectedFrame(0, "me") as ServerFrame);
+      await bridge.handleFrame(deliveryFrame(11, "FYI", { id: "delivery-no-reply-retry" }) as ServerFrame);
+      expect(journal.get("delivery-no-reply-retry")).toMatchObject({ phase: "harness_accepted" });
+
+      failNextCommit = true;
+      await expect(bridge.noReply(11)).rejects.toThrow("journal disk full");
+      expect(acknowledgements).toBe(1);
+      expect(bridge.pendingCount).toBe(1);
+      expect(journal.get("delivery-no-reply-retry")).not.toBeNull();
+
+      await expect(bridge.noReply(11)).resolves.toEqual({
+        deliveryId: "delivery-no-reply-retry",
+        deduped: true,
+      });
+      expect(acknowledgements).toBe(2);
+      expect(bridge.pendingCount).toBe(0);
+      expect(journal.get("delivery-no-reply-retry")).toBeNull();
+      bridge.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("唤醒通知带 siblings=N（issue #963）", () => {

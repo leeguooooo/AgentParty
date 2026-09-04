@@ -178,7 +178,8 @@ Worker 发布前必须提供 runtime smoke agent token：优先读取 `AGENTPART
 部署后脚本会先运行已鉴权的 live-topology smoke，再进入写路径 smoke。它临时建立两条 WebSocket：两端使用同一个随机
 `node_ref`，但 workspace/worktree 引用不同；每端的 topology `hello` 都要经过应用队列中的 ping/pong 顺序屏障。随后脚本只接受
 v3、`caller_binding=live_socket`，以及唯一可寻址的 `same_local_installation` Claude 候选。脚本等待两条连接在有限时限内完成
-关闭握手后才报告 `sockets_closed=true`；
+关闭握手后才报告 `sockets_closed=true`。调用方绑定若短暂返回 409，会经过两次有界退避重试；最终仍失败时错误会带
+`matches=N`，可区分调用方尚未出现（0）与重复活连接（2+）；
 响应也不能包含请求侧的四类原始 topology ref。脚本不发送 Channel 或 Claude 消息。因此这能证明线上 Worker 的调用方绑定、
 拓扑比较和引用脱敏，不能证明 Cross-session 已投递。
 只有需要较弱的空 peer 端点诊断时，才使用 `smoke-runtime-peers.mjs --capability-only`。
@@ -263,7 +264,7 @@ attr 顺序与接收端的重序列化校验一致。
 
 <body>
 
-回复：[AGENTPARTY_CONFIG=<path> ]party send "<你的回复>" --channel <channel> --reply-to <N>
+回复：[AGENTPARTY_CONFIG=<path> ]party reply <N> "<你的回复>" --channel <channel>
 线程：party history <channel> --seq <N>
 from-id: <发信人技术 identity>
 ```
@@ -271,9 +272,9 @@ from-id: <发信人技术 identity>
 - `<body>` 在 ≤4096 UTF-8 字节时**逐字原样**内联（不加引号、不转义、保留换行）。超过则只内联前 512 字节，
   在字符边界截断（不切开多字节字符与代理对），后接一行
   `… (<total> bytes total; full text: party history <channel> --seq <N>)`。
-- `回复：` 行可直接复制执行：channel 与 `--reply-to` 已填好，唯一要改的是引号里的占位正文。被唤醒身份来自显式
-  `AGENTPARTY_CONFIG` 路径时前缀 `AGENTPARTY_CONFIG=<path> `——会话的 shell 里没有这个变量，裸 `party send`
-  会按 cwd 解析到别的身份。`reply_to` 本身就会把回复定向投给原发信人（directed-delivery cause `reply`），
+- `回复：` 行可直接复制执行：channel 与回复 seq 已填好，唯一要改的是引号里的占位正文。被唤醒身份来自显式
+  `AGENTPARTY_CONFIG` 路径时，只有当前会话不能解析到同一配置才保留 `AGENTPARTY_CONFIG=<path> ` 前缀；
+  常见的同配置场景会省略。`reply_to` 本身就会把回复定向投给原发信人（directed-delivery cause `reply`），
   不需要再 `--mention`。
 - 整条 ≤5120 字节（`WAKE_NOTE_MAX_BYTES`）：骨架 ≤1024 + 正文 ≤4096。骨架超预算按顺序让步——siblings 行只留裸
   `siblings=N`、砍 `<ago>`、砍发信人（头行退回「有人提到了你」）、砍 `AGENTPARTY_CONFIG=` 前缀。

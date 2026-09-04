@@ -8,11 +8,11 @@ let previewResult: Record<string, unknown> | null = null;
 const redeemCalls: Array<{ token: string; code: string }> = [];
 let redeemError: Error | null = null;
 const loginCalls: string[] = [];
+// @ts-expect-error Bun supports query-suffixed imports that bypass process-wide module mocks.
+const actualApi = await import("../lib/api.ts?test-actual");
 
 mock.module("../lib/api", () => ({
-  AuthError: class AuthError extends Error {},
-  ForbiddenError: class ForbiddenError extends Error {},
-  ValidationError: class ValidationError extends Error {},
+  ...actualApi,
   getInvitePreview: async () => {
     if (previewResult === null) throw new Error("preview failed");
     return previewResult;

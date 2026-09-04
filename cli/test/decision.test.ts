@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { writeConfig, writeState } from "../src/config";
 import { run as decisionRun } from "../src/commands/decision";
 import { continuationPath, readRunnerContinuation } from "../src/continuation";
+import { parsePendingChannelDecisionPage } from "../src/rest";
 import { startRestMock, type RestMock, type RestRequest } from "./rest-mock";
 
 let home: string;
@@ -38,7 +39,7 @@ function clearContinuationEnv(): void {
 function decisionHandler(request: RestRequest): Response | undefined {
   if (request.method === "POST" && request.path.endsWith("/messages")) {
     const payload = request.body as {
-      decision_request?: { prompt?: string };
+      decision_request?: { prompt?: string; kind?: "approval" | "choice"; options?: string[] };
       expected_decision_lineage?: {
         delivery_id?: unknown;
         work_id?: unknown;
@@ -99,7 +100,21 @@ function decisionHandler(request: RestRequest): Response | undefined {
         decision_resolution: { state: "auto_resolved", chosen_index: 0, chosen_option: "\x1b[31mship\x07" },
       });
     }
-    return Response.json({ seq: 7 });
+    if (decision?.prompt === "dropped decision") {
+      // Model an old/broken server silently storing only the ordinary message.
+      return Response.json({ seq: 11 });
+    }
+    return Response.json({
+      seq: 7,
+      decision_request: decision?.prompt === undefined
+        ? undefined
+        : {
+            kind: decision.kind ?? "approval",
+            prompt: decision.prompt,
+            options: decision.kind === "choice" ? (decision.options ?? []) : ["approve", "reject"],
+          },
+      decision_resolution: { state: "pending" },
+    });
   }
   if (request.method === "POST" && /\/messages\/\d+\/decision$/.test(request.path)) {
     const body = request.body as { action?: string; option?: number | string };
@@ -155,6 +170,12 @@ function decisionHandler(request: RestRequest): Response | undefined {
         created_at: 1,
       }],
       truncated: request.query.status === "all",
+    });
+  }
+  if (request.method === "GET" && request.path.endsWith("/pending-decisions")) {
+    return Response.json({
+      decisions: [{ seq: 17, prompt: "Ship the release?", asker: "agent", waiting_on_me: true }],
+      next_after: null,
     });
   }
   if (request.method === "POST" && request.path.endsWith("/decisions")) {
@@ -224,6 +245,14 @@ describe("party decision ask", () => {
       prompt: "which path?",
       options: ["ship", "wait"],
     });
+  });
+
+  test("returns non-success when the server silently drops the decision request", async () => {
+    const code = await decisionRun(["ask", "dropped decision"]);
+    expect(code).toBe(1);
+    expect(errs.join("\n")).toContain("decision request was not accepted by the server");
+    expect(errs.join("\n")).toContain("message #11 may exist");
+    expect(logs.join("\n")).not.toContain("posted");
   });
 
   test("a serve-bound pending decision returns WAITING_OWNER immediately even with --wait", async () => {
@@ -444,23 +473,42 @@ describe("party decision mode", () => {
 });
 
 describe("party decision authoritative ledger", () => {
+  test("rejects malformed pending-decision success pages instead of hiding requests", () => {
+    expect(() => parsePendingChannelDecisionPage({ next_after: null })).toThrow(
+      "invalid pending decisions response",
+    );
+    expect(() => parsePendingChannelDecisionPage({ decisions: null, next_after: null })).toThrow(
+      "invalid pending decisions response",
+    );
+    expect(() => parsePendingChannelDecisionPage({
+      decisions: [{ seq: 1, prompt: "ship?", asker: "agent", waiting_on_me: "yes" }],
+      next_after: null,
+    })).toThrow("invalid pending decisions response");
+    expect(parsePendingChannelDecisionPage({ decisions: [], next_after: null })).toEqual({
+      decisions: [],
+      next_after: null,
+    });
+  });
+
   test("lists active decisions and requests recent history with --all", async () => {
     expect(await decisionRun(["list"])).toBe(0);
+    expect(logs.join("\n")).toContain("pending decision requests: 1");
+    expect(logs.join("\n")).toContain("#17 from @agent (waiting on me): Ship the release?");
     expect(logs.join("\n")).toContain("active decisions: 1");
     expect(logs.join("\n")).toContain("[runner] Use the assigned host.");
-    expect(mock!.requests.at(-1)).toMatchObject({
+    expect(mock!.requests).toContainEqual(expect.objectContaining({
       method: "GET",
       path: "/api/channels/dev/decisions",
       query: { status: "active", limit: "100" },
-    });
+    }));
 
     expect(await decisionRun(["list", "--all"])).toBe(0);
     expect(logs.join("\n")).toContain("recent decision ledger: 1 (truncated)");
-    expect(mock!.requests.at(-1)).toMatchObject({
+    expect(mock!.requests).toContainEqual(expect.objectContaining({
       method: "GET",
       path: "/api/channels/dev/decisions",
       query: { status: "all", limit: "200" },
-    });
+    }));
   });
 
   test("records a decision with explicit evidence and supersession fields", async () => {

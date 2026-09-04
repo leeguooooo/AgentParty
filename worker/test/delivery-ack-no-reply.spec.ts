@@ -39,6 +39,15 @@ async function deliveryRow(slug: string) {
   });
 }
 
+async function channelCounts(slug: string) {
+  const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+  return runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+    const messages = state.storage.sql.exec("SELECT COUNT(*) AS n FROM messages").toArray()[0];
+    const deliveries = state.storage.sql.exec("SELECT COUNT(*) AS n FROM directed_deliveries").toArray()[0];
+    return { messages: Number(messages?.n ?? 0), deliveries: Number(deliveries?.n ?? 0) };
+  });
+}
+
 async function setup() {
   const owner = `${uniq("owner")}@example.com`;
   const sender = await seedToken("agent", uniq("sender"), { owner });
@@ -51,6 +60,21 @@ async function setup() {
 }
 
 describe("#875 已读不回：acknowledged_no_reply 终态", () => {
+  it("双 agent 的 NO_REPLY 在一步内终止，不落消息也不创建反向 delivery (#1080)", async () => {
+    const { slug, target, deliveryId } = await setup();
+    const before = await channelCounts(slug);
+
+    const res = await api(`/api/channels/${slug}/deliveries/${deliveryId}/ack`, target.token, { method: "POST" });
+
+    expect(res.status).toBe(200);
+    expect(await channelCounts(slug)).toEqual(before);
+    expect(await deliveryRow(slug)).toMatchObject({
+      state: "replied",
+      terminal_reason: "acknowledged_no_reply",
+      reply_seq: null,
+    });
+  });
+
   it("目标身份显式 ack 后落 replied + acknowledged_no_reply，而不是 failed/unknown_outcome", async () => {
     const { slug, target, deliveryId } = await setup();
 

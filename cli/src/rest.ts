@@ -1132,6 +1132,81 @@ export async function listChannelDecisions(
   };
 }
 
+export interface PendingChannelDecision {
+  seq: number;
+  prompt: string;
+  asker: string;
+  waiting_on_me: boolean;
+}
+
+interface PendingChannelDecisionPage {
+  decisions: PendingChannelDecision[];
+  next_after: number | null;
+}
+
+/** Validate the authoritative pending-decision page instead of hiding malformed success responses. */
+export function parsePendingChannelDecisionPage(body: unknown): PendingChannelDecisionPage {
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    Array.isArray(body) ||
+    !Object.hasOwn(body, "decisions") ||
+    !Object.hasOwn(body, "next_after")
+  ) {
+    throw new Error("invalid pending decisions response");
+  }
+  const page = body as Record<string, unknown>;
+  if (
+    !Array.isArray(page.decisions) ||
+    !(
+      page.next_after === null ||
+      (Number.isSafeInteger(page.next_after) && Number(page.next_after) > 0)
+    ) ||
+    page.decisions.some((decision) =>
+      typeof decision !== "object" ||
+      decision === null ||
+      Array.isArray(decision) ||
+      !Number.isSafeInteger((decision as Record<string, unknown>).seq) ||
+      Number((decision as Record<string, unknown>).seq) <= 0 ||
+      typeof (decision as Record<string, unknown>).prompt !== "string" ||
+      typeof (decision as Record<string, unknown>).asker !== "string" ||
+      typeof (decision as Record<string, unknown>).waiting_on_me !== "boolean"
+    )
+  ) {
+    throw new Error("invalid pending decisions response");
+  }
+  return page as unknown as PendingChannelDecisionPage;
+}
+
+/** Durable unresolved decision requests, independent of the bounded message window. */
+export async function listPendingChannelDecisions(
+  server: string,
+  token: string,
+  slug: string,
+): Promise<PendingChannelDecision[]> {
+  const decisions = new Map<number, PendingChannelDecision>();
+  let after = 0;
+  for (let page = 0; page < 200; page += 1) {
+    const body = await req(
+      server,
+      `/api/channels/${encodeURIComponent(slug)}/pending-decisions?after=${after}&limit=200`,
+      { headers: bearerJson(token) },
+    );
+    const pendingPage = parsePendingChannelDecisionPage(body);
+    for (const decision of pendingPage.decisions) {
+      decisions.set(decision.seq, decision);
+    }
+    if (pendingPage.next_after === null) {
+      return [...decisions.values()].sort((left, right) => left.seq - right.seq);
+    }
+    if (pendingPage.next_after <= after) {
+      throw new Error("pending decision cursor did not advance");
+    }
+    after = pendingPage.next_after;
+  }
+  throw new Error("pending decisions exceeded max page count");
+}
+
 export async function recordChannelDecision(
   server: string,
   token: string,

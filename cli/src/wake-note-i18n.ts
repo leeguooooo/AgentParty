@@ -8,7 +8,7 @@
 //        <空行>
 //        <正文：≤4096B 逐字内联；否则前 512B（字符边界）+ `… (<total> bytes total; full text: …)` 行>
 //        <空行>
-//        Reply: <可直接复制执行的 party send … --reply-to N>
+//        Reply: <可直接复制执行的 party reply N …>
 //        Thread: party history <channel> --seq N
 //        from-id: <技术 identity>（#1002 防冒充行）
 //      正文直接进上下文、回复命令填好——对齐 Claude Code 内置 SendMessage（正文直达、from 抄成 to）。
@@ -19,6 +19,11 @@
 // 同一套规则也覆盖：`party wake verify` 的验证帧正文（#996）、codex Stop hook 的 codexStopWakeReason
 // （#965）、Claude Cross-session wake hint（#836）、空闲通知 idle notice（#1052 #5）。文案都从这里的 t() 取。
 import { Buffer } from "node:buffer";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { configPath as ambientAgentpartyConfigPath } from "./config";
+import { sanitizeSingleLine } from "./format";
+import { isSlug } from "./validation";
 
 export type WakeLang = "zh" | "en";
 
@@ -416,20 +421,45 @@ export function cutOnCharBoundary(text: string, budget: number): string {
   return out;
 }
 
-/** 可直接复制执行的回复命令（Reply 行）：`[AGENTPARTY_CONFIG=<path> ]party send "<your reply>" --channel <c> --reply-to <N>`。 */
-export function wakeReplyCommand(lang: WakeLang, channel: string, seq: number, configPath?: string | null): string {
-  const prefix = typeof configPath === "string" && configPath.trim() !== "" ? `AGENTPARTY_CONFIG=${shellQuote(configPath.trim())} ` : "";
-  return `${prefix}party send "${t(lang, "wake.reply.placeholder")}" --channel ${channel} --reply-to ${seq}`;
+function comparablePath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * 可直接复制执行的回复命令（Reply 行）。当前会话已经会解析到同一 config 时，不重复显示
+ * `AGENTPARTY_CONFIG=`；只有跨身份注入才保留这个必要的作用域前缀（#1076）。
+ */
+export function wakeReplyCommand(
+  lang: WakeLang,
+  channel: string,
+  seq: number,
+  configPath?: string | null,
+  ambientConfigPath: string | null = ambientAgentpartyConfigPath(),
+): string {
+  const scoped = typeof configPath === "string" && configPath.trim() !== "" ? configPath.trim() : null;
+  const needsPrefix = scoped !== null
+    && (ambientConfigPath === null || comparablePath(scoped) !== comparablePath(ambientConfigPath));
+  const prefix = needsPrefix ? `AGENTPARTY_CONFIG=${shellQuote(scoped)} ` : "";
+  return `${prefix}party reply ${seq} "${t(lang, "wake.reply.placeholder")}" --channel ${shellChannel(channel)}`;
 }
 
 /** 读线程的命令（Thread 行）。 */
 export function wakeThreadCommand(channel: string, seq: number): string {
-  return `party history ${channel} --seq ${seq}`;
+  return `party history ${shellChannel(channel)} --seq ${seq}`;
 }
 
 /** 路径进 shell 命令前的最小引用：只含安全字符时原样，否则单引号包裹。 */
 function shellQuote(value: string): string {
   return /^[A-Za-z0-9_./~-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** Channel slugs stay readable; any corrupted local value becomes inert shell data. */
+function shellChannel(channel: string): string {
+  return isSlug(channel) ? channel : shellQuote(sanitizeSingleLine(channel));
 }
 
 /**

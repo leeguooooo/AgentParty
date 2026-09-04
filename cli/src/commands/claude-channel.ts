@@ -79,6 +79,7 @@ import {
 import { watchParentLiveness } from "../parent-liveness";
 import { resolveAuthDetailed } from "../oidc-cli";
 import {
+  ackDelivery,
   fetchMe,
   fetchMessages,
   fetchPresence,
@@ -1203,6 +1204,9 @@ export type ChannelPostReply = (reply: {
   replyTo: number;
   idempotencyKey: string;
 }) => Promise<{ seq: number }>;
+export type ChannelAcknowledgeDelivery = (
+  ref: string | number,
+) => Promise<{ deliveryId: string; deduped: boolean }>;
 export type ChannelLoadMessage = (seq: number) => Promise<MsgFrame | null>;
 
 type BridgeConnection = Pick<Connection, "frames" | "send" | "ack" | "close" | "cursor">;
@@ -1260,6 +1264,8 @@ export interface ClaudeChannelDeliveryBridgeOptions {
   connection: BridgeConnection;
   notify: ChannelNotify;
   postReply: ChannelPostReply;
+  /** Persist a terminal no-reply acknowledgement without creating a message. */
+  acknowledgeDelivery?: ChannelAcknowledgeDelivery;
   out?: (line: string) => void;
   leaseRenewIntervalMs?: number;
   deliveryAckTimeoutMs?: number;
@@ -1349,7 +1355,8 @@ function notificationFor(
       siblingsNote +
       `AgentParty message in #${channel} from @${sender} (seq=${message.seq}):\n\n` +
       `${message.body}\n\n` +
-      `Respond to this exact message by calling ${REPLY_TOOL} with seq=${message.seq} and your reply text. ` +
+      `Finish this exact message by calling ${REPLY_TOOL} with seq=${message.seq} and either a non-empty ` +
+      "reply text or no_reply=true when no channel response is warranted. " +
       "Do not use party_send for this reply.",
     meta: {
       source: "agentparty",
@@ -3032,7 +3039,8 @@ export class ClaudeChannelDeliveryBridge {
       accepted: true,
       content:
         `Execution ${executionId} receipt ${claimReceipt} is durably accepted. ` +
-        "Execute it once, then send exactly one linked reply.",
+        `Execute it once, then either send exactly one linked reply or finish with ${REPLY_TOOL} ` +
+        "using no_reply=true when no channel response is warranted.",
     };
   }
 
@@ -3041,21 +3049,16 @@ export class ClaudeChannelDeliveryBridge {
     return this.pending.get(seq)?.message.sender.name ?? null;
   }
 
-  async reply(seq: number, text: string): Promise<{ seq: number }> {
+  private pendingForTerminalResponse(seq: number): PendingChannelMessage {
     if (!Number.isSafeInteger(seq) || seq <= 0) {
       throw new Error("seq must be a positive integer");
     }
-    const body = text.trim();
-    if (body.length === 0) throw new Error("reply text must not be empty");
-    if (new TextEncoder().encode(body).byteLength > BODY_LIMIT) {
-      throw new Error(`reply exceeds ${BODY_LIMIT} UTF-8 bytes`);
-    }
     const pending = this.pending.get(seq);
     if (!pending) {
-      throw new Error(`no pending AgentParty channel message for seq=${seq}; it may already have been replied to`);
+      throw new Error(`no pending AgentParty channel message for seq=${seq}; it may already have been settled`);
     }
     if (pending.terminalError !== null) {
-      throw new Error(`delivery for seq=${seq} already failed before Claude could reply`);
+      throw new Error(`delivery for seq=${seq} already failed before Claude could respond`);
     }
     if (
       this.options.requireHarnessClaim === true &&
@@ -3064,10 +3067,76 @@ export class ClaudeChannelDeliveryBridge {
     ) {
       throw new Error(
         `delivery for seq=${seq} must be claimed with ${CLAIM_TOOL} and accepted with ` +
-          `${ACCEPT_TOOL} before replying`,
+          `${ACCEPT_TOOL} before responding`,
       );
     }
     if (pending.replying) throw new Error(`reply already in progress for seq=${seq}`);
+    if (pending.settling) throw new Error(`response already in progress for seq=${seq}`);
+    return pending;
+  }
+
+  /**
+   * Settle one accepted execution without posting a channel message. This is
+   * the terminal form of NO_REPLY: it closes the Worker delivery and removes
+   * the Stop-guard journal entry, so it cannot wake the peer again.
+   */
+  async noReply(seq: number): Promise<{ deliveryId: string | null; deduped: boolean }> {
+    const pending = this.pendingForTerminalResponse(seq);
+    if (pending.replyBody !== null || pending.replySeq !== null) {
+      throw new Error(`linked reply already started for seq=${seq}`);
+    }
+    pending.settling = true;
+    this.stopPendingRetry(pending);
+    this.stopLeaseRenewal(pending);
+    let remotelySettled = pending.delivery === null;
+    try {
+      let result: { deliveryId: string | null; deduped: boolean };
+      if (pending.delivery === null) {
+        // Legacy non-directed inputs have no server delivery ledger. Dropping
+        // the local pending entry is still a true no-message terminal action.
+        result = { deliveryId: null, deduped: false };
+      } else {
+        const acknowledge = this.options.acknowledgeDelivery;
+        if (acknowledge === undefined) {
+          throw new Error("this AgentParty Channel does not support terminal no-reply acknowledgement");
+        }
+        const acknowledged = await acknowledge(pending.delivery.id);
+        if (acknowledged.deliveryId !== pending.delivery.id) {
+          throw new Error(
+            `acknowledged delivery ${acknowledged.deliveryId}, expected ${pending.delivery.id}`,
+          );
+        }
+        remotelySettled = true;
+        result = acknowledged;
+      }
+      // Keep the in-memory pending entry until the local journal commit has
+      // succeeded. If disk cleanup fails after the authoritative REST ACK, a
+      // Stop continuation can retry this idempotently instead of being left
+      // with an orphan journal entry and no callable pending execution.
+      if (pending.delivery) this.options.recoveryJournal?.remove(pending.delivery.id);
+      const completed = this.clearPending(seq);
+      if (completed?.delivery) {
+        this.rememberBounded(this.settledDeliveryIds, completed.delivery.id);
+        this.releaseParkedContinuation(completed);
+      }
+      this.out(`claude-channel: settled seq=${seq} without a channel reply`);
+      return result;
+    } catch (error) {
+      pending.settling = false;
+      // The Worker is already terminal after a successful REST ACK. Renewing
+      // that lease is both futile and misleading; keep only the local retry.
+      if (!remotelySettled) this.startLeaseRenewal(pending);
+      throw error;
+    }
+  }
+
+  async reply(seq: number, text: string): Promise<{ seq: number }> {
+    const pending = this.pendingForTerminalResponse(seq);
+    const body = text.trim();
+    if (body.length === 0) throw new Error("reply text must not be empty");
+    if (new TextEncoder().encode(body).byteLength > BODY_LIMIT) {
+      throw new Error(`reply exceeds ${BODY_LIMIT} UTF-8 bytes`);
+    }
     pending.replyBody ??= body;
     if (pending.delivery) {
       this.options.recoveryJournal?.update(pending.delivery.id, {
@@ -3304,8 +3373,10 @@ export async function run(argv: string[]): Promise<number> {
         `Durable AgentParty inputs must first be fetched with ${CLAIM_TOOL}. The same unaccepted ` +
         "ownership generation returns one stable receipt and body. After reading the complete result, " +
         `call ${ACCEPT_TOOL} with the exact execution id and receipt before doing any work or causing ` +
-        `any side effect. Only after that durable acceptance may you execute and reply once with ${REPLY_TOOL}; ` +
-        "do not use party_send for a channel reply. A tool success means the linked AgentParty reply was persisted. " +
+        `any side effect. Only after that durable acceptance may you execute and finish once with ${REPLY_TOOL}; ` +
+        "pass a non-empty text reply, or pass no_reply=true when no channel response is warranted. " +
+        "An empty body or the exact legacy marker NO_REPLY is also treated as terminal no-reply and never posted. " +
+        "Do not use party_send for a channel reply. A tool success means the linked AgentParty reply was persisted. " +
         `Use ${PEERS_TOOL} only when local-session coordination is relevant. Correlate its claude_sessions hints ` +
         "with Claude's built-in ListAgents results by exact name, requiring one unique match, then use the exact " +
         `agent, display_name, and candidate_ref from the hint with ${PEER_CHECK_TOOL} immediately before ` +
@@ -3347,6 +3418,16 @@ export async function run(argv: string[]): Promise<number> {
         idempotency_key: idempotencyKey,
       });
       return { seq: posted.seq };
+    },
+    acknowledgeDelivery: async (ref) => {
+      const acknowledged = await ackDelivery(serverUrl, token, channel, ref);
+      if (acknowledged.delivery.state !== "replied" || acknowledged.delivery.reply_seq !== null) {
+        throw new Error(`delivery ${acknowledged.delivery.id} was not settled as acknowledged_no_reply`);
+      }
+      return {
+        deliveryId: acknowledged.delivery.id,
+        deduped: acknowledged.deduped === true,
+      };
     },
     loadMessage: async (seq) => {
       const messages = await fetchMessages(
@@ -3450,16 +3531,20 @@ export async function run(argv: string[]): Promise<number> {
       },
       {
         name: REPLY_TOOL,
-        title: "Reply to an AgentParty Channel message",
+        title: "Finish an AgentParty Channel message",
         description:
-          "Persist one reply to the exact AgentParty message that entered this Claude session. Use the seq from the channel input.",
+          "Finish the exact AgentParty message that entered this Claude session. Supply a non-empty text reply, or no_reply=true to settle it without posting or waking a peer. Empty text and the exact legacy marker NO_REPLY are treated as no_reply.",
         inputSchema: {
           type: "object",
           properties: {
             seq: { type: "integer", minimum: 1, description: "AgentParty message sequence from the channel input" },
-            text: { type: "string", minLength: 1, description: "Reply body" },
+            text: { type: "string", description: "Reply body; empty or exactly NO_REPLY means terminal no-reply" },
+            no_reply: {
+              type: "boolean",
+              description: "Settle the accepted execution without creating a channel message or a new delivery",
+            },
           },
-          required: ["seq", "text"],
+          required: ["seq"],
           additionalProperties: false,
         },
       },
@@ -3590,11 +3675,29 @@ export async function run(argv: string[]): Promise<number> {
     }
     const args = request.params.arguments;
     const seq = args?.seq;
-    const text = args?.text;
-    if (typeof seq !== "number" || typeof text !== "string") {
-      return toolResult(`${REPLY_TOOL} requires integer seq and string text`, true);
+    const rawText = args?.text;
+    const noReply = args?.no_reply;
+    if (
+      typeof seq !== "number" ||
+      (rawText !== undefined && typeof rawText !== "string") ||
+      (noReply !== undefined && typeof noReply !== "boolean")
+    ) {
+      return toolResult(`${REPLY_TOOL} requires integer seq and either string text or no_reply=true`, true);
     }
     try {
+      const text = typeof rawText === "string" ? rawText : "";
+      const terminalNoReply = noReply === true || text.trim() === "" || text.trim() === "NO_REPLY";
+      if (noReply === true && text.trim() !== "" && text.trim() !== "NO_REPLY") {
+        return toolResult(`${REPLY_TOOL} text and no_reply=true are mutually exclusive`, true);
+      }
+      if (terminalNoReply) {
+        const acknowledged = await bridge.noReply(seq);
+        return toolResult(
+          `AgentParty execution for seq=${seq} settled as acknowledged_no_reply; ` +
+            "no channel message was created and no peer was woken." +
+            (acknowledged.deduped ? " The server had already recorded the same terminal acknowledgement." : ""),
+        );
+      }
       // Capture the reply's directed mention target before the successful post
       // clears the pending entry.
       const replyTarget = bridge.pendingSender(seq);

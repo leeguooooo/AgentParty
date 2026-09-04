@@ -425,6 +425,59 @@ describe("runtime-peers production smoke", () => {
     expect(payload).toEqual({ topology: topologies[0], purpose: "claude_cross_session" });
   });
 
+  test("retries transient 409 binding conflicts and exposes the server match count", async () => {
+    const topologies: Record<string, unknown>[] = [];
+    const delays: number[] = [];
+    let liveAttempts = 0;
+    const fetchImpl: FetchLike = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/api/me") {
+        return jsonResponse({ name: "smoke-agent", kind: "agent", channel_scope: "dev" });
+      }
+      if (url.pathname === "/api/channels") {
+        return jsonResponse({ channels: [{ slug: "dev", archived_at: null }] });
+      }
+      liveAttempts += 1;
+      if (liveAttempts < 3) {
+        return jsonResponse({
+          error: { code: "conflict", message: "runtime topology is not bound to one live caller socket" },
+          matches: liveAttempts === 1 ? 0 : 2,
+        }, 409);
+      }
+      const peer = topologies[1] as { harness_session: { display_name: string } };
+      return jsonResponse(liveTopologyResponse(peer.harness_session.display_name));
+    };
+
+    await expect(verifyRuntimePeersLiveTopology({
+      base: "https://party.example",
+      token: "secret-token",
+      fetchImpl,
+      openSocketImpl: async ({ topology }) => {
+        topologies.push(topology);
+        return { close: async () => {} };
+      },
+      sleepImpl: async (ms: number) => { delays.push(ms); },
+    })).resolves.toMatchObject({ ok: true, mode: "live_topology", sockets_closed: true });
+    expect(liveAttempts).toBe(3);
+    expect(delays).toEqual([150, 500]);
+
+    liveAttempts = 0;
+    await expect(verifyRuntimePeersLiveTopology({
+      base: "https://party.example",
+      token: "secret-token",
+      fetchImpl: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : input.toString());
+        if (url.pathname === "/api/me") return jsonResponse({ name: "smoke-agent", kind: "agent", channel_scope: "dev" });
+        if (url.pathname === "/api/channels") return jsonResponse({ channels: [{ slug: "dev", archived_at: null }] });
+        liveAttempts += 1;
+        return jsonResponse({ error: { code: "conflict", message: "conflict" }, matches: 2 }, 409);
+      },
+      openSocketImpl: async () => ({ close: async () => {} }),
+      sleepImpl: async () => {},
+    })).rejects.toThrow("expected 2xx, got 409 (matches=2)");
+    expect(liveAttempts).toBe(3);
+  });
+
   test("does not report live topology success before both close handshakes finish", async () => {
     const topologies: Record<string, unknown>[] = [];
     let cleanupStarted!: () => void;

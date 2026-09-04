@@ -497,3 +497,24 @@ export class DeliveryRecoveryJournal {
     else commit();
   }
 }
+
+/**
+ * Remove a Claude Channel recovery obligation after the Worker has
+ * authoritatively settled the same delivery through REST. This is the CLI/MCP
+ * fallback for a Channel transport that disconnected after handing work to
+ * the harness: without this local commit the Stop guard would keep treating
+ * the already-terminal execution as unfinished.
+ */
+export function settleClaudeDeliveryRecovery(
+  server: string,
+  token: string,
+  channel: string,
+  deliveryId: string,
+): void {
+  const journal = new DeliveryRecoveryJournal(
+    deliveryRecoveryJournalPath("claude", server, token, channel),
+    channel,
+    "claude",
+  );
+  journal.remove(deliveryId);
+}

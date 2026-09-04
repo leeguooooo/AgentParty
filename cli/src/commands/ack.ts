@@ -15,6 +15,7 @@ import {
   pickMessage,
 } from "../mention-drain";
 import { resolveAuthDetailed } from "../oidc-cli";
+import { settleClaudeDeliveryRecovery } from "../delivery-recovery-journal";
 import { ackDelivery, fetchMessages, fetchNextMention, fetchRecentMessages, handleRestError } from "../rest";
 import { isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 
@@ -219,6 +220,7 @@ export async function run(argv: string[]): Promise<number> {
     }
     try {
       const result = await ackDelivery(auth.server, auth.token, channel, seqFlag as number);
+      settleClaudeDeliveryRecovery(auth.server, auth.token, channel, result.delivery.id);
       console.log(
         result.deduped === true
           ? `server-side @ seq=${seqFlag} in #${channel} was already settled as acknowledged_no_reply`

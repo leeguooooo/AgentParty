@@ -54,6 +54,7 @@ describe("claude-channel stdio MCP adapter", () => {
   test("declares the dedicated capability, emits a channel notification, and persists a linked reply", async () => {
     const clientFrames: ClientFrame[] = [];
     const posts: unknown[] = [];
+    const deliveryAcks: string[] = [];
     const runtimePeerRequests: unknown[] = [];
     let comparisonUnavailable = false;
     let presenceUnavailable = false;
@@ -62,6 +63,12 @@ describe("claude-channel stdio MCP adapter", () => {
       target_name: "me",
       sender: { name: "alice", kind: "human" },
     });
+    const noReplyDirected = deliveryFrame(13, "confirmation needs no response", {
+      id: "delivery-13",
+      target_name: "me",
+      sender: { name: "bob", kind: "agent" },
+    });
+    let sentNoReplyDelivery = false;
     backend = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -71,6 +78,13 @@ describe("claude-channel stdio MCP adapter", () => {
         if (url.pathname === "/api/channels/dev/messages" && request.method === "POST") {
           posts.push(await request.json());
           return Response.json({ seq: 99 });
+        }
+        if (url.pathname === "/api/channels/dev/deliveries/delivery-13/ack" && request.method === "POST") {
+          deliveryAcks.push("delivery-13");
+          return Response.json({
+            ok: true,
+            delivery: { ...noReplyDirected.delivery, state: "replied", reply_seq: null },
+          });
         }
         if (url.pathname === "/api/channels/dev/runtime-peers" && request.method === "POST") {
           runtimePeerRequests.push(await request.clone().json());
@@ -127,15 +141,26 @@ describe("claude-channel stdio MCP adapter", () => {
             socket.send(JSON.stringify({ type: "delivery_adapter", adapter: "watch", registered: true }));
             socket.send(JSON.stringify(directed));
           } else if (frame.type === "delivery_update" && frame.request_id) {
+            const delivery = frame.delivery_id === "delivery-13"
+              ? noReplyDirected.delivery
+              : directed.delivery;
             socket.send(JSON.stringify({
               type: "delivery_state",
               request_id: frame.request_id,
               delivery: {
-                ...directed.delivery,
+                ...delivery,
                 state: frame.state,
-                reply_seq: frame.reply_seq ?? directed.delivery.reply_seq,
+                reply_seq: frame.reply_seq ?? delivery.reply_seq,
               },
             }));
+            if (
+              frame.delivery_id === "delivery-12" &&
+              frame.state === "replied" &&
+              !sentNoReplyDelivery
+            ) {
+              sentNoReplyDelivery = true;
+              socket.send(JSON.stringify(noReplyDirected));
+            }
           }
         },
       },
@@ -470,6 +495,62 @@ describe("claude-channel stdio MCP adapter", () => {
         state: "replied",
         reply_seq: 99,
       }));
+
+      for (let attempt = 0; attempt < 50 && notifications.length < 2; attempt += 1) {
+        await Bun.sleep(20);
+      }
+      expect(notifications).toHaveLength(2);
+      const noReplyClaim = await client.callTool({
+        name: "party_channel_claim",
+        arguments: { execution_id: "delivery-13" },
+      });
+      const noReplyReceipt = /AgentParty claim receipt: ([0-9a-f-]+)/
+        .exec(JSON.stringify(noReplyClaim.content))?.[1];
+      expect(typeof noReplyReceipt).toBe("string");
+      expect((await client.callTool({
+        name: "party_channel_accept",
+        arguments: { execution_id: "delivery-13", claim_receipt: noReplyReceipt! },
+      })).isError).not.toBe(true);
+
+      // The legacy marker is normalized into a terminal delivery ACK. It must
+      // not become another channel message that wakes bob and starts a loop.
+      const noReply = await client.callTool({
+        name: "party_channel_reply",
+        arguments: { seq: 13, text: "NO_REPLY" },
+      });
+      expect(noReply.isError).not.toBe(true);
+      expect(JSON.stringify(noReply.content)).toContain("acknowledged_no_reply");
+      expect(deliveryAcks).toEqual(["delivery-13"]);
+      expect(posts).toHaveLength(1);
+      expect(clientFrames).not.toContainEqual(expect.objectContaining({
+        type: "delivery_update",
+        delivery_id: "delivery-13",
+        state: "replied",
+      }));
+
+      const stopGuard = Bun.spawn(["bun", "run", indexPath, "hook", "stop-guard"], {
+        env: {
+          ...env,
+          AGENTPARTY_CHANNEL: "dev",
+          [CLAUDE_LIFECYCLE_OPT_IN_ENV]: "1",
+        },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      stopGuard.stdin.write(JSON.stringify({
+        hook_event_name: "Stop",
+        stop_hook_active: false,
+        session_id: "no-reply-stop",
+        cwd: process.cwd(),
+      }));
+      stopGuard.stdin.end();
+      const [stopCode, stopOutput] = await Promise.all([
+        stopGuard.exited,
+        new Response(stopGuard.stdout).text(),
+      ]);
+      expect(stopCode).toBe(0);
+      expect(stopOutput).toBe("{}\n");
     } finally {
       await client.close();
     }

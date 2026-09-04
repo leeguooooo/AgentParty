@@ -1,6 +1,8 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, describe, expect, test } from "bun:test";
-import { AuthError, fetchMessages, fetchMessagesWithRetry } from "./api";
+// Query suffix bypasses any process-wide component mock of ./api left by an earlier Bun test file.
+// @ts-expect-error Bun supports query-suffixed module specifiers in tests.
+const { AuthError, fetchMessages, fetchMessagesWithRetry } = await import("./api.ts?test-actual");
 
 const original = Object.getOwnPropertyDescriptor(globalThis, "fetch");
 
