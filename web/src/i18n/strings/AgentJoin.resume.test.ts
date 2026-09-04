@@ -92,4 +92,13 @@ test("codex 的起会话提示必须讲明要批准 hook，且说明未批准时
   // 不能再退回「新开会话就生效」这种会误导人的断言
   expect(en).not.toMatch(/so it takes effect/i);
   expect(zh).not.toMatch(/会话就生效/);
+
+  // 提示只在**交互式** codex 里出现。少了这句，用户在 codex exec 或 ChatGPT 桌面版里等不到
+  // 提示，会得出「装了也没用」的错误结论，然后放弃——所以这两个例外也得钉住。
+  expect(en).toMatch(/interactive/i);
+  expect(zh).toMatch(/交互式/);
+  for (const line of lines) {
+    expect(line).toContain("codex exec");
+    expect(line).toMatch(/ChatGPT/);
+  }
 });
