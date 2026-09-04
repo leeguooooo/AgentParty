@@ -138,13 +138,14 @@ function pluginHookArguments(pluginRoot: string, event: string): string[] {
   }
   const handler = handlers[0];
   const expectedArgs = ["hook", event === "Stop" ? "stop-guard" : "report"];
+  const expectedCommand = `"${"${CLAUDE_PLUGIN_ROOT}"}/bin/agentparty-runtime" ${expectedArgs.join(" ")}`;
   if (
     typeof handler !== "object" || handler === null ||
     (handler as { type?: unknown }).type !== "command" ||
-    (handler as { command?: unknown }).command !== "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime" ||
-    JSON.stringify((handler as { args?: unknown }).args) !== JSON.stringify(expectedArgs)
+    (handler as { command?: unknown }).command !== expectedCommand ||
+    (handler as { args?: unknown }).args !== undefined
   ) {
-    throw new Error(`plugin hook ${event} did not use the expected exec-form runtime command`);
+    throw new Error(`plugin hook ${event} did not use the expected full runtime command`);
   }
   return expectedArgs;
 }

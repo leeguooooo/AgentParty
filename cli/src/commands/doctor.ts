@@ -374,12 +374,11 @@ export function inspectClaudePluginBundle(plugin: InstalledClaudePlugin): Claude
         !record(hooks.hooks)) return { valid: false, launcherExecutable };
     for (const event of REQUIRED_HOOK_EVENTS) {
       const entries = hooks.hooks[event];
+      const hookCommand = `"${CLAUDE_RUNTIME_COMMAND}" hook ${event === "Stop" ? "stop-guard" : "report"}`;
       if (!Array.isArray(entries) || entries.length !== 1 || !record(entries[0]) ||
           !Array.isArray(entries[0].hooks) || entries[0].hooks.length !== 1 ||
-          !record(entries[0].hooks[0]) || entries[0].hooks[0].command !== CLAUDE_RUNTIME_COMMAND ||
-          !Array.isArray(entries[0].hooks[0].args) ||
-          entries[0].hooks[0].args[0] !== "hook" ||
-          entries[0].hooks[0].args[1] !== (event === "Stop" ? "stop-guard" : "report")) {
+          !record(entries[0].hooks[0]) || entries[0].hooks[0].command !== hookCommand ||
+          entries[0].hooks[0].args !== undefined) {
         return { valid: false, launcherExecutable };
       }
     }

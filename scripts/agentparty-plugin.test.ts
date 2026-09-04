@@ -105,8 +105,7 @@ describe("AgentParty marketplace plugin", () => {
       const hooks = (entries[0] as { hooks: Array<Record<string, unknown>> }).hooks;
       expect(hooks).toEqual([{
         type: "command",
-        command: claudeRuntimeCommand,
-        args: ["hook", event === "Stop" ? "stop-guard" : "report"],
+        command: `"${claudeRuntimeCommand}" hook ${event === "Stop" ? "stop-guard" : "report"}`,
         timeout: event === "SessionEnd" ? 3 : 10,
       }]);
     }
