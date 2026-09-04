@@ -777,29 +777,36 @@ function outcomeLine(name: string, outcome: StepOutcome): string {
 // 只包 init/send 这两个非交互子命令。hook install 可能要人按键批准，吞它的输出＝让人对着空屏等。
 async function quietSubcommand(
   run: () => Promise<number>,
-  opts: { verbose: boolean; log: (line: string) => void },
+  opts: { verbose: boolean; log: (line: string) => void; errlog: (line: string) => void },
 ): Promise<number> {
-  const buffered: string[] = [];
-  const capture = (...args: unknown[]) => {
-    buffered.push(args.map((a) => (typeof a === "string" ? a : String(a))).join(" "));
+  // 两路分开存：回放时 stderr 仍走 stderr。合成一路会把子命令的报错挪到 stdout，
+  // 让 `party join 2>errors.log` 这类用法再也捞不到失败原因——收篇幅不该改变流的语义。
+  const buffered: { stream: "out" | "err"; line: string }[] = [];
+  const capture = (stream: "out" | "err") => (...args: unknown[]) => {
+    buffered.push({ stream, line: args.map((a) => (typeof a === "string" ? a : String(a))).join(" ") });
   };
   const realLog = console.log;
   const realError = console.error;
-  console.log = capture;
-  console.error = capture;
+  console.log = capture("out");
+  console.error = capture("err");
+  const replay = () => {
+    for (const { stream, line } of buffered) {
+      (stream === "err" ? opts.errlog : opts.log)(`${STEP_INDENT}${line}`);
+    }
+  };
   let code: number;
   try {
     code = await run();
   } catch (e) {
     console.log = realLog;
     console.error = realError;
-    for (const line of buffered) opts.log(`${STEP_INDENT}${line}`);
+    replay();
     throw e;
   } finally {
     console.log = realLog;
     console.error = realError;
   }
-  if (code !== 0 || opts.verbose) for (const line of buffered) opts.log(`${STEP_INDENT}${line}`);
+  if (code !== 0 || opts.verbose) replay();
   return code;
 }
 
@@ -890,7 +897,7 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       if (harnessKnown) initArgs.push("--harness", harness);
       if (opts.coexist) initArgs.push("--coexist");
       if (opts.lang !== undefined && opts.lang !== null) initArgs.push("--lang", opts.lang);
-      const initCode = await quietSubcommand(() => deps.initRun(initArgs), { verbose: ctx.opts.verbose === true, log: deps.log });
+      const initCode = await quietSubcommand(() => deps.initRun(initArgs), { verbose: ctx.opts.verbose === true, log: deps.log, errlog: deps.errlog });
       if (initCode !== 0) {
         return {
           ok: false,
@@ -934,7 +941,7 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       // 报到（#597）。init 只写配置不发言，必须补这一条，否则网页/频道里看不到你。能 @ 邀请人就 @。
       const sendArgs = [`👋 ${agentName} 报到，来参与协作`, "--channel", slug];
       if (opts.mention !== null) sendArgs.push("--mention", opts.mention);
-      const sendCode = await quietSubcommand(() => deps.sendRun(sendArgs), { verbose: ctx.opts.verbose === true, log: deps.log });
+      const sendCode = await quietSubcommand(() => deps.sendRun(sendArgs), { verbose: ctx.opts.verbose === true, log: deps.log, errlog: deps.errlog });
       if (sendCode !== 0) {
         return {
           ok: false,

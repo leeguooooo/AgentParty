@@ -563,7 +563,9 @@ async function runInstall(argv: string[]): Promise<number> {
   // 并给出恰一条修法——这里再把整份清单和那段来龙去脉印一遍，就成了同一段修复说明连印两遍
   // （用户原话：「这个长篇大论的篇幅，用户都懵了」）。brief 只压掉解说与清单重播，
   // **信任确认那一问照问**（它要人当场敲 y，压掉等于装了个不会跑的 hook）。
-  const brief = argv.includes("--brief");
+  // 与 hookScope 同一纪律：只认 `--` 终止符之前的旗标（`hook install -- --brief` 不算）。
+  const briefBoundary = argv.indexOf("--");
+  const brief = (briefBoundary === -1 ? argv : argv.slice(0, briefBoundary)).includes("--brief");
   const path = settingsPath(scope);
   const source = existsSync(path) ? readFileSync(path, "utf8") : null;
   // serve 用同一份 hooks 配置生成器（#602），装出来的行为与托管 lane 完全一致。

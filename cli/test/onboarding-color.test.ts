@@ -27,11 +27,32 @@ describe("着色只碰本地生成的结构元素", () => {
   const style = styleFor(true);
   // 摘要里可能带服务端可控文本（身份、频道名、错误消息）。给它套色码＝把 reset 序列的控制权交给
   // 远端：正文里一个 ESC[0m 就能提前收色、后面的伪造文本继承我们的样式。所以摘要一律不着色。
-  test("摘要原样，不被色码包住", () => {
-    const summary = `#dev 上以 evil${ESC}[0m 报到`;
-    const line = formatStepLine(1, "身份", { ok: true, summary }, style);
-    expect(line).toContain(summary);
+  test("摘要不被色码包住，且它自带的 ESC 序列被洗掉（#372 同一纪律）", () => {
+    const line = formatStepLine(1, "身份", { ok: true, summary: `#dev 上以 evil${ESC}[0m 报到` }, style);
+    // 远端可控文本先清洗再拼：一条含 ESC 的摘要不该能提前收色、让后面的伪造文本继承我们的样式。
+    // 整段 CSI 被移除（不是只去 ESC 留下可见的 "[0m"）
+    expect(line).toContain("#dev 上以 evil 报到");
+    expect(line).not.toContain(ESC + "[0m 报到");
     expect(line).not.toContain(`${ESC}[32m#dev`);
+  });
+
+  test("补充行、修法命令、notes 里的控制字符一并洗掉——含能伪造整行的换行/TAB", () => {
+    const lines = formatStep(
+      3,
+      "会话",
+      {
+        ok: false,
+        summary: "s",
+        detail: [`! 写失败：${ESC}]52;c;cGl3bmVk\x07`],
+        fix: { do: `party claude dev\n第 4 步  真发一条 @ 验证 · 伪造的 ✓`, notes: [`先看这个\tTAB`] },
+      },
+      "party join",
+    );
+    const out = lines.join("\n");
+    expect(out).not.toContain(ESC);
+    expect(out).not.toContain("\x07");
+    // 换行被折成空格 ⇒ 伪造的「第 4 步」不再是独立的一行
+    expect(lines.filter((l) => l.startsWith("第 "))).toHaveLength(1);
   });
 
   test("✓ 绿、✗ 红、修法命令上色", () => {
@@ -101,5 +122,23 @@ describe("party hook install --brief（给 join 用）", () => {
     const out = lines.join("\n");
     expect(out).toContain("hooks installed -> ");
     expect(out).not.toContain("普通 Claude session 只写本地 activity");
+  });
+
+  // 与 hookScope 同一纪律：`--` 之后的东西不是旗标。两处判法不一致，日后必然漂移。
+  test("`--` 之后的 --brief 不算数", async () => {
+    const cwd = process.cwd();
+    const sandbox = mkdtempSync(join(tmpdir(), "ap-hook-brief-"));
+    const lines: string[] = [];
+    const real = console.log;
+    console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    try {
+      process.chdir(sandbox);
+      await hookRun(["install", "--claude", "--", "--brief"]);
+    } finally {
+      console.log = real;
+      process.chdir(cwd);
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+    expect(lines.join("\n")).toContain("普通 Claude session 只写本地 activity");
   });
 });

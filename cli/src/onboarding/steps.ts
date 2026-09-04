@@ -23,6 +23,7 @@
 //    `--yes` / 无 TTY 时按默认走并把所选印出来。
 
 import { styleFor, type Style } from "./color";
+import { sanitizeSingleLine } from "../format";
 
 /** 一步跑完的结果。 */
 export interface StepResult {
@@ -57,9 +58,18 @@ export type StepsOutcome =
 export const STEP_INDENT = "         ";
 
 /** 「第 N 步  标题 · 摘要 ✓」这一行。 */
+// 摘要、补充行、修法命令里混着服务端可控文本（身份、频道名、init/send 的错误消息）。它们会被
+// 原样打进终端——#372 那条老纪律照样适用：一条含 ESC 的文本就能注入 OSC52 剪贴板写入、或用光标/
+// 清屏序列伪造整屏输出。而这里每一行都是「一行一条」的结构，残留的换行/TAB 还能伪造出一整个
+// 步骤行。所以出口统一过 sanitizeSingleLine，**清洗在前、着色在后**（顺序反了会把我们自己的
+// 色码一起洗掉）。
+function clean(text: string): string {
+  return sanitizeSingleLine(text);
+}
+
 export function formatStepLine(index: number, title: string, result: StepResult, style: Style = styleFor(false)): string {
   const mark = result.ok ? style.ok("✓") : style.bad("✗");
-  return `${style.dim(`第 ${index} 步`)}  ${style.bold(title)} · ${result.summary} ${mark}`;
+  return `${style.dim(`第 ${index} 步`)}  ${style.bold(clean(title))} · ${clean(result.summary)} ${mark}`;
 }
 
 // 过了的步骤里，`✓ 子项: …` / `· 子项: …` 是「一切正常」的流水账（#1073 第 2 点）：join 一次
@@ -87,12 +97,12 @@ export function formatStep(
 ): string[] {
   const style = opts.style ?? styleFor(false);
   const lines = [formatStepLine(index, title, result, style)];
-  for (const d of visibleDetail(result, opts.verbose === true)) lines.push(`${STEP_INDENT}${d}`);
+  for (const d of visibleDetail(result, opts.verbose === true)) lines.push(`${STEP_INDENT}${clean(d)}`);
   if (!result.ok) {
     const fix = result.fix ?? { do: rerun };
-    for (const n of fix.notes ?? []) lines.push(`${STEP_INDENT}${n}`);
-    lines.push(`${STEP_INDENT}${style.bold(`修法（做完重跑同一条 ${rerun}）：`)}`);
-    lines.push(`${STEP_INDENT}  ${style.cmd(fix.do)}`);
+    for (const n of fix.notes ?? []) lines.push(`${STEP_INDENT}${clean(n)}`);
+    lines.push(`${STEP_INDENT}${style.bold(`修法（做完重跑同一条 ${clean(rerun)}）：`)}`);
+    lines.push(`${STEP_INDENT}  ${style.cmd(clean(fix.do))}`);
   }
   return lines;
 }

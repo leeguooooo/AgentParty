@@ -685,13 +685,19 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(logs.join("\n")).not.toContain("created channel dev");
 
     const logs2: string[] = [];
+    const errs2: string[] = [];
     const bad = deps([], {}, logs2);
+    bad.errlog = (line) => void errs2.push(line);
     bad.initRun = async () => {
-      console.log("token 被拒：403");
+      console.log("走 stdout 的那半");
+      console.error("token 被拒：403");
       return 1;
     };
     expect(await runJoin(baseOpts({ harnessFlag: "claude" }), bad)).toBe(1);
-    expect(logs2.join("\n")).toContain("token 被拒：403");
+    // 回放要**保流**：子命令写 stderr 的照旧走 stderr，否则 `party join 2>errors.log` 再也捞不到失败原因。
+    expect(errs2.join("\n")).toContain("token 被拒：403");
+    expect(logs2.join("\n")).not.toContain("token 被拒：403");
+    expect(logs2.join("\n")).toContain("走 stdout 的那半");
   });
 
   test("重复接入：mcp get 命中已注册 ⇒ 跳过 add，不再叠一个常驻进程（#898）", async () => {

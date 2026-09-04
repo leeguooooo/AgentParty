@@ -48,7 +48,8 @@ No binding / revoked token / renamed identity ⇒ stops at 第 1 步 with the \`
 Options:
   --harness H    pick the binding of this harness when this directory bound the channel under
                  several (codex | claude | other). Omit to auto-detect from the process tree.
-  --yes          accepted for symmetry with \`party join\`; recover never prompts`;
+  --yes          accepted for symmetry with \`party join\`; recover never prompts
+  --verbose      印出过了的步骤里的每一条子检查；缺省只印异常的那些（没过的步骤永远全印）`;
 
 /** 注入点：join 的那一套（步骤 2/3/4 的探活）+ 第 1 步自己的三样。 */
 export interface RecoverDeps extends JoinDeps {
