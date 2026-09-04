@@ -990,15 +990,25 @@ async function runGlobalWho(cfg: { server: string; token: string; name?: string 
       failed.push(slug);
     }
   }
+  // 一个频道都读不到时，"没人可达" 是错的结论——那是我们没读到，不是没人。
+  if (snapshots.length === 0) {
+    console.error(`could not read presence for any of ${channels.length} channel(s): ${failed.join(", ")}`);
+    return 1;
+  }
   const now = Date.now();
   const rows = buildGlobalWho({ channels: snapshots, ...(cfg.name === undefined ? {} : { self: cfg.name }), now });
   if (json) {
     for (const row of rows) console.log(JSON.stringify(row));
     if (failed.length > 0) console.error(`could not read presence for: ${failed.join(", ")}`);
-    return 0;
+    // 部分频道读不到时结果是不完整的：退出码要反映这一点，否则脚本会把不完整当完整。
+    return failed.length > 0 ? 1 : 0;
   }
   if (rows.length === 0) {
-    console.log(`no one reachable across ${channels.length} channel(s) yet`);
+    console.log(`no one reachable across ${snapshots.length} channel(s) yet`);
+    if (failed.length > 0) {
+      console.log(`could not read presence for: ${failed.join(", ")}`);
+      return 1;
+    }
     return 0;
   }
   console.log(`reachable across ${snapshots.length} channel(s) — pass a channel for wake diagnostics:`);
@@ -1008,6 +1018,9 @@ async function runGlobalWho(cfg: { server: string; token: string; name?: string 
       .find((candidate) => candidate.name === row.name);
     console.log("  " + renderGlobalRow(row, entry === undefined ? row.name : globalWhoDisplay(entry), now));
   }
-  if (failed.length > 0) console.log(`\ncould not read presence for: ${failed.join(", ")}`);
+  if (failed.length > 0) {
+    console.log(`\ncould not read presence for: ${failed.join(", ")} — this list is incomplete`);
+    return 1;
+  }
   return 0;
 }

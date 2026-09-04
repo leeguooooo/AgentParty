@@ -16,8 +16,15 @@ export type GlobalReach = "online" | "wakeable" | "recent" | "offline";
 const REACH_ORDER: Record<GlobalReach, number> = { online: 0, wakeable: 1, recent: 2, offline: 3 };
 
 export interface GlobalWhoRow {
-  /** @ 提及用的名字；同一个人的多条会话取可达性最好的那条。 */
+  /**
+   * 可直接用于 `party send --mention <name>` 的地址。
+   * 人类的会话名是 UUID / provider subject，**@ 不到**——只有全局昵称 handle 能被服务端解析成
+   * 「被 @」，所以人类优先取 handle；没有 handle 时退回会话名并置 mentionable:false，
+   * 让调用方知道这行不能直接 @（而不是让它发一条永远叫不醒人的消息）。
+   */
   name: string;
+  /** 缺省即可 @；false 表示这一行没有可 @ 的地址。 */
+  mentionable?: false;
   kind: SenderKind;
   reach: GlobalReach;
   /** 可读的归属人；不透明账号串一律省略。 */
@@ -95,6 +102,7 @@ export function buildGlobalWho(input: GlobalWhoInput): GlobalWhoRow[] {
     best: PresenceEntry;
     bestReach: GlobalReach;
     names: Set<string>;
+    entries: PresenceEntry[];
     channels: Set<string>;
     lastSeen: number;
     paused: boolean;
@@ -112,6 +120,7 @@ export function buildGlobalWho(input: GlobalWhoInput): GlobalWhoRow[] {
           best: entry,
           bestReach: reach,
           names: new Set([entry.name]),
+          entries: [entry],
           channels: new Set([slug]),
           lastSeen: seen,
           paused: entry.paused === true,
@@ -119,6 +128,7 @@ export function buildGlobalWho(input: GlobalWhoInput): GlobalWhoRow[] {
         continue;
       }
       existing.names.add(entry.name);
+      existing.entries.push(entry);
       existing.channels.add(slug);
       existing.lastSeen = Math.max(existing.lastSeen, seen);
       // 代表条目取可达性最好的那条；同档时取更近的一次露面。
@@ -134,13 +144,47 @@ export function buildGlobalWho(input: GlobalWhoInput): GlobalWhoRow[] {
     }
   }
 
+  // 同一个人可能一半会话带 handle、一半只有 account（离线行常拿不到 handle）：
+  // 先记下 handle 组占用了哪些账号，再把纯 account 组并进去，否则同一个人会裂成两行。
+  // 与 web 名单（#1067）同一趟二次合并。
+  const keyByAccount = new Map<string, string>();
+  for (const [key, group] of groups) {
+    if (!key.startsWith("handle:")) continue;
+    for (const entry of group.entries) {
+      const account = nonBlank(entry.account);
+      if (account !== undefined && !keyByAccount.has(account)) keyByAccount.set(account, key);
+    }
+  }
+  for (const [key, group] of [...groups]) {
+    if (!key.startsWith("account:")) continue;
+    const target = keyByAccount.get(key.slice("account:".length));
+    if (target === undefined || target === key) continue;
+    const into = groups.get(target)!;
+    for (const entry of group.entries) into.entries.push(entry);
+    for (const name of group.names) into.names.add(name);
+    for (const slug of group.channels) into.channels.add(slug);
+    into.lastSeen = Math.max(into.lastSeen, group.lastSeen);
+    into.paused = into.paused || group.paused;
+    if (REACH_ORDER[group.bestReach] < REACH_ORDER[into.bestReach]) {
+      into.best = group.best;
+      into.bestReach = group.bestReach;
+    }
+    groups.delete(key);
+  }
+
   const rows: GlobalWhoRow[] = [];
   for (const group of groups.values()) {
-    const name = group.best.name;
+    // 人类：任一会话上的 handle 都是同一个全局昵称，取到即用；agent 的 name 本身就是地址。
+    const handle = group.best.kind === "human"
+      ? [...group.entries].map((entry) => nonBlank(entry.handle)).find((value) => value !== undefined)
+      : undefined;
+    const name = handle ?? group.best.name;
+    const mentionable = group.best.kind !== "human" || handle !== undefined;
     const aka = [...group.names].filter((other) => other !== name).sort();
     const owner = readable(group.best.account);
     rows.push({
       name,
+      ...(mentionable ? {} : { mentionable: false as const }),
       kind: group.best.kind ?? "agent",
       reach: group.bestReach,
       ...(owner === undefined ? {} : { owner }),
@@ -171,8 +215,9 @@ export function renderGlobalRow(row: GlobalWhoRow, display: string, now: number)
   const age = row.last_seen === undefined ? "" : ` ${fmtAge(now - row.last_seen)}`;
   const owner = row.owner === undefined ? "" : ` · ${row.owner}`;
   const paused = row.paused === true ? " ⏸ paused" : "";
+  const noMention = row.mentionable === false ? "  ⚠ no @ handle" : "";
   const where = row.channels.length === 1 ? `#${row.channels[0]}` : `#${row.channels[0]} +${row.channels.length - 1}`;
-  return `${REACH_MARK[row.reach]} ${display}${owner}  ${row.kind}${paused}  ${where}${age}`;
+  return `${REACH_MARK[row.reach]} ${display}${owner}  ${row.kind}${paused}  ${where}${age}${noMention}`;
 }
 
 function fmtAge(ms: number): string {

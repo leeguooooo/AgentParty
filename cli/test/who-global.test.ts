@@ -38,10 +38,10 @@ describe("全局 who 的按人聚合（#1074）", () => {
     });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.channels).toEqual(["alpha", "beta"]);
-    // 代表取可达性最好的那条会话
-    expect(rows[0]!.name).toBe("leo-cli");
+    // name 是可 @ 的 handle（不是会话名）；两条会话名都进 aka
+    expect(rows[0]!.name).toBe("leo");
     expect(rows[0]!.reach).toBe("online");
-    expect(rows[0]!.aka).toEqual(["leo-web"]);
+    expect(rows[0]!.aka).toEqual(["leo-cli", "leo-web"]);
   });
 
   test("agent 各自成行，不因同一 owner 被并到一起", () => {
@@ -91,7 +91,49 @@ describe("全局 who 的按人聚合（#1074）", () => {
         ],
       }],
     });
-    expect(rows.map((r) => r.name)).toEqual(["agent-live", "human-live", "offline-bot"]);
+    // 人类那行的 name 取 handle（h1），不是会话名
+    expect(rows.map((r) => r.name)).toEqual(["agent-live", "h1", "offline-bot"]);
+  });
+
+  test("人类行的 name 必须是可 @ 的 handle，而不是 UUID / lark:on_ 会话名", () => {
+    const rows = buildGlobalWho({
+      now: NOW,
+      channels: [{
+        slug: "alpha",
+        presence: [p("lark:on_deadbeefdeadbeef", { kind: "human", handle: "leo", display_name: "Leo", live: true })],
+      }],
+    });
+    expect(rows[0]!.name).toBe("leo");
+    expect(rows[0]!.mentionable).toBeUndefined();
+    expect(rows[0]!.aka).toEqual(["lark:on_deadbeefdeadbeef"]);
+  });
+
+  test("人类没有 handle 时如实标 mentionable:false，不谎称能 @", () => {
+    const rows = buildGlobalWho({
+      now: NOW,
+      channels: [{ slug: "alpha", presence: [p("193af9b8-cb06-4efe-a0f5-f1284bb8303e", { kind: "human", live: true })] }],
+    });
+    expect(rows[0]!.mentionable).toBe(false);
+    expect(rows[0]!.name).toBe("193af9b8-cb06-4efe-a0f5-f1284bb8303e");
+  });
+
+  test("handle 只出现在该人的某一条会话上时也要取到", () => {
+    const rows = buildGlobalWho({
+      now: NOW,
+      channels: [
+        { slug: "alpha", presence: [p("sess-1", { kind: "human", account: "leo@x.com", live: true })] },
+        { slug: "beta", presence: [p("sess-2", { kind: "human", account: "leo@x.com", handle: "leo", state: "offline", last_seen: NOW - 5_000 })] },
+      ],
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.name).toBe("leo");
+    expect(rows[0]!.mentionable).toBeUndefined();
+  });
+
+  test("agent 的 name 本身就是地址，恒可 @", () => {
+    const rows = buildGlobalWho({ now: NOW, channels: [{ slug: "alpha", presence: [p("bot")] }] });
+    expect(rows[0]!.name).toBe("bot");
+    expect(rows[0]!.mentionable).toBeUndefined();
   });
 
   test("归档频道不计入「我能到达谁」", () => {
