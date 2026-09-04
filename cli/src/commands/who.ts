@@ -14,15 +14,15 @@ import {
   type TaskLeaseEnforcement,
 } from "../task-lease-diagnosis";
 import { resolveAuth } from "../oidc-cli";
-import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError } from "../rest";
+import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError, RestError } from "../rest";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { sanitizeSingleLine } from "../format";
 import { buildPullWakeLookup, pullWakeDelivers, type PullWakeHint, type PullWakeLookup } from "../pull-wake";
 import { isSlug } from "../validation";
 
-const WHO_FLAGS = ["channel", "json"];
-const HELP = `usage: party who [channel|--channel C] [--json]
+const WHO_FLAGS = ["channel", "json", "all"];
+const HELP = `usage: party who [channel|--channel C] [--all] [--json]
 
 List who is in a channel, tiered by how you can reach them:
   ● online    connected right now
@@ -103,6 +103,9 @@ A human is @-notified by their handle (their web client matches on handle, not t
 session name), so mention the "@handle" shown here — not a UUID session name.
 
 Options:
+  --all         ignore the bound channel: list everyone you can reach across all
+                your channels, one row per person (#1074). Wake diagnostics still
+                need a channel.
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
                 (name/kind/tier/live/residency/unreachable/pull_wake/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/idle_watches/agent_session/topology_conflicts/task_lease/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
@@ -860,7 +863,11 @@ export async function run(argv: string[]): Promise<number> {
     console.error(flagError);
     return 1;
   }
-  const channel = resolveChannel(str(flags.channel) ?? positionals[0]);
+  const channel = flags.all === true ? null : resolveChannel(str(flags.channel) ?? positionals[0]);
+  if (flags.all === true && (str(flags.channel) !== undefined || positionals[0] !== undefined)) {
+    console.error("--all lists everyone across your channels; drop the channel argument");
+    return 1;
+  }
   if (!channel) {
     // #1074：没有频道时不再报错退出——聚合「我已加入的所有频道」，回答「我能到达谁」。
     // 频道内 who 的诊断细节（为什么叫不醒）仍需显式给频道，这里只解决「先找到人」。
@@ -871,7 +878,18 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   try {
-    const presence = await fetchPresence(cfg.server, cfg.token, channel);
+    let presence;
+    try {
+      presence = await fetchPresence(cfg.server, cfg.token, channel);
+    } catch (err: unknown) {
+      // 绑定的频道可能早就没了（改名/归档/换服务器）。此时报「找不到频道」等于把人堵死，
+      // 而我们完全知道他还能到达谁——退回全局视图，并说明为什么。
+      if (err instanceof RestError && err.status === 404) {
+        console.error(`channel ${channel} not found — showing everyone across your channels instead (party who --all)`);
+        return runGlobalWho(cfg, flags.json === true);
+      }
+      throw err;
+    }
     let runtimePeers: RuntimePeerDiscovery | undefined;
     const runtimeTopology = buildRuntimeTopology(cfg.server);
     if (runtimeTopology !== undefined) {
