@@ -3088,6 +3088,7 @@ export class ClaudeChannelDeliveryBridge {
     pending.settling = true;
     this.stopPendingRetry(pending);
     this.stopLeaseRenewal(pending);
+    let remotelySettled = pending.delivery === null;
     try {
       let result: { deliveryId: string | null; deduped: boolean };
       if (pending.delivery === null) {
@@ -3105,11 +3106,16 @@ export class ClaudeChannelDeliveryBridge {
             `acknowledged delivery ${acknowledged.deliveryId}, expected ${pending.delivery.id}`,
           );
         }
+        remotelySettled = true;
         result = acknowledged;
       }
+      // Keep the in-memory pending entry until the local journal commit has
+      // succeeded. If disk cleanup fails after the authoritative REST ACK, a
+      // Stop continuation can retry this idempotently instead of being left
+      // with an orphan journal entry and no callable pending execution.
+      if (pending.delivery) this.options.recoveryJournal?.remove(pending.delivery.id);
       const completed = this.clearPending(seq);
       if (completed?.delivery) {
-        this.options.recoveryJournal?.remove(completed.delivery.id);
         this.rememberBounded(this.settledDeliveryIds, completed.delivery.id);
         this.releaseParkedContinuation(completed);
       }
@@ -3117,7 +3123,9 @@ export class ClaudeChannelDeliveryBridge {
       return result;
     } catch (error) {
       pending.settling = false;
-      this.startLeaseRenewal(pending);
+      // The Worker is already terminal after a successful REST ACK. Renewing
+      // that lease is both futile and misleading; keep only the local retry.
+      if (!remotelySettled) this.startLeaseRenewal(pending);
       throw error;
     }
   }

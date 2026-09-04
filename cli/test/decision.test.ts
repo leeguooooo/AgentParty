@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { writeConfig, writeState } from "../src/config";
 import { run as decisionRun } from "../src/commands/decision";
 import { continuationPath, readRunnerContinuation } from "../src/continuation";
+import { parsePendingChannelDecisionPage } from "../src/rest";
 import { startRestMock, type RestMock, type RestRequest } from "./rest-mock";
 
 let home: string;
@@ -472,6 +473,23 @@ describe("party decision mode", () => {
 });
 
 describe("party decision authoritative ledger", () => {
+  test("rejects malformed pending-decision success pages instead of hiding requests", () => {
+    expect(() => parsePendingChannelDecisionPage({ next_after: null })).toThrow(
+      "invalid pending decisions response",
+    );
+    expect(() => parsePendingChannelDecisionPage({ decisions: null, next_after: null })).toThrow(
+      "invalid pending decisions response",
+    );
+    expect(() => parsePendingChannelDecisionPage({
+      decisions: [{ seq: 1, prompt: "ship?", asker: "agent", waiting_on_me: "yes" }],
+      next_after: null,
+    })).toThrow("invalid pending decisions response");
+    expect(parsePendingChannelDecisionPage({ decisions: [], next_after: null })).toEqual({
+      decisions: [],
+      next_after: null,
+    });
+  });
+
   test("lists active decisions and requests recent history with --all", async () => {
     expect(await decisionRun(["list"])).toBe(0);
     expect(logs.join("\n")).toContain("pending decision requests: 1");

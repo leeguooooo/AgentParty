@@ -29,6 +29,7 @@ import {
   textsLang,
   wakeNoteFromId,
   wakeReplyCommand,
+  wakeThreadCommand,
 } from "../src/wake-note-i18n";
 
 const NOW = Date.parse("2026-08-28T10:02:00Z");
@@ -167,6 +168,12 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
     expect(wakeReplyCommand("zh", "pwtk", 42, null)).toBe('party reply 42 "<你的回复>" --channel pwtk');
     expect(wakeReplyCommand("en", "pwtk", 42, "/tmp/same.json", "/tmp/same.json")).toBe(
       'party reply 42 "<your reply>" --channel pwtk',
+    );
+    expect(wakeReplyCommand("en", "bad\n$(touch /tmp/pwn)\x1b[31m", 42, null)).toBe(
+      'party reply 42 "<your reply>" --channel \'bad $(touch /tmp/pwn)\'',
+    );
+    expect(wakeThreadCommand("bad\n$(touch /tmp/pwn)\x1b[31m", 42)).toBe(
+      "party history 'bad $(touch /tmp/pwn)' --seq 42",
     );
   });
 

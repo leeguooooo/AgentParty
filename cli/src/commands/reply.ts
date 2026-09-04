@@ -11,7 +11,12 @@ export function replyToSendArgs(argv: readonly string[]): string[] | null {
   const seq = argv[0];
   if (seq === undefined) return null;
   const parsed = parseReplyToList(seq);
-  if (typeof parsed === "string" || parsed.replyTo === null || parsed.alsoResolves.length > 0) return null;
+  if (
+    seq.includes(",") ||
+    typeof parsed === "string" ||
+    parsed.replyTo === null ||
+    parsed.alsoResolves.length > 0
+  ) return null;
   if (parseArgs([...argv.slice(1)], sendSpec).flags["reply-to"] !== undefined) return null;
   return ["--reply-to", seq, ...argv.slice(1)];
 }

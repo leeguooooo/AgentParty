@@ -117,6 +117,7 @@ describe("party reply (#1076)", () => {
     expect(replyToSendArgs([])).toBeNull();
     expect(replyToSendArgs(["zero", "hello"])).toBeNull();
     expect(replyToSendArgs(["1,2", "hello"])).toBeNull();
+    expect(replyToSendArgs(["42,42", "hello"])).toBeNull();
     expect(replyToSendArgs(["9007199254740993", "hello"])).toBeNull();
     expect(replyToSendArgs(["42", "hello", "--reply-to", "7"])).toBeNull();
   });

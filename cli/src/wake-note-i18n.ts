@@ -22,6 +22,8 @@ import { Buffer } from "node:buffer";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { configPath as ambientAgentpartyConfigPath } from "./config";
+import { sanitizeSingleLine } from "./format";
+import { isSlug } from "./validation";
 
 export type WakeLang = "zh" | "en";
 
@@ -442,17 +444,22 @@ export function wakeReplyCommand(
   const needsPrefix = scoped !== null
     && (ambientConfigPath === null || comparablePath(scoped) !== comparablePath(ambientConfigPath));
   const prefix = needsPrefix ? `AGENTPARTY_CONFIG=${shellQuote(scoped)} ` : "";
-  return `${prefix}party reply ${seq} "${t(lang, "wake.reply.placeholder")}" --channel ${channel}`;
+  return `${prefix}party reply ${seq} "${t(lang, "wake.reply.placeholder")}" --channel ${shellChannel(channel)}`;
 }
 
 /** 读线程的命令（Thread 行）。 */
 export function wakeThreadCommand(channel: string, seq: number): string {
-  return `party history ${channel} --seq ${seq}`;
+  return `party history ${shellChannel(channel)} --seq ${seq}`;
 }
 
 /** 路径进 shell 命令前的最小引用：只含安全字符时原样，否则单引号包裹。 */
 function shellQuote(value: string): string {
   return /^[A-Za-z0-9_./~-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** Channel slugs stay readable; any corrupted local value becomes inert shell data. */
+function shellChannel(channel: string): string {
+  return isSlug(channel) ? channel : shellQuote(sanitizeSingleLine(channel));
 }
 
 /**
