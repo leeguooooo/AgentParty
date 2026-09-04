@@ -98,7 +98,7 @@ function successfulRunner(overrides: Map<string, { status: number; stdout: strin
         // wrapper 的判据是 argv[1]==="hook"，两个子命令共用同一道闸——桩必须两边都模拟，
         // 否则「只有 report 被挡住、stop-guard 漏了」这种缺陷会全绿。
         if (!unarmedHookSpawns && env.AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN !== "1" && !env.AP_ACTIVITY_FILE) {
-          return { status: 0, stdout: "", stderr: "" };
+          return { status: 0, stdout: "{}\n", stderr: "" };
         }
         const activityFile = env.AP_ACTIVITY_FILE ?? join(
           env.AGENTPARTY_HOME!,
@@ -117,7 +117,7 @@ function successfulRunner(overrides: Map<string, { status: number; stdout: strin
           status: 0,
           stdout: armed && payload.stop_hook_active === false
             ? `${JSON.stringify({ decision: "block", reason: "unfinished delivered work" })}\n`
-            : "",
+            : "{}\n",
           stderr: "",
         };
       }

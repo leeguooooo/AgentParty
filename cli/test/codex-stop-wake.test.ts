@@ -647,33 +647,33 @@ describe("party hook codex-stop 端到端（子进程）", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("没有任何本地信号 → exit 0、stdout 恒空（hook 铁律）", async () => {
+  test("没有任何本地信号 → exit 0、stdout 返回空 JSON 决策", async () => {
     const result = await runHook(JSON.stringify(stopPayload()), {
       ...process.env,
       AGENTPARTY_HOME: home,
       AGENTPARTY_CHANNEL: "pwtk",
     });
     expect(result.code).toBe(0);
-    expect(result.stdout).toBe("");
+    expect(result.stdout).toBe("{}\n");
   });
 
-  test("坏 JSON → exit 0、stdout 恒空，绝不阻断会话", async () => {
+  test("坏 JSON → exit 0、stdout 返回空 JSON 决策，绝不阻断会话", async () => {
     const result = await runHook("{ not json", { ...process.env, AGENTPARTY_HOME: home });
     expect(result.code).toBe(0);
-    expect(result.stdout).toBe("");
+    expect(result.stdout).toBe("{}\n");
   });
 
-  test("空 stdin → exit 0、stdout 恒空", async () => {
+  test("空 stdin → exit 0、stdout 返回空 JSON 决策", async () => {
     const result = await runHook("", { ...process.env, AGENTPARTY_HOME: home });
     expect(result.code).toBe(0);
-    expect(result.stdout).toBe("");
+    expect(result.stdout).toBe("{}\n");
   });
 
-  test("非对象 payload → exit 0、stdout 恒空", async () => {
+  test("非对象 payload → exit 0、stdout 返回空 JSON 决策", async () => {
     for (const raw of ["[]", '"x"', "null", "3"]) {
       const result = await runHook(raw, { ...process.env, AGENTPARTY_HOME: home });
       expect(result.code).toBe(0);
-      expect(result.stdout).toBe("");
+      expect(result.stdout).toBe("{}\n");
     }
   });
 });

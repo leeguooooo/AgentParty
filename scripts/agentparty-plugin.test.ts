@@ -107,7 +107,7 @@ describe("AgentParty marketplace plugin", () => {
         type: "command",
         command: claudeRuntimeCommand,
         args: ["hook", event === "Stop" ? "stop-guard" : "report"],
-        timeout: 10,
+        timeout: event === "SessionEnd" ? 3 : 10,
       }]);
     }
   });
@@ -174,6 +174,23 @@ describe("AgentParty marketplace plugin", () => {
         expect(existsSync(marker)).toBe(false);   // 真正要证的：进程根本没起
         expect(result.status).toBe(0);            // #602：永远 exit 0
         expect(result.stdout).toBe("");           // #602：stdout 会进模型上下文，必须为空
+        expect(result.stderr).toBe("");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("未接入的 Stop：不启动 party，但返回 Codex 要求的空 JSON 决策", () => {
+      const { home, marker } = stubHome();
+      try {
+        const result = spawnSync(runtimeLauncher, ["hook", "stop-guard"], {
+          env: { HOME: home, PATH: "/usr/bin:/bin" },
+          input: '{"hook_event_name":"Stop","stop_hook_active":false}',
+          encoding: "utf8",
+        });
+        expect(existsSync(marker)).toBe(false);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("{}\n");
         expect(result.stderr).toBe("");
       } finally {
         rmSync(home, { recursive: true, force: true });

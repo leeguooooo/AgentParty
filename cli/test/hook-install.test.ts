@@ -258,11 +258,11 @@ describe("AgentParty Stop guard", () => {
       .toBeGreaterThan(throttledMarkerTs);
 
     const ordinarySession = await runGuard(false, false);
-    expect(ordinarySession).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(ordinarySession).toEqual({ code: 0, stdout: "{}\n", stderr: "" });
     expect(JSON.parse(readFileSync(stopActivityFile, "utf8"))).toMatchObject({ phase: "idle" });
 
     const continuation = await runGuard(true, true);
-    expect(continuation).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(continuation).toEqual({ code: 0, stdout: "{}\n", stderr: "" });
     expect(JSON.parse(readFileSync(stopActivityFile, "utf8"))).toMatchObject({ phase: "idle" });
   });
 });

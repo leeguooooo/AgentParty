@@ -2898,6 +2898,7 @@ export function claudeHookSettingsJson(execPath: string = process.execPath): str
   const command = `${partyBin === "party" ? partyBin : JSON.stringify(partyBin)} hook report`;
   const stopGuardCommand = `${partyBin === "party" ? partyBin : JSON.stringify(partyBin)} hook stop-guard`;
   const hook = [{ hooks: [{ type: "command", command, timeout: 10 }] }];
+  const sessionEndHook = [{ hooks: [{ type: "command", command, timeout: 3 }] }];
   const stopGuardHook = [{ hooks: [{ type: "command", command: stopGuardCommand, timeout: 10 }] }];
   return JSON.stringify({
     hooks: {
@@ -2909,7 +2910,7 @@ export function claudeHookSettingsJson(execPath: string = process.execPath): str
       Stop: stopGuardHook,
       StopFailure: hook,
       SessionStart: hook,
-      SessionEnd: hook,
+      SessionEnd: sessionEndHook,
       PreCompact: hook,
       PostCompact: hook,
       Elicitation: hook,

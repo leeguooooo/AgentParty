@@ -320,10 +320,10 @@ export function verifyCliBinary(
           ...(event === "Stop" ? { stop_hook_active: false } : {}),
         }),
       );
-      // #602 铁律：hook 的 stdout 会被灌进模型上下文，必须逐字为空——
-      // "包含某些内容" 不够，任何多余输出都是违约。
-      if (unarmed.stdout !== "") {
-        throw new Error(`unarmed plugin ${event} hook wrote to stdout`);
+      // 普通 hook 必须逐字为空；Codex 的 Stop 契约要求成功时返回 JSON。
+      const expectedStdout = event === "Stop" ? "{}\n" : "";
+      if (unarmed.stdout !== expectedStdout) {
+        throw new Error(`unarmed plugin ${event} hook wrote unexpected stdout`);
       }
     }
     // No local snapshot: nothing ran. (The previous contract accepted a private
@@ -426,8 +426,8 @@ export function verifyCliBinary(
       "Bash",
     );
     const unarmedStop = runPluginHook("Stop", { stop_hook_active: false }, "idle");
-    if (unarmedStop.stdout !== "") {
-      throw new Error("unarmed plugin Stop hook unexpectedly blocked an ordinary Claude session");
+    if (unarmedStop.stdout !== "{}\n") {
+      throw new Error("unarmed plugin Stop hook did not return the empty JSON decision");
     }
 
     // Prepare one private, local recovery debt using the same durable journal
@@ -557,8 +557,8 @@ export function verifyCliBinary(
         cwd: process.cwd(),
       }),
     );
-    if (continuationStop.stdout !== "") {
-      throw new Error("plugin Stop hook blocked its own continuation");
+    if (continuationStop.stdout !== "{}\n") {
+      throw new Error("plugin Stop hook did not return the empty JSON decision for its continuation");
     }
 
     return {

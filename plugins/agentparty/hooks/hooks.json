@@ -168,7 +168,7 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime",
             "args": ["hook", "report"],
-            "timeout": 10
+            "timeout": 3
           }
         ]
       }

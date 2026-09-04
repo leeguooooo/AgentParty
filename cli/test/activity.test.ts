@@ -202,7 +202,7 @@ describe("claudeHookSettingsJson", () => {
       expect(entry?.command).toBe(
         `"/usr/local/bin/party" hook ${event === "Stop" ? "stop-guard" : "report"}`,
       );
-      expect(entry?.timeout).toBe(10);
+      expect(entry?.timeout).toBe(event === "SessionEnd" ? 3 : 10);
     }
   });
 

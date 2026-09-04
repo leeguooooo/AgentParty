@@ -20,11 +20,16 @@ fail() {
 # party bridge claude 设 AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN=1），或 serve 托管 lane
 # （AP_ACTIVITY_FILE 有值），才真的有一个在听的 listener 需要上报活动。
 #
-# 铁律照旧（#602）：stdout 永远为空、永远 exit 0——hook 的 stdout 会被灌进模型上下文，
-# 非零退出会阻断模型的工具调用。这条早退路径只用 sh 内建命令，不碰磁盘、不启动任何进程。
+# 铁律照旧（#602）：普通 hook 的 stdout 永远为空、永远 exit 0——hook 的 stdout 会被灌进
+# 模型上下文，非零退出会阻断模型的工具调用。Codex 的 Stop hook 是例外：成功时必须返回
+# JSON，所以未武装的 stop-guard 用 shell 内建 printf 返回一个无决策对象。这条早退路径仍然
+# 不碰磁盘、不启动任何进程。
 case "${1:-}" in
   hook)
     if [ "${AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN:-}" != "1" ] && [ -z "${AP_ACTIVITY_FILE:-}" ]; then
+      if [ "${2:-}" = "stop-guard" ]; then
+        printf '%s\n' '{}'
+      fi
       exit 0
     fi
     ;;

@@ -1382,8 +1382,9 @@ export function defaultCodexStopWakeDeps(
  * 配一个非空 `reason`，而 `reason` 同时就是注入给模型的 prompt（**没有 `prompt` 字段**，
  * 多带一个会让 codex 整份输出作废，见 codex-stop-wake.ts 文件头）。
  *
- * 放行（不写任何 stdout）是所有异常路径的统一归宿：拿不到身份、读盘炸了、判定说不该叫——
- * 一律安静让会话正常停止。宁可漏叫一次，也绝不把用户的会话卡在无限续跑里。
+ * 放行是所有异常路径的统一归宿：拿不到身份、读盘炸了、判定说不该叫——一律让会话正常
+ * 停止。这个函数本身不打印放行结果；命令边界会按 Codex Stop 契约补一个空 JSON 对象。
+ * 宁可漏叫一次，也绝不把用户的会话卡在无限续跑里。
  */
 export async function handleCodexStopRecord(
   record: Record<string, unknown>,
@@ -1523,12 +1524,27 @@ export function codexStopWakeBacklog(next: NextMention | null): CodexStopWakePoi
 
 /** `party hook codex-stop`：读一条 codex Stop 事件，必要时 block 一次让会话继续跑一轮。 */
 async function runCodexStopHookInput(): Promise<number> {
+  let emittedStopDecision = false;
   try {
     const payload = JSON.parse(await readStdin(MAX_STDIN_BYTES)) as unknown;
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return 0;
-    await handleCodexStopRecord(payload as Record<string, unknown>);
+    const record = payload as Record<string, unknown>;
+    const deps = defaultCodexStopWakeDeps(
+      process.env,
+      typeof record.session_id === "string" ? record.session_id : null,
+    );
+    const emit = deps.emit;
+    await handleCodexStopRecord(record, process.env, {
+      ...deps,
+      emit: (line) => {
+        emittedStopDecision = true;
+        emit(line);
+      },
+    });
   } catch {
-    // hook 铁律高于唤醒：坏 JSON / 读盘失败 / 任何意外，一律安静放行让会话正常停止。
+    // hook 铁律高于唤醒：坏 JSON / 读盘失败 / 任何意外，一律放行让会话正常停止。
+  } finally {
+    if (!emittedStopDecision) emitHookLine("{}");
   }
   return 0;
 }
@@ -1810,6 +1826,7 @@ async function unfinishedClaudeChannelEntries(record: Record<string, unknown>): 
 }
 
 async function runHookInput(blockStop: boolean): Promise<number> {
+  let emittedStopDecision = false;
   try {
     const raw = await readStdin(MAX_STDIN_BYTES);
     const payload = JSON.parse(raw) as unknown;
@@ -1859,9 +1876,15 @@ async function runHookInput(blockStop: boolean): Promise<number> {
         "without a linked channel reply. Finish the claim/accept/reply flow, or explicitly move the " +
         "execution to waiting_owner, before stopping.",
     }));
+    emittedStopDecision = true;
   } catch {
     // Activity reporting and the stop guard both fail open. A broken local file or auth
     // probe must not strand an unrelated Claude session in an unbounded continuation.
+  } finally {
+    // Codex requires every successful Stop hook to return JSON, including a no-op allow.
+    // Claude also accepts the empty object as a no-decision result. Report hooks keep the
+    // historical zero-byte stdout contract; only stop-guard reaches this branch.
+    if (blockStop && !emittedStopDecision) emitHookLine("{}");
   }
   return 0;
 }
