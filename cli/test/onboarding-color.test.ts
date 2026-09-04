@@ -74,3 +74,32 @@ describe("过了的步骤只印异常子项（#1073 收篇幅）", () => {
     expect(out).toContain("装 codex 插件");
   });
 });
+
+// #1073 第 2 点的另一半：join 装完 codex hook 后，第 2 步会用同一份唤醒清单判过/不过并给恰一条
+// 修法。hook install 自己再把整份清单印一遍＝同一段修复说明连印两遍。join 因此传 --brief。
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { run as hookRun } from "../src/commands/hook";
+
+describe("party hook install --brief（给 join 用）", () => {
+  test("brief 压掉解说与清单重播，但保留「装到哪个文件」这一行", async () => {
+    // hook install 写的是 **cwd** 下的 .claude/settings.local.json——不隔离就会往仓库工作树里落文件。
+    const cwd = process.cwd();
+    const sandbox = mkdtempSync(join(tmpdir(), "ap-hook-brief-"));
+    const lines: string[] = [];
+    const real = console.log;
+    console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    try {
+      process.chdir(sandbox);
+      await hookRun(["install", "--claude", "--brief"]);
+    } finally {
+      console.log = real;
+      process.chdir(cwd);
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+    const out = lines.join("\n");
+    expect(out).toContain("hooks installed -> ");
+    expect(out).not.toContain("普通 Claude session 只写本地 activity");
+  });
+});

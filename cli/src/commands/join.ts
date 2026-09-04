@@ -982,7 +982,8 @@ function receiveModeStep(): Step<JoinCtx> {
         return { ok: true, summary, detail };
       }
       if (harness === "codex") {
-        const hookArgs = ["install", "--codex"];
+        // --brief：装完别再把整份唤醒清单印一遍——紧接着这一步就用同一份清单判过/不过并给一条修法（#1073）。
+        const hookArgs = ["install", "--codex", "--brief"];
         if (opts.yes) hookArgs.push("--yes");
         const hookCode = await deps.hookRun(hookArgs);
         const detail = hookCode === 0 ? [] : [outcomeLine("装 + 批准 codex hook", { level: "warn", msg: `party hook install --codex 退出码 ${hookCode}` })];
