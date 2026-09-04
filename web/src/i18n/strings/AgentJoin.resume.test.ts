@@ -73,3 +73,23 @@ describe("第③步的 resume 说明（中英都要有）", () => {
     expect(offenders.map((o) => `L${o.no}`)).toEqual([]);
   });
 });
+
+// #1073 续：codex 档「装上 hook」不等于「hook 生效」——必须在新开的交互式 codex 里
+// 于 "Hooks need review" 提示处批准。此前网页只说「新开一个 codex 会话就生效」，
+// 用户照做后以为接好了，实际 @ 过去毫无反应且不报错（CLI 第 2 步会明确判失败）。
+test("codex 的起会话提示必须讲明要批准 hook，且说明未批准时会静默失效", () => {
+  const lines = strings.split("\n").filter((line) => line.includes('"AgentJoin.step3.hintCodex"'));
+  expect(lines).toHaveLength(2); // en + zh 各一条
+
+  const [en, zh] = lines as [string, string];
+  for (const line of lines) {
+    expect(line).toContain("Hooks need review"); // 要指明在哪个提示处操作
+  }
+  expect(en).toMatch(/approve/i);
+  expect(en).toMatch(/silently|no error/i);
+  expect(zh).toMatch(/批准|启用/);
+  expect(zh).toMatch(/静默|不会报错/);
+  // 不能再退回「新开会话就生效」这种会误导人的断言
+  expect(en).not.toMatch(/so it takes effect/i);
+  expect(zh).not.toMatch(/会话就生效/);
+});
