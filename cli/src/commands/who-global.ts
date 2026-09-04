@@ -211,13 +211,27 @@ const REACH_MARK: Record<GlobalReach, string> = {
   offline: "·",
 };
 
-export function renderGlobalRow(row: GlobalWhoRow, display: string, now: number): string {
+/**
+ * 渲染一行。display / owner / 频道名都来自服务端，**必须**先过终端控制序列清洗——
+ * 否则一个恶意昵称就能在别人终端里改写光标与颜色（#629 修过同一类问题，这条路径不能漏）。
+ * aka 也一并展示：折叠掉的会话名是精确寻址时的唯一线索，只藏进 JSON 等于丢了。
+ */
+export function renderGlobalRow(
+  row: GlobalWhoRow,
+  display: string,
+  now: number,
+  sanitize: (value: string) => string = (value) => value,
+): string {
   const age = row.last_seen === undefined ? "" : ` ${fmtAge(now - row.last_seen)}`;
-  const owner = row.owner === undefined ? "" : ` · ${row.owner}`;
+  const owner = row.owner === undefined ? "" : ` · ${sanitize(row.owner)}`;
   const paused = row.paused === true ? " ⏸ paused" : "";
   const noMention = row.mentionable === false ? "  ⚠ no @ handle" : "";
-  const where = row.channels.length === 1 ? `#${row.channels[0]}` : `#${row.channels[0]} +${row.channels.length - 1}`;
-  return `${REACH_MARK[row.reach]} ${display}${owner}  ${row.kind}${paused}  ${where}${age}${noMention}`;
+  const channels = row.channels.map(sanitize);
+  const where = channels.length === 1 ? `#${channels[0]}` : `#${channels[0]} +${channels.length - 1}`;
+  const aka = row.aka === undefined || row.aka.length === 0
+    ? ""
+    : `  aka ${row.aka.slice(0, 2).map(sanitize).join(", ")}${row.aka.length > 2 ? ` +${row.aka.length - 2}` : ""}`;
+  return `${REACH_MARK[row.reach]} ${sanitize(display)}${owner}  ${row.kind}${paused}  ${where}${age}${noMention}${aka}`;
 }
 
 function fmtAge(ms: number): string {

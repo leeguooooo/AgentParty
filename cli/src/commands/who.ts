@@ -1016,7 +1016,7 @@ async function runGlobalWho(cfg: { server: string; token: string; name?: string 
     const entry = snapshots
       .flatMap((snapshot) => snapshot.presence)
       .find((candidate) => candidate.name === row.name);
-    console.log("  " + renderGlobalRow(row, entry === undefined ? row.name : globalWhoDisplay(entry), now));
+    console.log("  " + renderGlobalRow(row, entry === undefined ? row.name : globalWhoDisplay(entry), now, terminalIdentityText));
   }
   if (failed.length > 0) {
     console.log(`\ncould not read presence for: ${failed.join(", ")} — this list is incomplete`);

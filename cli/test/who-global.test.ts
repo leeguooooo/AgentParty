@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
-import { activeChannelSlugs, buildGlobalWho, personKeyOf, reachOf } from "../src/commands/who-global";
+import { activeChannelSlugs, buildGlobalWho, personKeyOf, reachOf, renderGlobalRow } from "../src/commands/who-global";
 
 const NOW = 1_700_000_000_000;
 
@@ -142,5 +142,39 @@ describe("全局 who 的按人聚合（#1074）", () => {
       { slug: "dead", title: null, archived_at: NOW - 1 } as never,
     ]);
     expect(slugs).toEqual(["live"]);
+  });
+});
+
+describe("全局 who 的终端渲染（#1074）", () => {
+  const sanitize = (v: string) => v.replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").replace(/\s+/g, " ").trim();
+
+  test("服务端可控字段必须过控制序列清洗（#629 同类注入）", () => {
+    const row = {
+      name: "evil",
+      kind: "agent" as const,
+      reach: "online" as const,
+      owner: "own\u001b[31mer",
+      channels: ["ch\u0007an"],
+      last_seen: NOW - 1_000,
+    };
+    const line = renderGlobalRow(row, "dis\u001b[2Jplay", NOW, sanitize);
+    // 清洗只剥不可见控制字符（ESC/BEL），可见残留如 "[2J" 保留原样——与 terminalIdentityText 同语义
+    expect(line).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/);
+    expect(line).toContain("dis [2Jplay");
+    expect(line).toContain("own [31mer");
+    expect(line).toContain("#ch an");
+  });
+
+  test("折叠掉的会话名要在终端里露出来，不能只藏进 JSON", () => {
+    const row = {
+      name: "leo",
+      kind: "human" as const,
+      reach: "online" as const,
+      channels: ["alpha"],
+      aka: ["sess-1", "sess-2", "sess-3"],
+      last_seen: NOW - 1_000,
+    };
+    const line = renderGlobalRow(row, "Leo", NOW, sanitize);
+    expect(line).toContain("aka sess-1, sess-2 +1");
   });
 });
