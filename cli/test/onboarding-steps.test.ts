@@ -628,8 +628,9 @@ describe("party join 引导 —— 幂等（#988）", () => {
     const first: string[] = [];
     const second: string[] = [];
     // 第一跑：mcp get 探到未注册 → add；第二跑：已注册 → 跳过 add。桩按 mcpAlreadyRegistered 分别配。
-    expect(await runJoin(opts({ yes: true }), joinDeps(tmp, record, {}, first))).toBe(0);
-    expect(await runJoin(opts({ yes: true }), joinDeps(tmp, record, { mcpAlreadyRegistered: true }, second))).toBe(0);
+    // verbose：这里断言的是「✓ 跳过重复添加」这类子项本身，缺省已不印（#1073 收篇幅）。
+    expect(await runJoin(opts({ yes: true, verbose: true }), joinDeps(tmp, record, {}, first))).toBe(0);
+    expect(await runJoin(opts({ yes: true, verbose: true }), joinDeps(tmp, record, { mcpAlreadyRegistered: true }, second))).toBe(0);
     expect(second.join("\n")).toContain("跳过重复添加");
     expect(second.join("\n")).toContain("crossSessionInbound 已是 accept（跳过）");
     expect(record.filter((r) => r[0] === "claude" && r[1] === "mcp" && r[2] === "add").length).toBe(1);

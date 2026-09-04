@@ -559,6 +559,13 @@ function termText(value: string): string {
 
 async function runInstall(argv: string[]): Promise<number> {
   const scope = hookScope(argv);
+  // #1073：`--brief` 给 party join 用。join 装完 hook 后，第 2 步会用**同一份**唤醒清单判过/不过
+  // 并给出恰一条修法——这里再把整份清单和那段来龙去脉印一遍，就成了同一段修复说明连印两遍
+  // （用户原话：「这个长篇大论的篇幅，用户都懵了」）。brief 只压掉解说与清单重播，
+  // **信任确认那一问照问**（它要人当场敲 y，压掉等于装了个不会跑的 hook）。
+  // 与 hookScope 同一纪律：只认 `--` 终止符之前的旗标（`hook install -- --brief` 不算）。
+  const briefBoundary = argv.indexOf("--");
+  const brief = (briefBoundary === -1 ? argv : argv.slice(0, briefBoundary)).includes("--brief");
   const path = settingsPath(scope);
   const source = existsSync(path) ? readFileSync(path, "utf8") : null;
   // serve 用同一份 hooks 配置生成器（#602），装出来的行为与托管 lane 完全一致。
@@ -576,7 +583,7 @@ async function runInstall(argv: string[]): Promise<number> {
   // 进程死在写中途会留半截 JSON——毁掉的正是 merge 拼命保护的用户手写配置（#617 评审）。
   atomicWriteText(path, next);
   console.log(`hooks installed -> ${termText(path)}`);
-  console.log(
+  if (!brief) console.log(
     scope === "codex"
       ? "codex 交互式会话现在会在 SessionStart 入册到 ~/.agentparty/codex-sessions/；" +
         "codex 无会话结束事件，出册靠进程探活。\n" +
@@ -598,8 +605,10 @@ async function runInstall(argv: string[]): Promise<number> {
     // 「新的或改动过的」hook 发问，带 trusted_hash 且 enabled=false 的它再也不会问；桌面版连
     // 界面都没有）。所以这一步由我们收集用户的确认：问一句，敲 y 才写。
     await offerCodexHookTrust(argv);
-    console.log("");
-    for (const line of formatWakeChecklist(buildWakeChecklist(diagnoseCodexWake()))) console.log(line);
+    if (!brief) {
+      console.log("");
+      for (const line of formatWakeChecklist(buildWakeChecklist(diagnoseCodexWake()))) console.log(line);
+    }
   }
   return 0;
 }

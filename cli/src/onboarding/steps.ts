@@ -22,6 +22,9 @@
 //  - **不交互**：机器只打印。要问用户的（第 2 步选接收方式）由那一步的 run 自己决定问不问，
 //    `--yes` / 无 TTY 时按默认走并把所选印出来。
 
+import { styleFor, type Style } from "./color";
+import { sanitizeSingleLine } from "../format";
+
 /** 一步跑完的结果。 */
 export interface StepResult {
   ok: boolean;
@@ -55,8 +58,29 @@ export type StepsOutcome =
 export const STEP_INDENT = "         ";
 
 /** 「第 N 步  标题 · 摘要 ✓」这一行。 */
-export function formatStepLine(index: number, title: string, result: StepResult): string {
-  return `第 ${index} 步  ${title} · ${result.summary} ${result.ok ? "✓" : "✗"}`;
+// 摘要、补充行、修法命令里混着服务端可控文本（身份、频道名、init/send 的错误消息）。它们会被
+// 原样打进终端——#372 那条老纪律照样适用：一条含 ESC 的文本就能注入 OSC52 剪贴板写入、或用光标/
+// 清屏序列伪造整屏输出。而这里每一行都是「一行一条」的结构，残留的换行/TAB 还能伪造出一整个
+// 步骤行。所以出口统一过 sanitizeSingleLine，**清洗在前、着色在后**（顺序反了会把我们自己的
+// 色码一起洗掉）。
+function clean(text: string): string {
+  return sanitizeSingleLine(text);
+}
+
+export function formatStepLine(index: number, title: string, result: StepResult, style: Style = styleFor(false)): string {
+  const mark = result.ok ? style.ok("✓") : style.bad("✗");
+  return `${style.dim(`第 ${index} 步`)}  ${style.bold(clean(title))} · ${clean(result.summary)} ${mark}`;
+}
+
+// 过了的步骤里，`✓ 子项: …` / `· 子项: …` 是「一切正常」的流水账（#1073 第 2 点）：join 一次
+// 能刷十几行，真正要读的结论反而被推出屏幕。所以**过了的步骤只印异常子项**（! / ✗）与自由文本
+// 补充行（第 2 步「你选了什么」那种，没有前缀符号）。没过的步骤照原样全印——那时每一行都是线索。
+// `--verbose` 恢复全印。
+const ROUTINE_DETAIL = /^[✓·]\s/u;
+function visibleDetail(result: StepResult, verbose: boolean): string[] {
+  const detail = result.detail ?? [];
+  if (verbose || !result.ok) return detail;
+  return detail.filter((line) => !ROUTINE_DETAIL.test(line));
 }
 
 /**
@@ -64,14 +88,21 @@ export function formatStepLine(index: number, title: string, result: StepResult)
  *   `修法（做完重跑同一条 party join）：` 一行，下一行缩进印命令，再下面是 notes。
  * 测试就靠这个形态数「印了几条修法」。
  */
-export function formatStep(index: number, title: string, result: StepResult, rerun: string): string[] {
-  const lines = [formatStepLine(index, title, result)];
-  for (const d of result.detail ?? []) lines.push(`${STEP_INDENT}${d}`);
+export function formatStep(
+  index: number,
+  title: string,
+  result: StepResult,
+  rerun: string,
+  opts: { style?: Style; verbose?: boolean } = {},
+): string[] {
+  const style = opts.style ?? styleFor(false);
+  const lines = [formatStepLine(index, title, result, style)];
+  for (const d of visibleDetail(result, opts.verbose === true)) lines.push(`${STEP_INDENT}${clean(d)}`);
   if (!result.ok) {
     const fix = result.fix ?? { do: rerun };
-    for (const n of fix.notes ?? []) lines.push(`${STEP_INDENT}${n}`);
-    lines.push(`${STEP_INDENT}修法（做完重跑同一条 ${rerun}）：`);
-    lines.push(`${STEP_INDENT}  ${fix.do}`);
+    for (const n of fix.notes ?? []) lines.push(`${STEP_INDENT}${clean(n)}`);
+    lines.push(`${STEP_INDENT}${style.bold(`修法（做完重跑同一条 ${clean(rerun)}）：`)}`);
+    lines.push(`${STEP_INDENT}  ${style.cmd(clean(fix.do))}`);
   }
   return lines;
 }
@@ -84,6 +115,10 @@ export interface RunStepsInput<Ctx> {
   rerun?: string;
   /** 第一步的编号（epic 从第 0 步「版本」数起）。 */
   firstIndex?: number;
+  /** 着色；不给＝不着色（测试与管道默认走这条）。 */
+  style?: Style;
+  /** 过了的步骤也把 ✓/· 子项全印出来。 */
+  verbose?: boolean;
 }
 
 /**
@@ -105,7 +140,7 @@ export async function runSteps<Ctx>(input: RunStepsInput<Ctx>): Promise<StepsOut
     }
     const record: StepRecord = { index, id: step.id, title: step.title, result };
     records.push(record);
-    for (const line of formatStep(index, step.title, result, rerun)) input.log(line);
+    for (const line of formatStep(index, step.title, result, rerun, { style: input.style, verbose: input.verbose })) input.log(line);
     if (!result.ok) return { ok: false, records, stoppedAt: record };
   }
   return { ok: true, records };
