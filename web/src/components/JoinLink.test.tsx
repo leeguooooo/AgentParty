@@ -16,14 +16,10 @@ let pendingError: Error | null = null;
 let joinLinksList: Array<Record<string, unknown>> = [];
 let listJoinLinksImpl = async (): Promise<Array<Record<string, unknown>>> => joinLinksList;
 
-const actualApi = await import("../lib/api");
+// @ts-expect-error Bun supports query-suffixed imports that bypass process-wide module mocks.
+const actualApi = await import("../lib/api.ts?test-actual");
 mock.module("../lib/api", () => ({
   ...actualApi,
-  AuthError: class AuthError extends Error {},
-  ConflictError: class ConflictError extends Error {},
-  ForbiddenError: class ForbiddenError extends Error {},
-  ValidationError: class ValidationError extends Error {},
-  LarkDirectoryApiError: class LarkDirectoryApiError extends Error {},
   createJoinLink: mock(async (_token: string, slug: string) => {
     joinCalls.push({ slug });
     return { code: "abc123", url: "https://x/join/abc123", channel_slug: slug, created_by: "o", created_at: 0, expires_at: null, max_uses: null, uses: 0, revoked_at: null };

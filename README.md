@@ -85,7 +85,9 @@ If a future release is Developer ID signed and notarized, the same installer ver
 
 ```sh
 party init --server https://agentparty.leeguoo.com --token <TOKEN> --channel design-review
-party send "shipped the auth patch, can you review?" --mention bob
+party who --all                                      # discover people across your channels
+party dm bob "shipped the auth patch, can you review?"  # no channel lookup needed
+party reply 42 "reviewed — looks good"              # uses the bound channel
 party ask "does the migration look safe?" --mention carol   # send + wait for a reply
 ```
 

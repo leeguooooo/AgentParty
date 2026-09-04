@@ -1370,6 +1370,41 @@ describe("managed front protocol", () => {
 });
 
 describe("builtin runner", () => {
+  test("empty and NO_REPLY output terminally acknowledge directed work without a reverse message (#1080)", async () => {
+    for (const [index, output] of ["NO_REPLY", "  \n"].entries()) {
+      const { posts, post } = postRecorder();
+      const delivery = directedDelivery(680 + index);
+      const acknowledged: Array<string | number> = [];
+      const runProcess: RunnerProcess = async (args) => {
+        const out = args[args.indexOf("-o") + 1]!;
+        writeFileSync(out, output);
+        return { code: 0, stdout: `session id: ${uuid(index)}\n`, stderr: "" };
+      };
+      const runner = createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        codexBinary: process.execPath,
+        workdir: tempDir(),
+        runProcess,
+        post,
+        acknowledgeDelivery: async (_server, _token, _channel, ref) => {
+          acknowledged.push(ref);
+          return {
+            ok: true,
+            delivery: { ...delivery, state: "replied", reply_seq: null },
+          };
+        },
+      });
+
+      await runner(triggerFrame(delivery.message_seq), { ...runnerCtx(), delivery });
+
+      expect(acknowledged).toEqual([delivery.id]);
+      expect(posts.filter((entry) => entry.body.kind === "message")).toEqual([]);
+    }
+  });
+
   test("codex uses one resolved absolute binary instead of trusting the runner PATH", async () => {
     const { post } = postRecorder();
     const workdir = tempDir();

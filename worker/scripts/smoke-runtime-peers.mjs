@@ -7,6 +7,16 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CANDIDATE_REF_RE = /^candidate_[A-Za-z0-9_-]{16,64}$/;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_SOCKET_TIMEOUT_MS = 10_000;
+const LIVE_CONFLICT_RETRY_DELAYS_MS = [150, 500];
+
+class RuntimeSmokeHttpError extends Error {
+  constructor(message, status, body) {
+    super(message);
+    this.name = "RuntimeSmokeHttpError";
+    this.status = status;
+    this.body = body;
+  }
+}
 
 function normalizedBase(raw) {
   const url = new URL(raw);
@@ -52,7 +62,16 @@ async function requestJson(fetchImpl, base, token, label, path, init = {}, timeo
   }
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`${label}: expected 2xx, got ${response.status}`);
+    let body = null;
+    try {
+      body = text === "" ? null : JSON.parse(text);
+    } catch {
+      // The status remains useful even when an old/misconfigured Worker returns text.
+    }
+    const matches = Number.isInteger(body?.matches) && body.matches >= 0
+      ? ` (matches=${body.matches})`
+      : "";
+    throw new RuntimeSmokeHttpError(`${label}: expected 2xx, got ${response.status}${matches}`, response.status, body);
   }
   try {
     return text === "" ? null : JSON.parse(text);
@@ -407,6 +426,7 @@ export async function verifyRuntimePeersLiveTopology(options) {
     requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     socketTimeoutMs = DEFAULT_SOCKET_TIMEOUT_MS,
     openSocketImpl = openRuntimeTopologySocket,
+    sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   } = options;
   const target = await resolveRuntimeSmokeTarget(options);
   const nodeNonce = randomBytes(16).toString("hex");
@@ -448,18 +468,30 @@ export async function verifyRuntimePeersLiveTopology(options) {
       topology: peerTopology,
       socketTimeoutMs,
     }));
-    const response = await requestJson(
-      fetchImpl,
-      target.base,
-      token,
-      "runtime-peers live topology smoke",
-      `/api/channels/${encodeURIComponent(target.channel)}/runtime-peers`,
-      {
-        method: "POST",
-        body: JSON.stringify({ topology: callerTopology, purpose: "claude_cross_session" }),
-      },
-      requestTimeoutMs,
-    );
+    let response;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        response = await requestJson(
+          fetchImpl,
+          target.base,
+          token,
+          "runtime-peers live topology smoke",
+          `/api/channels/${encodeURIComponent(target.channel)}/runtime-peers`,
+          {
+            method: "POST",
+            body: JSON.stringify({ topology: callerTopology, purpose: "claude_cross_session" }),
+          },
+          requestTimeoutMs,
+        );
+        break;
+      } catch (error) {
+        const delay = LIVE_CONFLICT_RETRY_DELAYS_MS[attempt];
+        if (!(error instanceof RuntimeSmokeHttpError) || error.status !== 409 || delay === undefined) throw error;
+        // A just-closed socket may remain visible briefly in the Durable Object connection set.
+        // Retry only this explicit binding conflict; all auth/protocol/server failures still fail immediately.
+        await sleepImpl(delay);
+      }
+    }
     assertRuntimeTopologyRefsRedacted(response, [callerTopology, peerTopology]);
     validateRuntimeLiveTopologyResponse(response, target.identityName, displayName);
     return {

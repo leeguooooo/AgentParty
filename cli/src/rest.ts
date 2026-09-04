@@ -1132,6 +1132,41 @@ export async function listChannelDecisions(
   };
 }
 
+export interface PendingChannelDecision {
+  seq: number;
+  prompt: string;
+  asker: string;
+  waiting_on_me: boolean;
+}
+
+/** Durable unresolved decision requests, independent of the bounded message window. */
+export async function listPendingChannelDecisions(
+  server: string,
+  token: string,
+  slug: string,
+): Promise<PendingChannelDecision[]> {
+  const decisions = new Map<number, PendingChannelDecision>();
+  let after = 0;
+  for (let page = 0; page < 200; page += 1) {
+    const body = (await req(
+      server,
+      `/api/channels/${encodeURIComponent(slug)}/pending-decisions?after=${after}&limit=200`,
+      { headers: bearerJson(token) },
+    )) as { decisions?: PendingChannelDecision[]; next_after?: number | null };
+    for (const decision of Array.isArray(body.decisions) ? body.decisions : []) {
+      decisions.set(decision.seq, decision);
+    }
+    if (body.next_after === null || body.next_after === undefined) {
+      return [...decisions.values()].sort((left, right) => left.seq - right.seq);
+    }
+    if (!Number.isSafeInteger(body.next_after) || body.next_after <= after) {
+      throw new Error("pending decision cursor did not advance");
+    }
+    after = body.next_after;
+  }
+  throw new Error("pending decisions exceeded max page count");
+}
+
 export async function recordChannelDecision(
   server: string,
   token: string,

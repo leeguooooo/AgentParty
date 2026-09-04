@@ -115,6 +115,21 @@ describe("party_ack 的 MCP/CLI 对等（#834 第 5 项）", () => {
     expect(result.structuredContent).toMatchObject({ server_settled: true });
   }, 30_000);
 
+  test("party_receipt no_reply 复用同一终态，不写 receipt 消息元数据", async () => {
+    const client = await connect();
+    const result = (await client.callTool({
+      name: "party_receipt",
+      arguments: { seq: 8, reason: "seen", no_reply: true },
+    })) as ToolResult;
+    expect(result.isError).toBeFalsy();
+    expect(acked).toEqual(["8"]);
+    expect(result.structuredContent).toMatchObject({
+      type: "delivery_ack",
+      terminal_reason: "acknowledged_no_reply",
+      message_created: false,
+    });
+  }, 30_000);
+
   test("no_reply 不带 seq 被拒，且错误只提 MCP 参数名、不把 CLI 旗标甩给够不到 CLI 的调用方", async () => {
     const client = await connect();
     const result = (await client.callTool({ name: "party_ack", arguments: { no_reply: true } })) as ToolResult;
@@ -139,12 +154,15 @@ describe("party_ack 的 MCP/CLI 对等（#834 第 5 项）", () => {
     const client = await connect();
     const tools = await client.listTools();
     const ack = tools.tools.find((tool) => tool.name === "party_ack");
+    const receipt = tools.tools.find((tool) => tool.name === "party_receipt");
     expect(ack).toBeDefined();
     const props = Object.keys((ack!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
     expect(props).toContain("through");
     expect(props).toContain("all");
     expect(props).toContain("before");
     expect(props).toContain("no_reply");
+    expect(Object.keys((receipt!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}))
+      .toContain("no_reply");
   }, 30_000);
 
   test("两套措辞各说各的操作面，不互相串旗标", () => {

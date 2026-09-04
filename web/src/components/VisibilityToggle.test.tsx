@@ -5,7 +5,8 @@ import { LocaleProvider } from "../i18n/locale";
 import type { Visibility, VisibilityResult } from "../lib/api";
 import { ChannelAdminView } from "./ChannelAdminView";
 
-const actualApi = await import("../lib/api");
+// @ts-expect-error Bun supports query-suffixed imports that bypass process-wide module mocks.
+const actualApi = await import("../lib/api.ts?test-actual");
 const visibilityCalls: Array<{
   token: string;
   slug: string;

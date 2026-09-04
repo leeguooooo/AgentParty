@@ -65,6 +65,7 @@ import {
 } from "../task-lease";
 import { acquireTaskLeaseAcrossMachines, releaseTaskLeaseAcrossMachines } from "../task-lease-remote";
 import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
+import { settleClaudeDeliveryRecovery } from "../delivery-recovery-journal";
 
 const HELP = `usage: party mcp [--channel <slug>] [--identity <label>]
        party mcp prune [--yes] [--check-remote] [--json]
@@ -1577,25 +1578,53 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         }
         // #875：先结服务端账再动本地债。顺序反了就会出现「本地平了、服务端仍欠着」，
         // 调用方以为两本账都平了。
-        let serverSettled: { settled: true; deduped: boolean } | null = null;
+        let serverSettled: { settled: true; deduped: boolean; deliveryId: string } | null = null;
         if (no_reply === true) {
           const cfg = await auth();
           const result = await ackDelivery(cfg.server, cfg.token, resolved, seq as number);
-          serverSettled = { settled: true, deduped: result.deduped === true };
+          settleClaudeDeliveryRecovery(cfg.server, cfg.token, resolved, result.delivery.id);
+          serverSettled = {
+            settled: true,
+            deduped: result.deduped === true,
+            deliveryId: result.delivery.id,
+          };
         }
         // 与 CLI party ack 共用原子 compare-and-clear（#599 评审）：读后清会误吞窗口内新债。
         const acked = ackWatchStuck(resolved, seq);
-        const settled = serverSettled === null ? {} : { server_settled: true, server_deduped: serverSettled.deduped };
+        const settled = serverSettled === null ? {} : {
+          server_settled: true,
+          server_deduped: serverSettled.deduped,
+          delivery_id: serverSettled.deliveryId,
+        };
         if (acked.outcome === "none") {
           return ok({ type: "ack", channel: resolved, acked: false, ...settled, note: "no pending wake debt" });
         }
         if (acked.outcome === "serve_owned") {
+          if (serverSettled !== null) {
+            return ok({
+              type: "ack",
+              channel: resolved,
+              acked: false,
+              ...settled,
+              note: "server execution settled; the live serve process retains its local bookkeeping",
+            });
+          }
           return fail(
             `refusing to ack: pending debt at seq=${acked.seq} is owned by party serve (source=${acked.source}); ` +
               "serve replays it durably — clearing it by hand would silently drop that @",
           );
         }
         if (acked.outcome === "seq_mismatch") {
+          if (serverSettled !== null) {
+            return ok({
+              type: "ack",
+              channel: resolved,
+              acked: false,
+              ...settled,
+              pending_seq: acked.seq,
+              note: `server execution settled; older local watch debt seq=${acked.seq} remains`,
+            });
+          }
           return fail(
             `refusing to ack seq=${seq}: older pending watch debt seq=${acked.seq} must be handled first` +
               ` (or explicitly drained: call this tool again with through=${acked.seq})`,
@@ -1629,7 +1658,8 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         "message updates in place. Use this instead of hand-rolling a receipt with party_send — hand-rolled receipts have " +
         "shipped with an empty seq, and because they are ordinary messages they compete with real ones (one un-acked " +
         "receipt once blocked seven real messages). It reports reception only; it never implies the work is done. " +
-        "Pair it with residency 'episodic' on your status so collaborators read the delay as per-turn wakeup, not as offline.",
+        "Pair it with residency 'episodic' on your status so collaborators read the delay as per-turn wakeup, not as offline. " +
+        "Set no_reply=true only to terminally settle a completed accepted execution without creating a channel message; this also clears a disconnected Claude Channel's Stop-guard debt.",
       inputSchema: {
         channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
         seq: z.number().int().positive().describe("The message seq being receipted. The server binds the receipt to this message."),
@@ -1640,12 +1670,29 @@ export function createMcpServer(defaultChannel?: string): McpServer {
             "not_in_turn (default): received, but this harness is not in a turn now. queued: in my queue, busy. seen: saw it, no commitment.",
           ),
         note: z.string().max(200).optional().describe("Short note, e.g. 'will pick this up next turn'."),
+        no_reply: z.boolean().optional().describe(
+          "Terminally settle this seq as acknowledged_no_reply. Creates no message or peer delivery and clears local Claude recovery debt.",
+        ),
       },
     },
-    async ({ channel, seq, reason, note }) => {
+    async ({ channel, seq, reason, note, no_reply }) => {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
+        if (no_reply === true) {
+          const result = await ackDelivery(cfg.server, cfg.token, resolved, seq);
+          settleClaudeDeliveryRecovery(cfg.server, cfg.token, resolved, result.delivery.id);
+          return ok({
+            type: "delivery_ack",
+            channel: resolved,
+            seq,
+            delivery_id: result.delivery.id,
+            state: result.delivery.state,
+            terminal_reason: "acknowledged_no_reply",
+            deduped: result.deduped === true,
+            message_created: false,
+          });
+        }
         const result = await postReceipt(cfg.server, cfg.token, resolved, seq, {
           reason: reason ?? "not_in_turn",
           ...(note === undefined || note === "" ? {} : { note }),

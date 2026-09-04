@@ -1,6 +1,8 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, describe, expect, test } from "bun:test";
-import { createChannel, ForbiddenError } from "./api";
+// Query suffix bypasses any process-wide component mock of ./api left by an earlier Bun test file.
+// @ts-expect-error Bun supports query-suffixed module specifiers in tests.
+const { createChannel, ForbiddenError } = await import("./api.ts?test-actual");
 import { forbiddenText } from "./forbidden";
 
 // #919 的另一半：渲染层再怎么分叉，前提也是 rest 层真的把服务端的 error.code / error.message

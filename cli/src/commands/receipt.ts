@@ -9,15 +9,16 @@ import { resolveChannel } from "../config";
 import { formatMsg } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
-import { handleRestError, postReceipt } from "../rest";
+import { ackDelivery, handleRestError, postReceipt } from "../rest";
+import { settleClaudeDeliveryRecovery } from "../delivery-recovery-journal";
 import { isSlug } from "../validation";
 
 type ReceiptReason = "not_in_turn" | "queued" | "seen";
 
 const REASONS: ReceiptReason[] = ["not_in_turn", "queued", "seen"];
-const FLAGS = ["channel", "reason", "message", "json"];
+const FLAGS = ["channel", "reason", "message", "json", "no-reply"];
 const HELP = `usage:
-  party receipt <seq> [--reason not_in_turn|queued|seen] [-m note] [--channel C] [--json]
+  party receipt <seq> [--reason not_in_turn|queued|seen] [--no-reply] [-m note] [--channel C] [--json]
 
 Mark a message as received without replying to it. The receipt is metadata on
 that message — it takes no seq, stays out of the message flow, triggers no
@@ -25,6 +26,10 @@ delivery, and needs no ack. Re-receipting the same message updates in place.
 
 It reports reception only; it never means "done". A finished result is a
 party send, sent once — and never followed by a second message restating it.
+Add --no-reply only when the accepted server execution is complete and no
+channel response is warranted. That atomically settles the delivery as
+acknowledged_no_reply, creates no message, and clears a disconnected Claude
+Channel's Stop-guard debt.
 
 Reasons:
   not_in_turn   (default) received it, but this harness is not in a turn now
@@ -33,6 +38,7 @@ Reasons:
 
 Options:
   --channel C   receipt in channel C instead of the bound channel
+  --no-reply    terminally settle this seq without posting or waking a peer
   -m, --message short note (e.g. "will pick this up next turn")
   --json        emit the receipted message frame`;
 
@@ -45,7 +51,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["json"], aliases: { m: "message" } });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["json", "no-reply"], aliases: { m: "message" } });
   const unknown = unknownFlagError(flags, FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -87,6 +93,27 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   try {
+    if (flags["no-reply"] === true) {
+      const result = await ackDelivery(auth.server, auth.token, channel, seq);
+      settleClaudeDeliveryRecovery(auth.server, auth.token, channel, result.delivery.id);
+      if (flags.json === true) {
+        console.log(JSON.stringify({
+          type: "delivery_ack",
+          channel,
+          seq,
+          delivery_id: result.delivery.id,
+          state: result.delivery.state,
+          terminal_reason: "acknowledged_no_reply",
+          deduped: result.deduped === true,
+        }));
+      } else {
+        console.log(
+          `receipt (acknowledged_no_reply) on #${seq}; no channel message was created` +
+            (result.deduped === true ? " (already settled)" : ""),
+        );
+      }
+      return 0;
+    }
     const result = await postReceipt(auth.server, auth.token, channel, seq, {
       reason,
       ...(note === undefined || note === "" ? {} : { note }),

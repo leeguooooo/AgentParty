@@ -5989,16 +5989,22 @@ export class ChannelDO extends Server<Env> {
           { status: 503 },
         );
       }
+      const callerMatches = purpose === "claude_cross_session"
+        ? this.liveRuntimeCallerMatchCount(self, tokenHash, topology)
+        : null;
       const callerBinding = purpose === "capability_probe"
         ? "capability_probe"
         : purpose === "topology_advisory"
           ? "unbound_advisory"
-          : this.hasUniqueLiveRuntimeCaller(self, tokenHash, topology)
+          : callerMatches === 1
             ? "live_socket"
             : null;
       if (callerBinding === null) {
         return Response.json(
-          { error: { code: "conflict", message: "runtime topology is not bound to one live caller socket" } },
+          {
+            error: { code: "conflict", message: "runtime topology is not bound to one live caller socket" },
+            matches: callerMatches,
+          },
           { status: 409 },
         );
       }
@@ -12626,11 +12632,11 @@ export class ChannelDO extends Server<Env> {
     return sessions;
   }
 
-  private hasUniqueLiveRuntimeCaller(
+  private liveRuntimeCallerMatchCount(
     self: string,
     tokenHash: string,
     topology: RuntimeTopology,
-  ): boolean {
+  ): number {
     let matches = 0;
     for (const connection of this.getConnections<ConnState>()) {
       const state = connection.state;
@@ -12646,9 +12652,8 @@ export class ChannelDO extends Server<Env> {
         !runtimeTopologiesEqual(state.runtimeTopology, topology)
       ) continue;
       matches += 1;
-      if (matches > 1) return false;
     }
-    return matches === 1;
+    return matches;
   }
 
   private runtimePeerDiscovery(

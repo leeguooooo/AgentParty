@@ -43,7 +43,7 @@ describe("wakeProxyNote", () => {
     expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
     expect(note).toContain(`#${"a".repeat(64)}`);
     expect(note).toContain(`seq ${Number.MAX_SAFE_INTEGER}`);
-    expect(note).toContain(`Reply: party send "<your reply>" --channel ${"a".repeat(64)} --reply-to ${Number.MAX_SAFE_INTEGER}`);
+    expect(note).toContain(`Reply: party reply ${Number.MAX_SAFE_INTEGER} "<your reply>" --channel ${"a".repeat(64)}`);
     expect(note).toContain(`Thread: party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
   });
 
@@ -154,7 +154,7 @@ describe("attemptWakeProxy", () => {
     });
     expect(result.forwarded).toBe(true);
     expect(sent).toContain("seq 42");
-    expect(sent).toContain("--reply-to 42");
+    expect(sent).toContain('party reply 42 "<your reply>"');
     expect(Buffer.byteLength(sent, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
   });
 
@@ -323,7 +323,7 @@ describe("wakeProxyNote 内容与语言（#1003 / #1052 wake protocol v2）", ()
         "\n" +
         `${ZH_BODY}\n` +
         "\n" +
-        '回复：party send "<你的回复>" --channel pwtk --reply-to 42\n' +
+        '回复：party reply 42 "<你的回复>" --channel pwtk\n' +
         "线程：party history pwtk --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
@@ -343,7 +343,7 @@ describe("wakeProxyNote 内容与语言（#1003 / #1052 wake protocol v2）", ()
       now: NOW,
     });
     expect(note.split("\n")[0]).toBe("[AgentParty wake] leo mentioned you in #pwtk (seq 42, reply to seq 40)");
-    expect(note).toContain('Reply: AGENTPARTY_CONFIG=/tmp/agents/me.json party send "<your reply>" --channel pwtk --reply-to 42');
+    expect(note).toContain('Reply: AGENTPARTY_CONFIG=/tmp/agents/me.json party reply 42 "<your reply>" --channel pwtk');
   });
 
   test("老签名（只有 channel/seq/fromId）⇒ 英文短版：无正文块，Reply / Thread / from-id 都在", () => {
@@ -351,7 +351,7 @@ describe("wakeProxyNote 内容与语言（#1003 / #1052 wake protocol v2）", ()
     expect(note).toBe(
       "[AgentParty wake] you were mentioned in #pwtk (seq 42)\n" +
         "\n" +
-        'Reply: party send "<your reply>" --channel pwtk --reply-to 42\n' +
+        'Reply: party reply 42 "<your reply>" --channel pwtk\n' +
         "Thread: party history pwtk --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );

@@ -291,6 +291,7 @@ describe("same-name websocket session isolation (#363)", () => {
     expect(replayed.status).toBe(409);
     expect(await replayed.json()).toEqual({
       error: { code: "conflict", message: "runtime topology is not bound to one live caller socket" },
+      matches: 0,
     });
 
     const otherToken = await seedToken("agent");
@@ -358,7 +359,12 @@ describe("same-name websocket session isolation (#363)", () => {
     duplicateCaller.send({ type: "hello", since: 0, runtime_topology: callerTopology });
     duplicateCaller.send({ type: "ping", barrier: "runtime_topology_hello" });
     await duplicateCaller.nextOfType("pong");
-    expect((await call(callerTopology, "claude_cross_session")).status).toBe(409);
+    const duplicateCallerResponse = await call(callerTopology, "claude_cross_session");
+    expect(duplicateCallerResponse.status).toBe(409);
+    expect(await duplicateCallerResponse.json()).toEqual({
+      error: { code: "conflict", message: "runtime topology is not bound to one live caller socket" },
+      matches: 2,
+    });
 
     callerWs.close();
     duplicateCaller.close();

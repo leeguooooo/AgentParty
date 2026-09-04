@@ -26,10 +26,12 @@ commands:
   recover   <channel> [--harness H] [--yes]          recover/reconnect an identity this dir already joined: find the binding, verify the token, align versions, re-arm the session, verify (#991)
   up        [channel-url|slug] [--runner claude|codex|codex-sdk]   one idempotent command: token → bind → resident serve (self-heal, #837)
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq] [--notify-when-idle]
+  dm        <name> <text|-> [--channel C]             choose one common channel, then send + wake
+  reply     <seq> <text|-> [--channel C]              short form of send --reply-to
   notify-when-idle <agent> [--channel C]                 one-shot: get an idle notice when <agent> finishes (no message sent, #1052)
   complete  <text|-> --kickoff-seq seq [--channel C] [--replies n] [--timeout] [--issue n]... [--pr n]...
   review    approve|reject <seq> [-m reason] [--channel C] [--json]
-  receipt   <seq> [--reason not_in_turn|queued|seen] [-m note]   mark received without replying (#828)
+  receipt   <seq> [--reason not_in_turn|queued|seen] [--no-reply]   receive or terminally settle without a message
   decision  ask|respond|mode (human approval) | list|record (authoritative channel ledger)
   edit      <seq> <text|-> [--channel C] [--json]
   retract   <seq> [--channel C] [--json]
@@ -157,6 +159,10 @@ async function dispatch(argv: string[]): Promise<number> {
       return (await import("./commands/up")).run(rest);
     case "send":
       return (await import("./commands/send")).run(rest);
+    case "dm":
+      return (await import("./commands/dm")).run(rest);
+    case "reply":
+      return (await import("./commands/reply")).run(rest);
     case "notify-when-idle":
       return (await import("./commands/notify-when-idle")).run(rest);
     case "complete":

@@ -116,7 +116,7 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
         "\n" +
         `${ZH_BODY}\n` +
         "\n" +
-        '回复：party send "<你的回复>" --channel pwtk --reply-to 42\n' +
+        '回复：party reply 42 "<你的回复>" --channel pwtk\n' +
         "线程：party history pwtk --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
@@ -141,7 +141,7 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
         "\n" +
         "is our injected note a bit too thin? the language should follow the agent\n" +
         "\n" +
-        'Reply: party send "<your reply>" --channel pwtk --reply-to 42\n' +
+        'Reply: party reply 42 "<your reply>" --channel pwtk\n' +
         "Thread: party history pwtk --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
@@ -158,13 +158,16 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
       now: NOW,
     });
     expect(note).toContain(
-      'Reply: AGENTPARTY_CONFIG=/Users/me/.agentparty/agents/super-admin.json party send "<your reply>" --channel pwtk --reply-to 42',
+      'Reply: AGENTPARTY_CONFIG=/Users/me/.agentparty/agents/super-admin.json party reply 42 "<your reply>" --channel pwtk',
     );
     // 路径里有空格 ⇒ 单引号包裹，仍是一条合法 shell 命令。
     expect(wakeReplyCommand("en", "pwtk", 42, "/tmp/my dir/a.json")).toBe(
-      "AGENTPARTY_CONFIG='/tmp/my dir/a.json' party send \"<your reply>\" --channel pwtk --reply-to 42",
+      "AGENTPARTY_CONFIG='/tmp/my dir/a.json' party reply 42 \"<your reply>\" --channel pwtk",
     );
-    expect(wakeReplyCommand("zh", "pwtk", 42, null)).toBe('party send "<你的回复>" --channel pwtk --reply-to 42');
+    expect(wakeReplyCommand("zh", "pwtk", 42, null)).toBe('party reply 42 "<你的回复>" --channel pwtk');
+    expect(wakeReplyCommand("en", "pwtk", 42, "/tmp/same.json", "/tmp/same.json")).toBe(
+      'party reply 42 "<your reply>" --channel pwtk',
+    );
   });
 
   test("300B 正文逐字内联：换行、缩进、引号、反引号一个字都不动，也不加引号", () => {
@@ -176,7 +179,7 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
     expect(lines[0]).toBe("[AgentParty wake] leo mentioned you in #dev (seq 7)");
     expect(lines[1]).toBe("");
     expect(note).toContain(`\n\n${body}\n\n`);
-    expect(lines.at(-3)).toBe('Reply: party send "<your reply>" --channel dev --reply-to 7');
+    expect(lines.at(-3)).toBe('Reply: party reply 7 "<your reply>" --channel dev');
     expect(lines.at(-2)).toBe("Thread: party history dev --seq 7");
     expect(lines.at(-1)).toBe("from-id: id");
   });
@@ -236,7 +239,7 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
       expect(bytesOf(note)).toBeLessThanOrEqual(WAKE_NOTE_MAX_BYTES);
       expect(note).toContain("siblings=99");
       expect(note).toContain(`#${"a".repeat(64)}`);
-      expect(note).toContain(`--reply-to ${Number.MAX_SAFE_INTEGER}`);
+      expect(note).toContain(`party reply ${Number.MAX_SAFE_INTEGER}`);
       expect(note).toContain(`party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
       expect(wakeNoteFromId(note)).toBe("b".repeat(64));
       // 骨架 = 整条 − 正文。
@@ -275,7 +278,7 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
     expect(anon).toContain("有人在 #");
     expect(anon).not.toContain("x".repeat(40));
     for (const note of [full, bare, noAgo, anon]) {
-      expect(note).toContain(`回复：AGENTPARTY_CONFIG=/tmp/agents/x.json party send "<你的回复>" --channel ${"a".repeat(64)} --reply-to ${Number.MAX_SAFE_INTEGER}`);
+      expect(note).toContain(`回复：AGENTPARTY_CONFIG=/tmp/agents/x.json party reply ${Number.MAX_SAFE_INTEGER} "<你的回复>" --channel ${"a".repeat(64)}`);
       expect(note).toContain(`线程：party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
       expect(wakeNoteFromId(note)).toBe("b".repeat(64));
     }
@@ -285,12 +288,12 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
     for (; limit > 0 && noPrefix === null; limit -= 1) {
       const note = buildWakeNote({ ...base, skeletonMaxBytes: limit });
       expect(note).toContain(`线程：party history ${"a".repeat(64)} --seq ${Number.MAX_SAFE_INTEGER}`);
-      expect(note).toMatch(/回复：(AGENTPARTY_CONFIG=\S+ )?party send "<你的回复>" --channel a+ --reply-to \d+/);
+      expect(note).toMatch(/回复：(AGENTPARTY_CONFIG=\S+ )?party reply \d+ "<你的回复>" --channel a+/);
       expect(wakeNoteFromId(note)).toBe("b".repeat(64));
       if (!note.includes("AGENTPARTY_CONFIG=")) noPrefix = note;
     }
     expect(noPrefix).not.toBeNull();
-    expect(noPrefix).toContain(`回复：party send "<你的回复>" --channel ${"a".repeat(64)} --reply-to ${Number.MAX_SAFE_INTEGER}`);
+    expect(noPrefix).toContain(`回复：party reply ${Number.MAX_SAFE_INTEGER} "<你的回复>" --channel ${"a".repeat(64)}`);
     // 连 Reply + Thread + from-id 都装不下 ⇒ 程序错误，抛而不是静默截坏。
     expect(() => buildWakeNote({ ...base, maxBytes: 120 })).toThrow(/exceeds 120 bytes/);
   });
@@ -300,7 +303,7 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
     expect(en).toBe(
       "[AgentParty wake] you were mentioned in #pwtk (seq 42)\n" +
         "\n" +
-        'Reply: party send "<your reply>" --channel pwtk --reply-to 42\n' +
+        'Reply: party reply 42 "<your reply>" --channel pwtk\n' +
         "Thread: party history pwtk --seq 42",
     );
     expect(wakeNoteFromId(en)).toBe(null);
@@ -308,7 +311,7 @@ describe("buildWakeNote：wake protocol v2 骨架与 5120B 预算（#1052）", (
     expect(zh).toBe(
       "[AgentParty 唤醒] 有人在 #pwtk 提到了你（seq 42）\n" +
         "\n" +
-        '回复：party send "<你的回复>" --channel pwtk --reply-to 42\n' +
+        '回复：party reply 42 "<你的回复>" --channel pwtk\n' +
         "线程：party history pwtk --seq 42",
     );
   });

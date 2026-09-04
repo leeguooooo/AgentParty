@@ -4,8 +4,11 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { Attachment } from "@agentparty/shared";
 
 const signedUrl = "https://files.example.test/image.png?signature=test";
+// @ts-expect-error Bun supports query-suffixed imports that bypass process-wide module mocks.
+const actualApi = await import("../lib/api.ts?test-actual");
 
 mock.module("../lib/api", () => ({
+  ...actualApi,
   fetchAttachmentBlob: mock(async () => new Blob()),
   fetchAttachmentSignedUrl: mock(async () => signedUrl),
   getToken: () => "test-token",

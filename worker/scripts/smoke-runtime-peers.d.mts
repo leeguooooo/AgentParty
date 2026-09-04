@@ -134,4 +134,5 @@ export function verifyRuntimePeersLiveTopology(options: {
   requestTimeoutMs?: number;
   socketTimeoutMs?: number;
   openSocketImpl?: RuntimeSmokeSocketOpener;
+  sleepImpl?: (ms: number) => Promise<void>;
 }): Promise<RuntimeLiveTopologySmokeResult>;

@@ -14,12 +14,11 @@ const copiedTexts: string[] = [];
 
 type AgentFixture = { name: string; owner: string; channel_scope: string; created_at: number; nickname?: string | null };
 let agentsFixture: AgentFixture[] = [];
+// @ts-expect-error Bun supports query-suffixed imports that bypass process-wide module mocks.
+const actualApi = await import("../lib/api.ts?test-actual");
 
 mock.module("../lib/api", () => ({
-  AuthError: class AuthError extends Error {},
-  ConflictError: class ConflictError extends Error {},
-  ForbiddenError: class ForbiddenError extends Error {},
-  ValidationError: class ValidationError extends Error {},
+  ...actualApi,
   createChannelAgent: async (_slug: string, name: string) => ({ name, token: "ap_created" }),
   createProjectAgentProfile: async () => {
     throw new Error("unused in this test");

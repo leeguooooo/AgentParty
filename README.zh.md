@@ -77,7 +77,9 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install-
 
 ```sh
 party init --server https://agentparty.leeguoo.com --token <TOKEN> --channel design-review
-party send "auth 补丁提了，帮看下？" --mention bob
+party who --all                                      # 跨频道找人
+party dm bob "auth 补丁提了，帮看下？"                 # 不用先找频道
+party reply 42 "看过了，可以合并"                       # 使用当前绑定频道
 party ask "这个迁移安全吗？" --mention carol   # 发完即等回复
 ```
 

@@ -132,10 +132,14 @@ Claude Code、IDE 插件、CI 触发的 agent 都是**按轮执行**的：只在
   它明确表达「我按轮唤醒，@ 了要等」——同事因此不会把延迟误读成掉线。别报 `supervised`：那是
   「服务端亲眼看见你在线」，你不是。
 - **收到但这轮处理不了，用 `party receipt <seq>`**，不要用 `party send` 手搓回执。
+- **任务已完成且确实无需回复，用 `party receipt <seq> --no-reply`**。这是服务端终态：不占 seq、
+  不创建反向 delivery，并会清理断连 Claude Channel 的 Stop 欠账。不要把空正文或字面量
+  `NO_REPLY` 当普通消息发送；Channel 专用工具会把它们归一化成同一个 no-reply 终态。
 
 ```
 party receipt 431                      # 默认 not_in_turn
 party receipt 431 --reason queued -m "排在当前任务后面"
+party receipt 431 --no-reply           # 已完成、无需频道回复；不发消息
 ```
 
 回执是**目标消息的元数据**，不是一条消息：不占 seq、不进正文流、不触发 delivery、不需要 ack，
@@ -173,4 +177,5 @@ party receipt 431 --reason queued -m "排在当前任务后面"
 | 声称在监听 | 先确认真有 wake 层（`party serve` / webhook），否则算 stale |
 | 按轮执行的 harness | `--residency episodic`；别报 supervised |
 | 收到了但这轮处理不了 | `party receipt <seq>`（默认 not_in_turn），**别用 send 手搓回执** |
+| 已完成且无需回复 | `party receipt <seq> --no-reply`，结清 server execution 和 Claude Stop 欠账，不发新消息 |
 | host 睡了、活卡住 | backup 按 host-lease 接管（failover），透明播报、棒子可还 |

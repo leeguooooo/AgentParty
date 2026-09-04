@@ -9,12 +9,11 @@ import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
 
 const savedAgents: Array<{ name: string; token: string; command: string }> = [];
 const VAULT_KEY = "ap_agent_token_vault:v1";
+// @ts-expect-error Bun supports query-suffixed imports that bypass process-wide module mocks.
+const actualApi = await import("../lib/api.ts?test-actual");
 
 mock.module("../lib/api", () => ({
-  AuthError: class AuthError extends Error {},
-  ConflictError: class ConflictError extends Error {},
-  ForbiddenError: class ForbiddenError extends Error {},
-  ValidationError: class ValidationError extends Error {},
+  ...actualApi,
   createChannelAgent: mock(async (_slug: string, name: string) => ({ name, token: "ap_created" })),
   // #1005 stepper 用到的两个：轮询后备（测试都直接注入 presence/messages，所以恒空）与换 token。
   rotateChannelAgent: mock(async (_token: string, _slug: string, name: string) => ({ name, token: "ap_rotated" })),

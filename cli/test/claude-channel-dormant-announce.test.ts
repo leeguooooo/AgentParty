@@ -540,7 +540,7 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     // 技术 ID 挪到正文 from-id 行，仍可读回。
     expect(wakeProxyNoteFromId(calls[0]!.body)).toBe("leo");
     expect(calls[0]!.body).toContain("seq 13");
-    expect(calls[0]!.body).toContain('Reply: party send "<your reply>" --channel dev --reply-to 13');
+    expect(calls[0]!.body).toContain('Reply: party reply 13 "<your reply>" --channel dev');
     expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
     // 注入路径不改变 P2 不变式：只本地 ack，绝不发客户端帧、绝不推进持久化游标。
     expect(connections[0]!.acked).toEqual([11, 12, 13]);
@@ -1004,7 +1004,7 @@ describe("注入正文的内容与语言（#1003）", () => {
         "\n" +
         `${ZH_BODY}\n` +
         "\n" +
-        '回复：party send "<你的回复>" --channel dev --reply-to 42\n' +
+        '回复：party reply 42 "<你的回复>" --channel dev\n' +
         "线程：party history dev --seq 42\n" +
         "from-id: lark-ad72b3f9749e",
     );
@@ -1026,7 +1026,7 @@ describe("注入正文的内容与语言（#1003）", () => {
         "\n" +
         "please review the failing job\n" +
         "\n" +
-        'Reply: party send "<your reply>" --channel dev --reply-to 44\n' +
+        'Reply: party reply 44 "<your reply>" --channel dev\n' +
         "Thread: party history dev --seq 44\n" +
         "from-id: lark-ad72b3f9749e",
     );
@@ -1039,7 +1039,7 @@ describe("注入正文的内容与语言（#1003）", () => {
     });
     await runOne(deps, connections, [frameWith(50, "ping", NOW - 60_000)]);
     expect(calls[0]!.body).toContain(
-      'Reply: AGENTPARTY_CONFIG=/Users/me/.agentparty/agents/super-admin.json party send "<your reply>" --channel dev --reply-to 50',
+      'Reply: AGENTPARTY_CONFIG=/Users/me/.agentparty/agents/super-admin.json party reply 50 "<your reply>" --channel dev',
     );
     // workspace / global 来源 ⇒ 不加前缀（裸 party send 在同一 cwd 下就能解析到同一身份）。
     const plain = setup({
@@ -1047,7 +1047,7 @@ describe("注入正文的内容与语言（#1003）", () => {
       resolveAuth: async () => ({ server: SERVER, token: "tok", config: { kind: "workspace", path: "/x/config.json" } }),
     });
     await runOne(plain.deps, plain.connections, [frameWith(51, "ping", NOW - 60_000)]);
-    expect(plain.calls[0]!.body).toContain('Reply: party send "<your reply>" --channel dev --reply-to 51');
+    expect(plain.calls[0]!.body).toContain('Reply: party reply 51 "<your reply>" --channel dev');
     expect(plain.calls[0]!.body).not.toContain("AGENTPARTY_CONFIG=");
   });
 
@@ -1073,7 +1073,7 @@ describe("注入正文的内容与语言（#1003）", () => {
     expect(lines[2]).toBe("跨".repeat(170));
     expect(Buffer.byteLength(lines[2]!, "utf8")).toBe(510);
     expect(lines[3]).toBe("… (6000 bytes total; full text: party history dev --seq 47)");
-    expect(lines.at(-3)).toBe('回复：party send "<你的回复>" --channel dev --reply-to 47');
+    expect(lines.at(-3)).toBe('回复：party reply 47 "<你的回复>" --channel dev');
     expect(lines.at(-2)).toBe("线程：party history dev --seq 47");
     expect(lines.at(-1)).toBe("from-id: lark-ad72b3f9749e");
     expect(wakeProxyNoteFromId(note)).toBe("lark-ad72b3f9749e");
@@ -1121,7 +1121,7 @@ describe("注入正文的内容与语言（#1003）", () => {
           "\n" +
           `${body}\n` +
           "\n" +
-          'Reply: party send "<your reply>" --channel dev --reply-to 60\n' +
+          'Reply: party reply 60 "<your reply>" --channel dev\n' +
           "Thread: party history dev --seq 60\n" +
           "from-id: lark-ad72b3f9749e",
       );

@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, mock, test } from "bun:test";
 const signedCalls: Array<{ token: string; url: string }> = [];
 const blobCalls: Array<{ token: string | null; url: string }> = [];
 let signedFailure = false;
+// @ts-expect-error Bun supports query-suffixed imports that bypass process-wide module mocks.
+const actualApi = await import("../lib/api.ts?test-actual");
 
 mock.module("../lib/api", () => ({
+  ...actualApi,
   getToken: () => null,
   fetchAttachmentSignedUrl: async (token: string, url: string) => {
     signedCalls.push({ token, url });
