@@ -178,3 +178,26 @@ describe("全局 who 的终端渲染（#1074）", () => {
     expect(line).toContain("aka sess-1, sess-2 +1");
   });
 });
+
+// #1074 的入口可达性：绑定频道的目录里 `party who` 仍是频道视图（向后兼容），
+// 全局视图靠 --all 显式进入；绑定频道已不存在（404）时自动退回全局并说明原因。
+// 这两条在 who.ts 的命令层，属于源码守卫：只断言分支存在，不起真网络。
+import { readFileSync } from "node:fs";
+const whoSource = readFileSync(new URL("../src/commands/who.ts", import.meta.url), "utf8");
+
+describe("全局 who 的入口（#1074 补）", () => {
+  test("--all 是显式入口，且与频道参数互斥", () => {
+    expect(whoSource).toContain('"all"');
+    expect(whoSource).toContain("flags.all === true ? null : resolveChannel");
+    expect(whoSource).toContain("--all lists everyone across your channels; drop the channel argument");
+  });
+
+  test("绑定频道 404 时退回全局视图，而不是死在「找不到频道」", () => {
+    expect(whoSource).toContain("err instanceof RestError && err.status === 404");
+    expect(whoSource).toContain("showing everyone across your channels instead");
+  });
+
+  test("帮助文本里写明 --all", () => {
+    expect(whoSource).toContain("[--all]");
+  });
+});
