@@ -1,0 +1,355 @@
+// 老用户的自动迁移：一频道一注册 → 一条 `party mcp --all-channels`（#1083）。
+//
+// 旧模型下 `party join` 每加入一个频道就往 harness 的全局 config 里塞一条注册（各绑一个
+// --channel 与一份 AGENTPARTY_CONFIG），进程数 = 频道数 × 会话数，而且只进不出。新模型是一条
+// 注册服务所有频道、身份按调用的频道解析。老用户机器上躺着的那些旧注册不会自己消失——
+// 得有东西替他们收掉，而且不能靠他们记得去跑一条命令。
+//
+// 三步，顺序不能反：
+//   1. 把每条旧注册**正在用的那份身份**记为该频道的本机默认（recordChannelDefault）。
+//      这一步保住老用户原来的身份：迁移后 `--all-channels` 在这些频道上零歧义，行为一字不变。
+//   2. 用 harness 自己的 `codex mcp remove` / `claude mcp remove` 删旧注册（绝不手改 TOML/JSON）。
+//   3. 每个涉及的 harness 加一条 `party mcp --all-channels`（已有就不重复加）。
+//
+// 失败关闭：第 1 步记不下来就不删那条；第 3 步加不上就把删掉的也报出来并给出手工命令——
+// 绝不能让用户处在「旧的删了、新的没加上」的空档，那等于所有 agent 一起静默失联。
+//
+// 触发：任何交互式 `party` 命令启动时（不含 mcp/hook/serve 这些进程内路径）检查一次，
+// 一次性标记；也提供 `party mcp migrate [--dry-run|--yes]` 让人先看再动。
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { agentpartyHome } from "../config";
+import { codexMcpRemove, codexRegistryScopes, readCodexMcpRegistrations } from "../codex-mcp-registry";
+import { recordChannelDefault } from "../mcp-channel-identity";
+import {
+  isPartyMcpRegistration,
+  parseClaudeMcpRegistrations,
+  registrationChannel,
+  registrationHarness,
+  type McpRegistration,
+  type RegistrationHarness,
+} from "../mcp-registry";
+
+export interface LegacyRegistration {
+  reg: McpRegistration;
+  harness: RegistrationHarness;
+  channel: string;
+  configPath: string;
+  server: string;
+}
+
+export interface MigratePlan {
+  /** 要迁走的旧式注册：有 --channel、有 AGENTPARTY_CONFIG、config 读得出 server。 */
+  legacy: LegacyRegistration[];
+  /** party 的注册但不动它：说明为什么。 */
+  skipped: { reg: McpRegistration; reason: string }[];
+  /** 已经有 --all-channels 注册的 harness。 */
+  alreadySingle: Set<RegistrationHarness>;
+}
+
+export interface MigrateDeps {
+  home: string;
+  registrations: () => McpRegistration[];
+  readServer: (configPath: string) => string | null;
+  recordDefault: (server: string, channel: string, configPath: string) => void;
+  remove: (reg: McpRegistration) => { ok: boolean; detail: string };
+  addSingle: (harness: RegistrationHarness, sample: McpRegistration) => { ok: boolean; detail: string };
+  now: () => number;
+}
+
+export function isSingleRegistration(reg: McpRegistration): boolean {
+  return isPartyMcpRegistration(reg) && reg.args.includes("--all-channels");
+}
+
+function readServerFromConfig(configPath: string): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as { server?: unknown; token?: unknown };
+    if (typeof raw.token !== "string" || raw.token === "") return null;
+    return typeof raw.server === "string" && raw.server !== "" ? raw.server : null;
+  } catch {
+    return null;
+  }
+}
+
+function readJson(path: string): unknown | undefined {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 真机依赖：两边注册表都读，删/加都走 harness 自己的 CLI。 */
+export function defaultMigrateDeps(home: string = homedir()): MigrateDeps {
+  return {
+    home,
+    registrations: () => [
+      ...parseClaudeMcpRegistrations(readJson(join(home, ".claude.json")) ?? null),
+      ...readCodexMcpRegistrations(codexRegistryScopes(process.env, process.cwd(), home)),
+    ],
+    readServer: readServerFromConfig,
+    recordDefault: (server, channel, configPath) => recordChannelDefault(server, channel, configPath),
+    remove: (reg) => {
+      if (registrationHarness(reg) === "codex") return codexMcpRemove(reg);
+      const res = spawnSync("claude", ["mcp", "remove", reg.name], { encoding: "utf8" });
+      if (res.error) return { ok: false, detail: res.error.message };
+      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };
+      return { ok: true, detail: (res.stdout ?? "").trim() };
+    },
+    addSingle: (harness, sample) => {
+      const bin = harness === "codex" ? "codex" : "claude";
+      const env = harness === "codex" && sample.codexHome ? { ...process.env, CODEX_HOME: sample.codexHome } : process.env;
+      const res = spawnSync(bin, ["mcp", "add", SINGLE_NAME, "--", "party", "mcp", "--all-channels"], { encoding: "utf8", env });
+      if (res.error) return { ok: false, detail: res.error.message };
+      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };
+      return { ok: true, detail: (res.stdout ?? "").trim() };
+    },
+    now: () => Date.now(),
+  };
+}
+
+/** 单条注册的名字。固定名字是刻意的：老用户 N 条各有各的名字，新的只该有一条。 */
+export const SINGLE_NAME = "party";
+
+export function planMcpMigrate(deps: MigrateDeps): MigratePlan {
+  const legacy: LegacyRegistration[] = [];
+  const skipped: MigratePlan["skipped"] = [];
+  const alreadySingle = new Set<RegistrationHarness>();
+  for (const reg of deps.registrations()) {
+    if (!isPartyMcpRegistration(reg)) continue;
+    const harness = registrationHarness(reg);
+    if (isSingleRegistration(reg)) {
+      alreadySingle.add(harness);
+      continue;
+    }
+    const channel = registrationChannel(reg);
+    if (channel === null) {
+      // 没绑频道的旧注册（裸 `party mcp`）：它本来就靠 cwd 绑定工作，不是本次要收的形状。
+      skipped.push({ reg, reason: "没有 --channel，不是一频道一注册的形状" });
+      continue;
+    }
+    const configPath = reg.env.AGENTPARTY_CONFIG;
+    if (configPath === undefined || configPath === "") {
+      skipped.push({ reg, reason: "没有 AGENTPARTY_CONFIG，不知道它用的是哪份身份，不动" });
+      continue;
+    }
+    const server = deps.readServer(configPath);
+    if (server === null) {
+      // config 读不出（TMPDIR 被清、token 没了）：这条注册本来就是坏的，交给 `party mcp prune`。
+      skipped.push({ reg, reason: `身份配置读不出：${configPath}（交给 party mcp prune）` });
+      continue;
+    }
+    legacy.push({ reg, harness, channel, configPath, server });
+  }
+  return { legacy, skipped, alreadySingle };
+}
+
+export interface MigrateResult {
+  code: number;
+  moved: LegacyRegistration[];
+  failed: { reg: McpRegistration; step: "default" | "remove"; detail: string }[];
+  added: RegistrationHarness[];
+  addFailed: { harness: RegistrationHarness; detail: string }[];
+}
+
+/**
+ * 执行迁移。返回码非 0 只有一种情况：**有 harness 的新注册没加上**——那时用户可能处在
+ * 「旧的删了、新的没加上」的空档，必须显眼。单条旧注册删失败不算（它只是多留一个进程）。
+ */
+export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: string) => void): MigrateResult {
+  const moved: LegacyRegistration[] = [];
+  const failed: MigrateResult["failed"] = [];
+  const harnesses = new Set<RegistrationHarness>();
+  // 同一 (server, channel) 有多条旧注册且指向**不同**身份时，不能默默挑一个当默认——老模型下这两个
+  // 身份本来就同时在跑（两个 MCP 进程、两套工具前缀），迁移后按调用解析会失败关闭并列出候选，
+  // 这是对的：让人选，而不是替人选。owner 那台机器上 #bug-7744 / #welcome 就是这种情况。
+  const identitiesByChannel = new Map<string, Set<string>>();
+  for (const item of plan.legacy) {
+    const key = JSON.stringify([item.server, item.channel]);
+    identitiesByChannel.set(key, (identitiesByChannel.get(key) ?? new Set()).add(item.configPath));
+  }
+  const warned = new Set<string>();
+  for (const item of plan.legacy) {
+    const key = JSON.stringify([item.server, item.channel]);
+    const contenders = identitiesByChannel.get(key)!;
+    if (contenders.size > 1) {
+      if (!warned.has(key)) {
+        warned.add(key);
+        log(`  ! #${item.channel} 有 ${contenders.size} 份不同身份的旧注册，不设默认；迁移后调用时传 identity，或用 party join 重新绑定其中一个`);
+      }
+    } else {
+      // 1) 先记默认——记不下来就不删，否则迁完这个频道会从「能用」变成「歧义」。
+      try {
+        deps.recordDefault(item.server, item.channel, item.configPath);
+      } catch (e) {
+        failed.push({ reg: item.reg, step: "default", detail: e instanceof Error ? e.message : String(e) });
+        continue;
+      }
+    }
+    // 2) 删旧
+    const removed = deps.remove(item.reg);
+    if (!removed.ok) {
+      failed.push({ reg: item.reg, step: "remove", detail: removed.detail });
+      continue;
+    }
+    moved.push(item);
+    harnesses.add(item.harness);
+    log(
+      contenders.size > 1
+        ? `  ✓ #${item.channel} 的注册 ${item.reg.name} 已收进单条注册（未设默认）`
+        : `  ✓ #${item.channel} 的注册 ${item.reg.name} 已收进单条注册（默认身份：${item.configPath}）`,
+    );
+  }
+  // 3) 每个涉及的 harness 补一条 --all-channels（已有就不加）
+  const added: RegistrationHarness[] = [];
+  const addFailed: MigrateResult["addFailed"] = [];
+  for (const harness of harnesses) {
+    if (plan.alreadySingle.has(harness)) continue;
+    const sample = plan.legacy.find((l) => l.harness === harness)!.reg;
+    const res = deps.addSingle(harness, sample);
+    if (res.ok) {
+      added.push(harness);
+      log(`  ✓ ${harness}：已加一条 \`party mcp --all-channels\``);
+    } else {
+      addFailed.push({ harness, detail: res.detail });
+      log(`  ✗ ${harness}：新注册没加上（${res.detail}）——旧注册已删，请立刻手工加：`);
+      log(`      ${harness} mcp add ${SINGLE_NAME} -- party mcp --all-channels`);
+    }
+  }
+  for (const f of failed) {
+    log(`  ! ${f.reg.name}：${f.step === "default" ? "记默认身份失败，未删" : "删除失败"}（${f.detail}）`);
+  }
+  return { code: addFailed.length > 0 ? 1 : 0, moved, failed, added, addFailed };
+}
+
+// ── 自动触发 ──────────────────────────────────────────────────────────────────
+
+export function migrateMarkerPath(home: string = agentpartyHome()): string {
+  return join(home, "state", "mcp-migrate-v1.json");
+}
+
+interface Marker {
+  status: "done" | "nothing" | "failed";
+  at: number;
+  moved?: number;
+}
+
+function readMarker(path: string): Marker | null {
+  const raw = readJson(path);
+  if (raw === null || typeof raw !== "object") return null;
+  const m = raw as Partial<Marker>;
+  if (m.status !== "done" && m.status !== "nothing" && m.status !== "failed") return null;
+  return { status: m.status, at: typeof m.at === "number" ? m.at : 0, moved: typeof m.moved === "number" ? m.moved : undefined };
+}
+
+function writeMarker(path: string, marker: Marker): void {
+  mkdirSync(join(path, ".."), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(marker, null, 2)}\n`);
+  renameSync(tmp, path);
+}
+
+/** 失败后多久再自动试一次。天天弹是骚扰，永不重试是把老用户扔在旧模型里。 */
+const RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** 这些入口不做自动迁移：它们是 harness 拉起的进程内路径 / 常驻守护，不该在那里改 harness 的配置。 */
+const NO_AUTO_MIGRATE = new Set(["mcp", "hook", "serve", "daemon", "watch", "bridge", "claude", "codex", "capture", "notify-when-idle", "statusline"]);
+
+/**
+ * 交互式命令启动时调一次。有旧式注册就迁，没有就写「无事」标记，之后再也不看。
+ * 迁移输出走 errlog（stderr）：不能污染命令自己的 stdout（很多命令支持 --json）。
+ */
+export function maybeAutoMigrate(
+  cmd: string,
+  opts: { deps?: MigrateDeps; agentpartyHome?: string; errlog?: (line: string) => void } = {},
+): { ran: boolean; result?: MigrateResult } {
+  if (NO_AUTO_MIGRATE.has(cmd)) return { ran: false };
+  const home = opts.agentpartyHome ?? agentpartyHome();
+  const markerPath = migrateMarkerPath(home);
+  const deps = opts.deps ?? defaultMigrateDeps();
+  const errlog = opts.errlog ?? ((line: string) => console.error(line));
+  const marker = readMarker(markerPath);
+  const now = deps.now();
+  if (marker !== null && marker.status !== "failed") return { ran: false };
+  if (marker !== null && marker.status === "failed" && now - marker.at < RETRY_AFTER_MS) return { ran: false };
+
+  let plan: MigratePlan;
+  try {
+    plan = planMcpMigrate(deps);
+  } catch {
+    // 读注册表都炸了（harness 没装 / 文件坏）：不打扰，下次再看。
+    return { ran: false };
+  }
+  if (plan.legacy.length === 0) {
+    writeMarker(markerPath, { status: "nothing", at: now });
+    return { ran: false };
+  }
+  errlog(
+    `party：发现 ${plan.legacy.length} 条旧式「一频道一注册」的 MCP 注册，正在合并成一条 \`party mcp --all-channels\`` +
+      `（每个会话从 ${plan.legacy.length} 个 party 进程降到 1 个；原来各频道用的身份会记为默认，行为不变）：`,
+  );
+  const result = runMcpMigrate(plan, deps, errlog);
+  if (result.code === 0) {
+    writeMarker(markerPath, { status: "done", at: now, moved: result.moved.length });
+    errlog(`party：迁移完成。正在跑的会话不受影响，下次新开的会话生效。想看细节：party mcp migrate --dry-run`);
+  } else {
+    writeMarker(markerPath, { status: "failed", at: now, moved: result.moved.length });
+  }
+  return { ran: true, result };
+}
+
+// ── CLI ──────────────────────────────────────────────────────────────────────
+
+const HELP = `usage: party mcp migrate [--dry-run] [--yes]
+
+把旧式「一频道一注册」的 MCP 注册合并成一条 \`party mcp --all-channels\`（#1083）。
+交互式 party 命令启动时会自动做一次；这里是手动入口。
+
+  --dry-run   只列计划，不改任何东西（缺省）
+  --yes       执行
+
+做什么：
+  1. 每条旧注册正在用的身份 → 记为该频道的本机默认（迁移后行为不变）
+  2. 用 codex/claude 自己的 \`mcp remove\` 删旧注册（不手改配置文件）
+  3. 每个涉及的 harness 加一条 \`party mcp --all-channels\``;
+
+export async function runMigrateCli(argv: string[], deps: MigrateDeps = defaultMigrateDeps()): Promise<number> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(HELP);
+    return 0;
+  }
+  const yes = argv.includes("--yes");
+  const plan = planMcpMigrate(deps);
+  if (plan.legacy.length === 0) {
+    console.log("没有旧式「一频道一注册」的 party 注册，无需迁移。");
+    for (const s of plan.skipped) console.log(`  · 跳过 ${s.reg.name}：${s.reason}`);
+    return 0;
+  }
+  console.log(`${yes ? "迁移" : "计划迁移"} ${plan.legacy.length} 条旧注册：`);
+  for (const l of plan.legacy) console.log(`  · ${l.harness}  ${l.reg.name}  #${l.channel}  ← ${l.configPath}`);
+  for (const s of plan.skipped) console.log(`  · 跳过 ${s.reg.name}：${s.reason}`);
+  if (!yes) {
+    console.log("（未改任何东西。执行：party mcp migrate --yes）");
+    return 0;
+  }
+  const result = runMcpMigrate(plan, deps, (line) => console.log(line));
+  if (result.code === 0) {
+    writeMarker(migrateMarkerPath(), { status: "done", at: deps.now(), moved: result.moved.length });
+    console.log("迁移完成。正在跑的会话不受影响，下次新开的会话生效。");
+  }
+  return result.code;
+}
+
+/** 供 doctor 用：标记文件存在且非 failed ⇒ 已处理过。 */
+export function migrationDone(home: string = agentpartyHome()): boolean {
+  const m = readMarker(migrateMarkerPath(home));
+  return m !== null && m.status !== "failed";
+}
+
+// 仅供测试：让用例能构造一个「已迁移」的家目录。
+export function writeMigrateMarkerForTest(home: string, marker: { status: "done" | "nothing" | "failed"; at: number }): void {
+  writeMarker(migrateMarkerPath(home), marker);
+}
+

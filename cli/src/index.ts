@@ -136,6 +136,14 @@ async function dispatch(argv: string[]): Promise<number> {
     console.log(VERSION);
     return 0;
   }
+  // #1083：老用户机器上旧式「一频道一注册」的 MCP 注册，在第一次跑交互式命令时自动合并成一条。
+  // 一次性标记、失败限频；进程内入口（mcp/hook/serve…）在函数里自己排除。任何异常都不能挡住命令本身。
+  try {
+    const { maybeAutoMigrate } = await import("./commands/mcp-migrate");
+    maybeAutoMigrate(cmd);
+  } catch {
+    /* 迁移是附赠的，绝不成为命令的单点故障 */
+  }
   switch (cmd) {
     case "login":
       return (await import("./commands/login")).run(rest);
