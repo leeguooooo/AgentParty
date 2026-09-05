@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
-import { activeChannelSlugs, buildGlobalWho, personKeyOf, reachOf, renderGlobalRow } from "../src/commands/who-global";
+import { activeChannelSlugs, buildGlobalWho, personKeyOf, reachOf, renderGlobalRow, summarizeGlobalWho, type GlobalWhoRow, type GlobalReach } from "../src/commands/who-global";
 
 const NOW = 1_700_000_000_000;
 
@@ -199,5 +199,93 @@ describe("全局 who 的入口（#1074 补）", () => {
 
   test("帮助文本里写明 --all", () => {
     expect(whoSource).toContain("[--all]");
+  });
+});
+
+// 真机事故：`party who --all` 表头恒写「reachable across 1 channel(s)」，底下 7 行全是 offline
+// （最老 60 天），全靠一个没有图例的 `·` 区分。判定（reach）是对的，撒谎的是呈现。
+describe("summarizeGlobalWho —— 表头按档位报数、陈旧离线折叠、记号给图例", () => {
+  const NOW = 1_800_000_000_000;
+  const DAY = 86_400_000;
+  const row = (over: Partial<GlobalWhoRow> & { name: string; reach: GlobalReach }): GlobalWhoRow => ({
+    kind: "agent",
+    channels: ["agentparty"],
+    ...over,
+  });
+
+  test("一个在线的都没有 ⇒ 表头不许说 reachable，而是如实报「no one reachable right now」+ 各档计数", () => {
+    const rows = [
+      row({ name: "a", reach: "recent", last_seen: NOW - 12 * 3_600_000 }),
+      row({ name: "b", reach: "offline", last_seen: NOW - 59 * DAY }),
+      row({ name: "c", reach: "offline", last_seen: NOW - 60 * DAY }),
+    ];
+    const s = summarizeGlobalWho(rows, 1, NOW);
+    expect(s.header).toMatch(/^no one reachable right now across 1 channel\(s\)/);
+    expect(s.header).toContain("1 recent");
+    expect(s.header).toContain("2 offline");
+    expect(s.header).not.toMatch(/^\d+ reachable/);
+  });
+
+  test("有人在线或可唤醒 ⇒ 表头报可达人数与各档计数", () => {
+    const rows = [
+      row({ name: "a", reach: "online", last_seen: NOW }),
+      row({ name: "b", reach: "wakeable", last_seen: NOW - DAY }),
+      row({ name: "c", reach: "offline", last_seen: NOW - 2 * DAY }),
+    ];
+    const s = summarizeGlobalWho(rows, 3, NOW);
+    expect(s.header).toMatch(/^2 reachable across 3 channel\(s\) \(1 online · 1 wakeable · 1 offline\)/);
+  });
+
+  test("离线超过一周的行折成一行计数（频道内名单同一口径），一周内的照常逐行印", () => {
+    const rows = [
+      row({ name: "fresh", reach: "offline", last_seen: NOW - 2 * DAY }),
+      row({ name: "old1", reach: "offline", last_seen: NOW - 59 * DAY }),
+      row({ name: "old2", reach: "offline", last_seen: NOW - 60 * DAY }),
+    ];
+    const s = summarizeGlobalWho(rows, 1, NOW);
+    expect(s.shown.map((r) => r.name)).toEqual(["fresh"]);
+    expect(s.folded).toBe(2);
+    expect(s.foldLine).toContain("2 more offline for over a week");
+    expect(s.foldLine).toContain("59d ago – 60d ago");
+    expect(s.foldLine).toContain("party who <channel>");
+  });
+
+  test("没有 last_seen 的离线行不折叠——不知道多久没露面就不能当陈旧", () => {
+    const s = summarizeGlobalWho([row({ name: "x", reach: "offline" })], 1, NOW);
+    expect(s.shown).toHaveLength(1);
+    expect(s.folded).toBe(0);
+    expect(s.foldLine).toBeUndefined();
+  });
+
+  test("图例只列实际用到的记号；一行都没印就没有图例", () => {
+    const s = summarizeGlobalWho(
+      [row({ name: "a", reach: "online", last_seen: NOW }), row({ name: "b", reach: "offline", last_seen: NOW - DAY })],
+      1,
+      NOW,
+    );
+    expect(s.legend).toBe("  ● online  · offline");
+    const none = summarizeGlobalWho([row({ name: "old", reach: "offline", last_seen: NOW - 30 * DAY })], 1, NOW);
+    expect(none.shown).toHaveLength(0);
+    expect(none.legend).toBeUndefined();
+  });
+
+  // CodeRabbit on #1085：⏸ 是有人刻意设的状态，折进「N more offline」里等于把这个决定藏掉。
+  test("暂停中的身份哪怕离线很久也不折叠，且照常显示 ⏸", () => {
+    const rows = [
+      row({ name: "paused-bot", reach: "offline", paused: true, last_seen: NOW - 40 * DAY }),
+      row({ name: "old", reach: "offline", last_seen: NOW - 40 * DAY }),
+    ];
+    const s = summarizeGlobalWho(rows, 1, NOW);
+    expect(s.shown.map((r) => r.name)).toEqual(["paused-bot"]);
+    expect(s.folded).toBe(1);
+    expect(renderGlobalRow(s.shown[0]!, "paused-bot", NOW)).toContain("⏸ paused");
+  });
+
+  test("空列表：表头与非空时同一口径，不再是另一句「… yet」", () => {
+    const s = summarizeGlobalWho([], 2, NOW);
+    expect(s.header).toBe("no one reachable right now across 2 channel(s)");
+    expect(s.shown).toHaveLength(0);
+    expect(s.foldLine).toBeUndefined();
+    expect(s.legend).toBeUndefined();
   });
 });
