@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { runSmokeWithRetry } from "./smoke-retry.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { deploymentDefineArgs, verifyDeploymentIdentity } from "./deployment-metadata.mjs";
@@ -89,20 +90,26 @@ async function deployTarget(name) {
   ], { env });
   await verifyDeploymentIdentity(target.smokeBase, deploymentMetadata);
   console.error(`Verified ${name} deployment: ${deploymentMetadata.version} ${deploymentMetadata.commit}`);
-  run("node", ["scripts/smoke-desktop-pairing.mjs"], {
-    env: { ...env, AGENTPARTY_SMOKE_BASE: target.smokeBase },
-  });
+  // #1072：部署后 smoke 统一「先等 + 退避重试」。三次发版被三种瞬时症状卡住（runtime-peers
+  // matches>1 / matches=0、pairing 500），全在上传完成后几十秒内、事后复跑都过——根因是新实例
+  // 热身，不是各 smoke 的逻辑。部署前的 --credentials-only 自检不走重试：那是配置问题。
+  const postDeploySmoke = { settleMs: 10_000 };
+  await runSmokeWithRetry("desktop pairing smoke", () =>
+    run("node", ["scripts/smoke-desktop-pairing.mjs"], {
+      env: { ...env, AGENTPARTY_SMOKE_BASE: target.smokeBase },
+    }), postDeploySmoke);
 
-  run("node", ["scripts/smoke-runtime-peers.mjs"], {
-    env: {
-      ...env,
-      AGENTPARTY_SMOKE_BASE: target.smokeBase,
-      AGENTPARTY_RUNTIME_SMOKE_TOKEN: target.runtimeSmokeToken,
-      ...(target.runtimeSmokeChannel
-        ? { AGENTPARTY_RUNTIME_SMOKE_CHANNEL: target.runtimeSmokeChannel }
-        : {}),
-    },
-  });
+  await runSmokeWithRetry("runtime-peers smoke", () =>
+    run("node", ["scripts/smoke-runtime-peers.mjs"], {
+      env: {
+        ...env,
+        AGENTPARTY_SMOKE_BASE: target.smokeBase,
+        AGENTPARTY_RUNTIME_SMOKE_TOKEN: target.runtimeSmokeToken,
+        ...(target.runtimeSmokeChannel
+          ? { AGENTPARTY_RUNTIME_SMOKE_CHANNEL: target.runtimeSmokeChannel }
+          : {}),
+      },
+    }), postDeploySmoke);
 
   if (target.smokeToken && target.smokeWriteToken) {
     run("node", ["scripts/smoke-prod.mjs"], {
