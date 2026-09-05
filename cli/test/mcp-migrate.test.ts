@@ -401,3 +401,48 @@ describe("收尾读回：删旧时单注册被连带删掉 ⇒ 自愈重加", ()
   });
 });
 
+
+// codex stop-time review on a40b60f：用户可能有一个恰好叫 party 的**别的** MCP 服务。
+// 它不是我们的：不能删、不能被同名 add 覆盖（codex 的 add 是覆盖语义）。失败关闭并给换名的出路。
+describe("同名的非 AgentParty MCP 注册：不动它", () => {
+  const foreignCodex: McpRegistration = { scope: "/home/.codex/config.toml", name: "party", command: "npx", args: ["some-other-mcp"], env: {}, harness: "codex", codexHome: GLOBAL_CODEX };
+  const foreignClaude: McpRegistration = { scope: "user", name: "party", command: "npx", args: ["some-other-mcp"], env: {}, harness: "claude" };
+
+  test("collidesWithSingle 对外人恒 false", async () => {
+    const { collidesWithSingle } = await import("../src/commands/mcp-migrate");
+    expect(collidesWithSingle(foreignCodex, GLOBAL_CODEX)).toBe(false);
+    expect(collidesWithSingle(foreignClaude, GLOBAL_CODEX)).toBe(false);
+  });
+
+  test("runMcpMigrate：名字被外人占着 ⇒ 不 add、不删旧、非零退出、出路是换名注册", () => {
+    const { deps: d, trace, registry } = deps([foreignCodex, reg({ name: "party-a" })]);
+    const lines: string[] = [];
+    const r = runMcpMigrate(planMcpMigrate(d), d, (l) => lines.push(l));
+    expect(r.code).toBe(1);
+    expect(trace.added).toEqual([]);
+    expect(trace.removed).toEqual([]);
+    expect(registry).toHaveLength(2); // 外人与旧注册都原样在
+    expect(lines.join("\n")).toContain("codex mcp add agentparty -- party mcp --all-channels");
+  });
+
+  test("ensureMachineWideSingle：名字被外人占着 ⇒ 失败关闭，不删不加", async () => {
+    const { ensureMachineWideSingle } = await import("../src/commands/mcp-migrate");
+    const { deps: d, trace, registry } = deps([foreignClaude]);
+    const r = ensureMachineWideSingle("claude", d);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.remedy).toContain("claude mcp add --scope user agentparty -- party mcp --all-channels");
+    expect(trace.added).toEqual([]);
+    expect(trace.removed).toEqual([]);
+    expect(registry).toEqual([foreignClaude]);
+  });
+
+  test("换名注册的 --all-channels 同样算覆盖：检测看命令与参数，不看名字", async () => {
+    const { ensureMachineWideSingle } = await import("../src/commands/mcp-migrate");
+    const alt: McpRegistration = { scope: "user", name: "agentparty", command: "party", args: ["mcp", "--all-channels"], env: {}, harness: "claude" };
+    const { deps: d, trace } = deps([foreignClaude, alt]);
+    const r = ensureMachineWideSingle("claude", d);
+    expect(r.ok && r.action).toBe("present");
+    expect(trace.added).toEqual([]);
+  });
+});

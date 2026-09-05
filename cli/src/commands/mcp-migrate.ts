@@ -66,7 +66,9 @@ export interface MigrateDeps {
 
 /** 这条旧注册与单注册同名同 scope：加新会覆盖它（codex）或被它顶住（claude），删它会连新的一起删。 */
 export function collidesWithSingle(reg: McpRegistration, globalCodexHome: string): boolean {
-  if (reg.name !== SINGLE_NAME) return false;
+  // 只有 **AgentParty 自己的**注册才算冲突。用户可能有一个恰好叫 party 的别的 MCP 服务，
+  // 那不是我们的，绝不能删、也绝不能被同名 add 覆盖（codex stop-time review on a40b60f）。
+  if (reg.name !== SINGLE_NAME || !isPartyMcpRegistration(reg)) return false;
   return registrationHarness(reg) === "codex" ? reg.codexHome === globalCodexHome : reg.scope === "user";
 }
 
@@ -208,6 +210,23 @@ export interface MigrateResult {
   addFailed: { harness: RegistrationHarness; detail: string }[];
 }
 
+/** 名字 party 在 user/global 被**别的**（非 AgentParty）MCP 服务占着：不动它，我们换个名字注册。 */
+export function foreignSameKey(deps: MigrateDeps, harness: RegistrationHarness): McpRegistration | undefined {
+  return deps.registrations().find((r) => {
+    if (registrationHarness(r) !== harness || r.name !== SINGLE_NAME || isPartyMcpRegistration(r)) return false;
+    return harness === "codex" ? r.codexHome === deps.globalCodexHome : r.scope === "user";
+  });
+}
+
+/** 名字被占时给用户的出路：换个名字注册，检测是名字无关的（看的是命令与 --all-channels）。 */
+export const ALT_SINGLE_NAME = "agentparty";
+function foreignRemedy(harness: RegistrationHarness, foreign: McpRegistration): string {
+  const cmd = harness === "codex"
+    ? `codex mcp add ${ALT_SINGLE_NAME} -- party mcp --all-channels`
+    : `claude mcp add --scope user ${ALT_SINGLE_NAME} -- party mcp --all-channels`;
+  return `名字 ${SINGLE_NAME} 已被别的 MCP 服务占用（${foreign.command} ${foreign.args.join(" ")}），不动它；请换名注册：${cmd}`;
+}
+
 function hasMachineWideSingle(deps: MigrateDeps, harness: RegistrationHarness): boolean {
   return deps.registrations().some((r) => registrationHarness(r) === harness && isMachineWideSingle(r, deps.globalCodexHome));
 }
@@ -263,6 +282,14 @@ export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: 
   for (const harness of harnesses) {
     if (plan.alreadySingle.has(harness)) {
       covered.add(harness);
+      continue;
+    }
+    const foreign = foreignSameKey(deps, harness);
+    if (foreign !== undefined) {
+      // codex 的同名 add 会**覆盖**：这里不能试。旧注册也一条不动。
+      const detail = foreignRemedy(harness, foreign);
+      addFailed.push({ harness, detail });
+      log(`  ✗ ${harness}：${detail}`);
       continue;
     }
     const collisions = plan.legacy.filter((l) => l.harness === harness && collidesWithSingle(l.reg, deps.globalCodexHome));
@@ -359,6 +386,12 @@ export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: 
   // 3) 收尾读回：删旧的过程中单注册若被 harness CLI 连带删掉（同名、scope 落空……），当场自愈。
   for (const harness of covered) {
     if (hasMachineWideSingle(deps, harness)) continue;
+    if (foreignSameKey(deps, harness) !== undefined) {
+      addFailed.push({ harness, detail: "删旧注册后单条注册消失，且名字已被别的 MCP 占用，未重加" });
+      log(`  ✗ ${harness}：单条注册消失且名字 ${SINGLE_NAME} 已被别的 MCP 占用——现在没有 party，请立刻手工加：`);
+      log(`      ${harness === "codex" ? `codex mcp add ${ALT_SINGLE_NAME}` : `claude mcp add --scope user ${ALT_SINGLE_NAME}`} -- party mcp --all-channels`);
+      continue;
+    }
     const res = deps.addSingle(harness);
     if (res.ok && hasMachineWideSingle(deps, harness)) {
       log(`  ! ${harness}：删旧注册时单条注册被连带删掉了，已重新加回（读回确认）`);
@@ -391,6 +424,11 @@ export function ensureMachineWideSingle(
     ? `codex mcp add ${SINGLE_NAME} -- party mcp --all-channels`
     : `claude mcp add --scope user ${SINGLE_NAME} -- party mcp --all-channels`;
   if (hasMachineWideSingle(deps, harness)) return { ok: true, action: "present", detail: "已有一条 --all-channels（user/global）" };
+
+  const foreign = foreignSameKey(deps, harness);
+  if (foreign !== undefined) {
+    return { ok: false, detail: foreignRemedy(harness, foreign), remedy: foreignRemedy(harness, foreign).split("：").pop() ?? remedy };
+  }
 
   const collision = deps
     .registrations()
