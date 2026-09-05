@@ -61,15 +61,16 @@ export function listProcesses(spawn: typeof spawnSync = spawnSync): ProcessRow[]
 export function findYoungerTwin(selfPid: number, rows: readonly ProcessRow[]): ProcessRow | null | undefined {
   const me = rows.find((r) => r.pid === selfPid);
   if (me === undefined) return undefined;
-  // 「更年轻」的判定要确定性：etime 只有秒级，宿主重载时一批 server 常在同一秒内起来。同秒
-  // 之内按 pid 定序（pid 单调递增，回绕极罕见且同秒内不可能）——否则两个同秒兄弟互相判不出，
-  // 永远留两个。
-  const younger = (r: ProcessRow): boolean =>
-    r.ageSeconds < me.ageSeconds || (r.ageSeconds === me.ageSeconds && r.pid > me.pid);
-  const twins = rows.filter((r) => r.pid !== me.pid && r.ppid === me.ppid && r.command === me.command && younger(r));
+  // 只认**严格**更年轻的（etime 只有秒级）。同一秒内起的双胞胎谁都不退：曾想按 pid 定序打破平局，
+  // 但 pid 会回绕，回绕时新进程可能拿到更小的 pid，按 pid 判会让宿主**正在用的**那个退出——
+  // 误退当前 server 比多留一个进程严重得多（codex stop-time review）。同秒双胞胎会在宿主下一次
+  // 重载时（都比新的老）一起退出，只是晚一轮。
+  const twins = rows.filter(
+    (r) => r.pid !== me.pid && r.ppid === me.ppid && r.command === me.command && r.ageSeconds < me.ageSeconds,
+  );
   if (twins.length === 0) return null;
-  // 最年轻的那个就是宿主现在在用的（同秒按 pid 大者）
-  return twins.reduce((a, b) => (b.ageSeconds < a.ageSeconds || (b.ageSeconds === a.ageSeconds && b.pid > a.pid) ? b : a));
+  // 最年轻的那个就是宿主现在在用的
+  return twins.reduce((a, b) => (b.ageSeconds < a.ageSeconds ? b : a));
 }
 
 export const SUPERSEDED_POLL_MS_ENV = "AGENTPARTY_SUPERSEDED_POLL_MS";

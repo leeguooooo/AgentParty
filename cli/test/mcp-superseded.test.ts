@@ -61,11 +61,20 @@ describe("findYoungerTwin —— 只认同宿主 + 同命令行 + 更年轻", ()
     expect(findYoungerTwin(100, rows)).toBeNull();
   });
 
-  // CodeRabbit on #1092：etime 只有秒级，重载时一批 server 常在同一秒内起来，只比年龄会互相判不出。
-  test("同秒起的兄弟按 pid 定序：pid 大的算更年轻，小的退", () => {
+  // codex stop-time review on #1092：pid 会回绕，回绕时新进程可能拿到更小的 pid——按 pid 打破同秒平局
+  // 会让宿主正在用的那个退出。所以同秒双胞胎谁都不退（失败安全），下一次重载时一起退。
+  test("同秒起的兄弟：谁都不退，不按 pid 猜新旧（pid 回绕会误退当前 server）", () => {
     const rows = [row(100, 1, 30, "party mcp --all-channels"), row(101, 1, 30, "party mcp --all-channels")];
-    expect(findYoungerTwin(100, rows)?.pid).toBe(101);
+    expect(findYoungerTwin(100, rows)).toBeNull();
     expect(findYoungerTwin(101, rows)).toBeNull();
+    // 回绕形态：老进程 pid 大、新进程 pid 小但同秒——同样谁都不退
+    const wrapped = [row(99990, 1, 30, "party mcp --all-channels"), row(12, 1, 30, "party mcp --all-channels")];
+    expect(findYoungerTwin(99990, wrapped)).toBeNull();
+    expect(findYoungerTwin(12, wrapped)).toBeNull();
+    // 下一轮重载：两个同秒的都比新的老 ⇒ 都退
+    const next = [...wrapped, row(13, 1, 1, "party mcp --all-channels")];
+    expect(findYoungerTwin(99990, next)?.pid).toBe(13);
+    expect(findYoungerTwin(12, next)?.pid).toBe(13);
   });
 
   test("自己那行不在表里 ⇒ undefined（判不出，绝不误退）", () => {
