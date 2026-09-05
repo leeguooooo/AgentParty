@@ -22,7 +22,6 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { agentpartyHome } from "../config";
 import { codexRegistryScopes, readCodexMcpRegistrations } from "../codex-mcp-registry";
-import { harnessMcpRemove } from "./mcp-prune";
 import { recordChannelDefault } from "../mcp-channel-identity";
 import {
   isPartyMcpRegistration,
@@ -104,7 +103,7 @@ function readJson(path: string): unknown | undefined {
 }
 
 /** 真机依赖：两边注册表都读，删/加都走 harness 自己的 CLI。 */
-export function defaultMigrateDeps(home: string = homedir()): MigrateDeps {
+export function defaultMigrateDeps(home: string = homedir(), spawn: typeof spawnSync = spawnSync): MigrateDeps {
   const scopes = codexRegistryScopes(process.env, process.cwd(), home);
   const globalCodexHome = scopes.find((sc) => sc.kind === "global")?.codexHome ?? join(home, ".codex");
   return {
@@ -116,17 +115,27 @@ export function defaultMigrateDeps(home: string = homedir()): MigrateDeps {
     ],
     readServer: readServerFromConfig,
     recordDefault: (server, channel, configPath) => recordChannelDefault(server, channel, configPath),
-    // 删除复用 prune 的实现：它按注册所属 scope 切 cwd / 加 --scope user。不带 scope 的
-    // `claude mcp remove` 在别的目录里找不到那个名字**也返回 0**——上一版就是这样把 26 条
-    // 一条没删却全报了 ✓。
-    remove: harnessMcpRemove,
+    // 删除**必须走注入的 spawn**：曾直接复用 prune 的实现（内部是真 spawnSync），结果 join 的单测
+    // 从桩里读到一条同名旧注册后，真的对 owner 机器跑了 `claude mcp remove party --scope user`，
+    // 把真机的单注册删掉了。scope 逻辑与 prune 一致：按注册所属 scope 切 cwd、显式 --scope。
+    remove: (reg) => {
+      const res = registrationHarness(reg) === "codex"
+        ? spawn("codex", ["mcp", "remove", reg.name], { encoding: "utf8", env: { ...process.env, CODEX_HOME: reg.codexHome ?? globalCodexHome } })
+        : spawn("claude", ["mcp", "remove", reg.name, "--scope", reg.scope === "user" ? "user" : "local"], {
+            encoding: "utf8",
+            cwd: reg.scope === "user" ? home : reg.scope,
+          });
+      if (res.error) return { ok: false, detail: res.error.message };
+      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || (res.stdout ?? "").trim() || `exit ${String(res.status)}` };
+      return { ok: true, detail: (res.stdout ?? "").trim() };
+    },
     addSingle: (harness) => {
       const res = harness === "codex"
-        ? spawnSync("codex", ["mcp", "add", SINGLE_NAME, "--", "party", "mcp", "--all-channels"], {
+        ? spawn("codex", ["mcp", "add", SINGLE_NAME, "--", "party", "mcp", "--all-channels"], {
             encoding: "utf8",
             env: { ...process.env, CODEX_HOME: globalCodexHome },
           })
-        : spawnSync("claude", ["mcp", "add", "--scope", "user", SINGLE_NAME, "--", "party", "mcp", "--all-channels"], {
+        : spawn("claude", ["mcp", "add", "--scope", "user", SINGLE_NAME, "--", "party", "mcp", "--all-channels"], {
             encoding: "utf8",
             cwd: home,
           });
@@ -137,11 +146,11 @@ export function defaultMigrateDeps(home: string = homedir()): MigrateDeps {
     addBack: (reg) => {
       const envArgs = Object.entries(reg.env).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
       const res = registrationHarness(reg) === "codex"
-        ? spawnSync("codex", ["mcp", "add", reg.name, ...envArgs, "--", reg.command, ...reg.args], {
+        ? spawn("codex", ["mcp", "add", reg.name, ...envArgs, "--", reg.command, ...reg.args], {
             encoding: "utf8",
             env: { ...process.env, CODEX_HOME: reg.codexHome ?? globalCodexHome },
           })
-        : spawnSync(
+        : spawn(
             "claude",
             ["mcp", "add", "--scope", reg.scope === "user" ? "user" : "local", reg.name, ...envArgs, "--", reg.command, ...reg.args],
             { encoding: "utf8", cwd: reg.scope === "user" ? home : reg.scope },
@@ -360,6 +369,68 @@ export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: 
     }
   }
   return { code: addFailed.length > 0 ? 1 : 0, moved, failed, added, addFailed };
+}
+
+export type EnsureSingleOutcome =
+  | { ok: true; action: "present" | "added" | "replaced"; detail: string }
+  | { ok: false; detail: string; remedy: string };
+
+/**
+ * 确保某个 harness 在 user/global scope 有**一条** `party mcp --all-channels`（join 每次调用）。
+ *
+ * 判据是读注册表、看 isMachineWideSingle，**不是**「有没有叫 party 的注册」：一条 user 级的旧式
+ * `party --channel king`、或某个项目里 local 的 `party --all-channels`，都会让按名字探测的
+ * `mcp get party` 返回 0，而这台机器并没有覆盖所有频道的那一条（codex stop-time review on c15a030）。
+ * 同名的旧注册走迁移同一套：记默认 → 删旧（读回）→ 加新（读回），加不上原样加回。
+ */
+export function ensureMachineWideSingle(
+  harness: RegistrationHarness,
+  deps: MigrateDeps,
+): EnsureSingleOutcome {
+  const remedy = harness === "codex"
+    ? `codex mcp add ${SINGLE_NAME} -- party mcp --all-channels`
+    : `claude mcp add --scope user ${SINGLE_NAME} -- party mcp --all-channels`;
+  if (hasMachineWideSingle(deps, harness)) return { ok: true, action: "present", detail: "已有一条 --all-channels（user/global）" };
+
+  const collision = deps
+    .registrations()
+    .find((r) => registrationHarness(r) === harness && collidesWithSingle(r, deps.globalCodexHome));
+  if (collision !== undefined) {
+    // 同名但不是 --all-channels：多半是旧式 per-channel。能记默认就记（保住它原来的身份）。
+    const channel = registrationChannel(collision);
+    const configPath = collision.env.AGENTPARTY_CONFIG;
+    if (channel !== null && configPath !== undefined && configPath !== "") {
+      const server = deps.readServer(configPath);
+      if (server !== null) {
+        try {
+          deps.recordDefault(server, channel, configPath);
+        } catch (e) {
+          return { ok: false, detail: `同名旧注册 ${SINGLE_NAME} 的默认身份记不下来（${e instanceof Error ? e.message : String(e)}），未改动`, remedy };
+        }
+      }
+    }
+    const removed = deps.remove(collision);
+    if (!removed.ok || stillRegistered(deps, collision)) {
+      return { ok: false, detail: `同名旧注册 ${SINGLE_NAME} 删不掉（${removed.ok ? "命令返回 0 但读回还在" : removed.detail}），未改动`, remedy };
+    }
+    const res = deps.addSingle(harness);
+    if (res.ok && hasMachineWideSingle(deps, harness)) {
+      return { ok: true, action: "replaced", detail: `同名旧注册 ${SINGLE_NAME}（${collision.args.join(" ")}）已换成 --all-channels（读回确认）` };
+    }
+    const back = deps.addBack(collision);
+    const restored = back.ok && stillRegistered(deps, collision);
+    return {
+      ok: false,
+      detail: restored
+        ? `--all-channels 没加上（${res.ok ? "读回不在 user/global" : res.detail}）；同名旧注册已原样加回`
+        : `--all-channels 没加上（${res.ok ? "读回不在 user/global" : res.detail}），旧注册加回也失败（${back.detail}）——现在没有 party`,
+      remedy,
+    };
+  }
+
+  const res = deps.addSingle(harness);
+  if (res.ok && hasMachineWideSingle(deps, harness)) return { ok: true, action: "added", detail: "已加一条 --all-channels（user/global，读回确认）" };
+  return { ok: false, detail: res.ok ? "命令返回 0，但读回注册表时它不在 user/global scope" : res.detail, remedy };
 }
 
 // ── 自动触发 ──────────────────────────────────────────────────────────────────

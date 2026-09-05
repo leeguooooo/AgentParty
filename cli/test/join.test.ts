@@ -94,7 +94,6 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
 
     // 4) MCP 注册落地（先探后加，#898）：探的是**唯一那条** `party`，加的是 user scope 的
     //    `party mcp --all-channels`（#1083：join 不再每频道各注册一条，那正是进程膨胀的源头）。
-    expect(record).toContainEqual(["claude", "mcp", "get", "party"]);
     const add = record.find((r) => r[0] === "claude" && r[1] === "mcp" && r[2] === "add");
     expect(add).toBeDefined();
     expect(add).toEqual(["claude", "mcp", "add", "--scope", "user", "party", "--", "party", "mcp", "--all-channels"]);
@@ -707,10 +706,42 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     const code = await runJoin(baseOpts({ harnessFlag: "claude", verbose: true }), deps(record, { mcpAlreadyRegistered: true }, logs));
 
     expect(code).toBe(0);
-    // 探到了（get 跑过），但**没有** add——每个注册在每个会话里都是一个常驻进程。
-    expect(record.some((r) => r[0] === "claude" && r[2] === "get")).toBe(true);
+    // 注册表里已有 user 级的 --all-channels ⇒ **没有** add——每个注册在每个会话里都是一个常驻进程。
     expect(record.some((r) => r[0] === "claude" && r[2] === "add")).toBe(false);
     expect(logs.join("\n")).toMatch(/(已注册|already)/i);
+  });
+
+  // codex stop-time review on c15a030：「存在同名注册」≠「所有频道已可用」。判据必须是读注册表看有没有
+  // user/global 的 --all-channels，而不是 `mcp get party` 有没有返回 0。
+  test("本机只有一条同名的旧式 party --channel（user 级）⇒ join 把它换成 --all-channels，而不是跳过", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const legacy = {
+      scope: "user", name: "party", command: "party", args: ["mcp", "--channel", "king", "--identity", "king-claude"],
+      env: {}, harness: "claude" as const,
+    };
+    const code = await runJoin(baseOpts({ harnessFlag: "claude", verbose: true }), deps(record, { mcpRegistry: [legacy] }, logs));
+    expect(code).toBe(0);
+    // 先删同名旧的，再加 user 级 --all-channels
+    const rm = record.findIndex((r) => r[0] === "claude" && r[1] === "mcp" && r[2] === "remove" && r[3] === "party");
+    const add = record.findIndex((r) => r[0] === "claude" && r[1] === "mcp" && r[2] === "add");
+    expect(rm).toBeGreaterThan(-1);
+    expect(add).toBeGreaterThan(rm);
+    expect(record[add]).toEqual(["claude", "mcp", "add", "--scope", "user", "party", "--", "party", "mcp", "--all-channels"]);
+    expect(logs.join("\n")).toContain("已换成 --all-channels");
+  });
+
+  test("只有某个项目 local 的 party --all-channels ⇒ 仍要加 user 级一条，不能当作已覆盖", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const localOnly = { scope: "/some/other/project", name: "party", command: "party", args: ["mcp", "--all-channels"], env: {}, harness: "claude" as const };
+    const code = await runJoin(baseOpts({ harnessFlag: "claude", verbose: true }), deps(record, { mcpRegistry: [localOnly] }, logs));
+    expect(code).toBe(0);
+    const add = record.find((r) => r[0] === "claude" && r[1] === "mcp" && r[2] === "add");
+    expect(add).toEqual(["claude", "mcp", "add", "--scope", "user", "party", "--", "party", "mcp", "--all-channels"]);
+    expect(record.some((r) => r[0] === "claude" && r[2] === "remove")).toBe(false); // local 的不是冲突，不动它
   });
 
   test("MCP 注册失败：如实报出来，不冒充成功", async () => {
