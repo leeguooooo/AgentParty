@@ -625,12 +625,31 @@ describe("who pull-based reachability（#905：既不是在线，也不是不可
     p({ state: "offline", wake: { kind: "none" }, last_seen: NOW - 88 * 60 * 60 * 1000, ...over });
   // #926：`hookStatus` 必须显式注入。默认实现会去读**这台机器真实的** ~/.codex/config.toml，
   // 于是单测结果会随跑测试那台机器的 hook 信任闸摇摆（owner 那台就是全 disabled）。
-  const lookup = (names: string[], hook: CodexStopHookStatus = "ok"): PullWakeLookup =>
+  // #1083：liveNames 同样必须显式注入。默认实现读**这台机器真实的**会话注册表，
+  // 单测会随跑测试时机器上开着哪些 codex 会话摇摆。缺省让 names 里的都算「有活会话」，
+  // 保持既有用例语义；「有 config 但会话已关」那档由下面专门的用例覆盖。
+  const lookup = (names: string[], hook: CodexStopHookStatus = "ok", live: string[] = names): PullWakeLookup =>
     buildPullWakeLookup(CH, "https://s", {
       hasHook: () => true,
       hookStatus: () => hook,
       names: () => new Set(names),
+      liveNames: () => new Set(live),
     });
+
+  // #1083：本机有该身份的 config、hook 也装着，但那个会话**早就关了**。此前这两条就足以让
+  // 名单一直宣称「@ 我，这台机器上的 codex 会接」——实测线上名单里有 3~11 天前关掉的会话仍在这么说。
+  // Stop hook 只在有会话在跑时才触发，所以会话关了就必须停止这个承诺：宁可少说一句，
+  // 也不能让发送方安心去等一个永远不会来的回复。
+  test("有 config 但会话已经关了 ⇒ 不再宣称 deferred 可达", () => {
+    const rows = buildRows([stale({ name: "lark-codex1" })], {
+      now: NOW,
+      channel: CH,
+      pullWake: lookup(["lark-codex1"], "ok", []), // config 在，活会话没有
+    });
+    const r = rows[0] as NonNullable<(typeof rows)[number]>;
+    expect(r.pull_wake).toBeUndefined();
+    expect(renderRow(r, NOW, 0)).not.toContain("⇢ deferred");
+  });
 
   test("装了 Stop hook 的身份：不再断言 unreachable，改说「下次跑起来时会取到」", () => {
     const rows = buildRows([stale({ name: "lark-codex1" })], {
@@ -643,7 +662,7 @@ describe("who pull-based reachability（#905：既不是在线，也不是不可
       scope: "local",
       harness: "codex",
       hook: "ok",
-      evidence: ["codex_stop_hook", "local_agent_config"],
+      evidence: ["codex_stop_hook", "local_agent_config", "live_codex_session"],
     });
     const line = renderRow(r, NOW, 0);
     expect(line).toContain("⇢ deferred");
@@ -878,7 +897,13 @@ describe("who deferred 行的队列深度（#958）", () => {
   const stale = (over: Partial<PresenceEntry> & { name: string }): PresenceEntry =>
     p({ state: "offline", wake: { kind: "none" }, last_seen: NOW - 88 * 60 * 60 * 1000, ...over });
   const lookup = (names: string[]): PullWakeLookup =>
-    buildPullWakeLookup(CH, "https://s", { hasHook: () => true, hookStatus: () => "ok", names: () => new Set(names) });
+    buildPullWakeLookup(CH, "https://s", {
+      hasHook: () => true,
+      hookStatus: () => "ok",
+      names: () => new Set(names),
+      // #1083：不注入就会去读这台机器真实的会话注册表，测试随机器状态摇摆。
+      liveNames: () => new Set(names),
+    });
   const render = (entry: PresenceEntry): string => {
     const rows = buildRows([entry], { now: NOW, channel: CH, pullWake: lookup([entry.name]) });
     return renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0, CH);
@@ -923,6 +948,7 @@ describe("who deferred 行的队列深度（#958）", () => {
         hasHook: () => true,
         hookStatus: () => "disabled",
         names: () => new Set(["lark-codex1"]),
+        liveNames: () => new Set(["lark-codex1"]),
       }),
     });
     const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0, CH);
