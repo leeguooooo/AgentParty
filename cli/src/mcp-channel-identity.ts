@@ -141,7 +141,7 @@ export function resolveChannelIdentity(input: ResolveChannelIdentityInput): Chan
   );
 
   if (input.identity !== undefined) {
-    const hit = matches.filter((c) => c.name === input.identity);
+    const hit = dedupeSameIdentity(matches.filter((c) => c.name === input.identity));
     if (hit.length === 1) return { ok: true, config: hit[0]!, via: "explicit" };
     // 显式指定却找不到 / 撞名，绝不退回默认身份——那正是「以为用 A 发言、实际用了 B」。
     return {
@@ -151,7 +151,8 @@ export function resolveChannelIdentity(input: ResolveChannelIdentityInput): Chan
       message:
         hit.length === 0
           ? `#${input.channel} 上没有名为 ${input.identity} 的身份${describeCandidates(matches)}`
-          : `#${input.channel} 上有多份名为 ${input.identity} 的身份，无法确定用哪个——请用 --server 限定`,
+          : `#${input.channel} 上有多份名为 ${input.identity} 的身份，分属不同实例，请用 server 限定` +
+            `（候选实例：${[...new Set(hit.map((c) => c.server))].join("、")}）`,
     };
   }
 
@@ -173,17 +174,36 @@ export function resolveChannelIdentity(input: ResolveChannelIdentityInput): Chan
     if (hit !== undefined) return { ok: true, config: hit, via: "default" };
   }
 
-  if (matches.length === 1) return { ok: true, config: matches[0]!, via: "only" };
+  const distinct = dedupeSameIdentity(matches);
+  if (distinct.length === 1) return { ok: true, config: distinct[0]!, via: "only" };
 
   return {
     ok: false,
     reason: "ambiguous",
-    candidates: matches,
+    candidates: distinct,
     // 说清楚「为什么不替你选」+ 两条出路。这里绝不挑一个了事：挑错不会报错，只会以别人的身份发言。
     message:
       `#${input.channel} 在本机有 ${matches.length} 份身份，没有登记默认，不替你猜——` +
       `传 identity 指定，或用 \`party join\` 重新绑定把它记为默认。${describeCandidates(matches)}`,
   };
+}
+
+/**
+ * 同一个 (server, channel, name) 有多份 config 文件时，那是**同一个身份的重复配置**，不是
+ * 身份歧义——挑哪份都不会以别人的名义说话，最坏只是拿到一个旧 token。此时取最近验证过的那份。
+ *
+ * 这个区分是必需的：owner 那台机器上 #agentparty 的 leo-claude 就有两份 config（同 server、
+ * 同名），此前会被判成歧义并提示「请用 --server 限定」——而两份的 server 一模一样，
+ * 那条出路根本走不通。给一条走不通的修法，比不给更糟。
+ */
+function dedupeSameIdentity(configs: AgentIdentityConfig[]): AgentIdentityConfig[] {
+  const best = new Map<string, AgentIdentityConfig>();
+  for (const c of configs) {
+    const key = JSON.stringify([c.server, c.channel, c.name]);
+    const prev = best.get(key);
+    if (prev === undefined || (c.verifiedAt ?? -1) > (prev.verifiedAt ?? -1)) best.set(key, c);
+  }
+  return [...best.values()];
 }
 
 function describeCandidates(candidates: AgentIdentityConfig[]): string {

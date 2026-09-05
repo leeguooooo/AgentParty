@@ -1,5 +1,6 @@
 // 全局配置与 workspace 游标状态
 import { homedir, tmpdir } from "node:os";
+import { currentMcpIdentityPath } from "./mcp-identity-context";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -247,6 +248,12 @@ export function localAgentConfigsForChannel(
 }
 
 export function explicitConfigPath(): string | null {
+  // #1083：单进程多频道时，「用哪份身份」是**每次调用**的属性，不再是进程属性。MCP 在工具
+  // 边界上把它放进 AsyncLocalStorage，这里优先取它——绝不用改 process.env 的办法切身份，
+  // 那在并发调用下会串号（后一个调用读到前一个设的值，以别人的身份发言且不报错）。
+  // 不在上下文里（普通 CLI、单频道 MCP）就照旧走 env，行为一字不变。
+  const perCall = currentMcpIdentityPath();
+  if (perCall !== null) return perCall;
   return process.env.AGENTPARTY_CONFIG || null;
 }
 

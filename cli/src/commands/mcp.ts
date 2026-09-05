@@ -26,6 +26,8 @@ import {
 import { jsonFrame } from "../json";
 import { applyMcpProcessTitle, parseMcpServerArgv } from "../mcp-registry";
 import { watchParentLiveness } from "../parent-liveness";
+import { resolveChannelIdentity } from "../mcp-channel-identity";
+import { withMcpIdentity } from "../mcp-identity-context";
 import { reportWakeSelfCheck } from "../wake-reachability";
 import { resolveAuth, resolveAuthDetailed } from "../oidc-cli";
 import { inspectMcpSessionBinding, mcpSessionBindingDenial } from "../mcp-session-binding";
@@ -455,11 +457,70 @@ function charterText(data: Record<string, unknown>): string {
   return decisions.length === 0 ? base : `${base}\n\n${decisions.join("\n")}`;
 }
 
-export function createMcpServer(defaultChannel?: string): McpServer {
+
+/**
+ * 把每个工具的 handler 包进「按本次调用的 channel 解析出的身份」上下文里（#1083 聚合档）。
+ *
+ * 解析不出来（本机没这个频道 / 多份身份且没登记默认）时**直接把原因回给调用方**，不往下跑：
+ * 让它带着错身份或空身份去调用，只会变成一条以别人名义发出的消息或一句无法诊断的 401。
+ */
+function wrapToolsWithPerCallIdentity(server: McpServer, defaultChannel: string | undefined): void {
+  const original = server.registerTool.bind(server);
+  // 用 any 是因为 registerTool 的重载签名带一长串泛型，这里只做透传包装，不改变任何一个参数。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server as any).registerTool = (name: string, spec: unknown, handler: (...args: any[]) => any) => {
+    // 聚合档下 channel / identity 必须出现在**每个**工具的 inputSchema 里：MCP SDK 会按 schema
+    // 校验入参，没声明的字段会被直接丢掉——handler 再怎么读也读不到（party_whoami 的 schema
+    // 本来是空的，实测就是这么丢的）。已经声明过 channel 的工具保持原样，不覆盖它的描述与校验。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const shape = (spec as any)?.inputSchema;
+    if (shape !== null && typeof shape === "object") {
+      if (shape.channel === undefined) {
+        shape.channel = z
+          .string()
+          .describe("channel slug — 这条 MCP 服务本机所有频道，必须指明是哪一个");
+      }
+      if (shape.identity === undefined) {
+        shape.identity = z
+          .string()
+          .optional()
+          .describe("同一频道在本机有多份身份时，指定用哪一个（party who --all 可查）");
+      }
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return original(name as any, spec as any, (async (args: any, extra: any) => {
+      const channel = typeof args?.channel === "string" && args.channel !== "" ? args.channel : defaultChannel;
+      if (channel === undefined || channel === "") {
+        // 聚合档下频道不是可省的：省了就没有身份，没有身份就没有「我是谁」。
+        return fail(
+          `这条 MCP 服务本机所有频道，请在参数里给出 channel（工具 ${name}）。` +
+            `本机有哪些频道：party who --all`,
+        );
+      }
+      const resolved = resolveChannelIdentity({
+        channel,
+        identity: typeof args?.identity === "string" && args.identity !== "" ? args.identity : undefined,
+      });
+      if (!resolved.ok) return fail(resolved.message);
+      return withMcpIdentity(resolved.config.path, () => handler(args, extra));
+    }) as any);
+  };
+}
+
+export function createMcpServer(defaultChannel?: string, aggregateChannels: boolean = false): McpServer {
   const server = new McpServer({
     name: "agentparty",
     version: pkg.version,
   });
+
+  // #1083 聚合档：一条注册服务本机所有频道，身份按每次调用的 channel 解析。包住 registerTool
+  // 这一处即可——所有工具都从这里进来，22 个 auth() 调用点一处都不用改（它们都走
+  // explicitConfigPath 这个瓶颈）。
+  //
+  // **必须显式开启**（--all-channels）。曾经想用「没设 AGENTPARTY_CONFIG 就算聚合」来自动判定，
+  // 那是错的：很多现存装法本来就不设这个 env（靠 cwd 绑定或全局 config），自动判定会让他们
+  // 突然被要求每次调用都传 channel——一次静默的破坏性变更。默认档行为一字不变。
+  if (aggregateChannels) wrapToolsWithPerCallIdentity(server, defaultChannel);
 
   // 启动时解析一次「我在哪个频道」——flag 优先，否则吃 cwd 绑定（party init --channel）。
   // 工具、concrete resource、whoami 提示三者共用这一个答案，不能各认各的。
@@ -1827,7 +1888,7 @@ export async function run(argv: string[]): Promise<number> {
     agentName: parsed.identity,
     configPath: process.env.AGENTPARTY_CONFIG ?? null,
   });
-  const server = createMcpServer(defaultChannel);
+  const server = createMcpServer(defaultChannel, parsed.allChannels);
   await server.connect(new StdioServerTransport());
   // #926：会话启动时自检一次「这台机器上这个身份叫不醒吗」，把结论挂到 presence 上。
   // MCP 不受 codex hook 信任闸管辖（owner 那台实测：26 条 hook 全 disabled，8 个 party mcp 照跑），

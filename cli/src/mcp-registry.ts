@@ -217,10 +217,16 @@ export interface McpServerArgv {
   channel: string | null;
   /** `--identity <label>`：纯展示用，唯一目的是让 `ps -axww` 看出这个进程是谁的。 */
   identity: string | null;
+  /**
+   * `--all-channels`（#1083）：一条注册服务本机所有频道。频道由每次工具调用传入，身份按频道
+   * 解析。**必须显式开启**——旧装法很多本来就不设 AGENTPARTY_CONFIG，自动判定会让它们突然
+   * 被要求每次都传 channel。
+   */
+  allChannels: boolean;
   error: string | null;
 }
 
-const MCP_USAGE = "usage: party mcp [--channel C] [--identity LABEL] | party mcp prune [--yes]";
+const MCP_USAGE = "usage: party mcp [--channel C | --all-channels] [--identity LABEL] | party mcp prune [--yes]";
 
 /**
  * `party mcp` 的参数解析。`--identity` 是 #898 第 3 件的载体：process.title 在 Bun/macOS
@@ -228,9 +234,14 @@ const MCP_USAGE = "usage: party mcp [--channel C] [--identity LABEL] | party mcp
  * 它绝不影响身份解析——身份永远来自 AGENTPARTY_CONFIG，标签写错也只是标签写错。
  */
 export function parseMcpServerArgv(argv: string[]): McpServerArgv {
-  const out: McpServerArgv = { channel: null, identity: null, error: null };
+  const out: McpServerArgv = { channel: null, identity: null, allChannels: false, error: null };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
+    // #1083：一条注册服务本机所有频道，频道由每次工具调用传入、身份按频道解析。
+    if (a === "--all-channels") {
+      out.allChannels = true;
+      continue;
+    }
     if (a === "--channel" || a === "--identity") {
       const v = argv[i + 1];
       if (v === undefined || v.startsWith("-")) return { ...out, error: `${a} needs a value\n${MCP_USAGE}` };

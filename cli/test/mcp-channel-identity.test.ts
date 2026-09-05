@@ -11,6 +11,7 @@ import {
   resolveChannelIdentity,
   type AgentIdentityConfig,
 } from "../src/mcp-channel-identity";
+import { parseMcpServerArgv } from "../src/mcp-registry";
 
 function cfg(over: Partial<AgentIdentityConfig>): AgentIdentityConfig {
   return {
@@ -175,5 +176,59 @@ describe("默认身份登记表", () => {
     writeFileSync(join(h, "mcp-channel-defaults.json"), "{ broken");
     expect(readChannelDefaults(h)).toEqual({});
     rmSync(h, { recursive: true, force: true });
+  });
+});
+
+// owner 那台机器上的真实场景：#agentparty 的 leo-claude 有两份 config，同 server、同名，
+// 只是验证时间不同。这不是身份歧义（挑哪份都不会以别人的名义说话），此前却被判成歧义并
+// 提示「请用 --server 限定」——而两份 server 一模一样，那条出路根本走不通。
+describe("同一身份的重复 config 不算歧义", () => {
+  const older = {
+    path: "/p/old.json",
+    server: "https://s1",
+    channel: "dev",
+    name: "same",
+    verifiedAt: 100,
+  };
+  const newer = { ...older, path: "/p/new.json", verifiedAt: 999 };
+
+  test("同 (server, channel, name) 的多份 config ⇒ 取最近验证的那份，不报歧义", () => {
+    const r = resolveChannelIdentity({ channel: "dev", configs: [older, newer], defaults: {} });
+    expect(r.ok && r.via).toBe("only");
+    expect(r.ok && r.config.path).toBe("/p/new.json");
+  });
+
+  test("显式指定该身份同样解得出", () => {
+    const r = resolveChannelIdentity({ channel: "dev", identity: "same", configs: [older, newer], defaults: {} });
+    expect(r.ok && r.config.path).toBe("/p/new.json");
+  });
+
+  test("名字不同才是真歧义——这条线不能被上面的合并冲掉", () => {
+    const other = { ...older, path: "/p/other.json", name: "different" };
+    const r = resolveChannelIdentity({ channel: "dev", configs: [older, newer, other], defaults: {} });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.candidates.map((c) => c.name).sort()).toEqual(["different", "same"]);
+  });
+});
+
+// #1083 的一次真实事故：最初用「没设 AGENTPARTY_CONFIG 就算聚合档」自动判定，结果 44 个既有
+// 用例当场变红——很多现存装法本来就不设这个 env（靠 cwd 绑定或全局 config）。自动判定会让
+// 它们突然被要求每次调用都传 channel，是一次静默的破坏性变更。聚合必须是主动选择。
+describe("聚合档必须显式开启（--all-channels）", () => {
+  test("裸 `party mcp` 不进聚合档", () => {
+    expect(parseMcpServerArgv([]).allChannels).toBe(false);
+  });
+
+  test("只给 --channel 的旧注册不进聚合档", () => {
+    expect(parseMcpServerArgv(["--channel", "dev"]).allChannels).toBe(false);
+  });
+
+  test("--all-channels 才进，且能与 --identity 共存", () => {
+    expect(parseMcpServerArgv(["--all-channels"]).allChannels).toBe(true);
+    const both = parseMcpServerArgv(["--all-channels", "--identity", "leo"]);
+    expect(both.allChannels).toBe(true);
+    expect(both.identity).toBe("leo");
+    expect(both.error).toBeNull();
   });
 });
