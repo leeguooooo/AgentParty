@@ -8,6 +8,7 @@
 // 输出形态相应变了（`第 N 步  标题 · 摘要 ✓/✗`、`修法（…）：` + 一行命令、`✅ 接入完成`），
 // 断言按新形态等价改写；判据（哪一步过/不过、修法是哪条、退出码）一条没放宽。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readChannelDefaults } from "../src/mcp-channel-identity";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -698,6 +699,17 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(errs2.join("\n")).toContain("token 被拒：403");
     expect(logs2.join("\n")).not.toContain("token 被拒：403");
     expect(logs2.join("\n")).toContain("走 stdout 的那半");
+  });
+
+  // #1083：`party mcp --all-channels` 按频道解析身份，多份身份 + 没登记默认 ⇒ 失败关闭。
+  // join 是唯一知道「你刚绑的就是这个」的地方，绑定成功必须把它记为该频道的本机默认。
+  test("绑定成功后把这份身份记为该频道的本机默认（供 --all-channels 解析）", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    expect(await runJoin(baseOpts({ harnessFlag: "claude", verbose: true }), deps([], {}, logs))).toBe(0);
+    const defaults = readChannelDefaults(join(tmp, ".agentparty"));
+    expect(defaults[JSON.stringify([mock.url, "dev"])]).toBe(configPath());
+    expect(logs.join("\n")).toContain("记为本机默认身份");
   });
 
   test("重复接入：mcp get 命中已注册 ⇒ 跳过 add，不再叠一个常驻进程（#898）", async () => {
