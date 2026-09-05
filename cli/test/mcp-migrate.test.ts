@@ -81,8 +81,20 @@ function deps(initial: McpRegistration[], knobs: Knobs = {}): { deps: MigrateDep
       trace.added.push(h);
       trace.order.push(`add:${h}`);
       const lands = addLands ?? "global";
-      if (lands === "global") registry.push(single(h));
+      const s = single(h);
+      const sameKey = registry.findIndex((x) => (x.harness ?? "claude") === h && x.scope === s.scope && x.name === s.name);
+      if (lands === "global") {
+        // 真机行为：codex 同名 add **覆盖**；claude 同名 add 拒绝（"already exists"）但退出码 0。
+        if (sameKey !== -1) {
+          if (h === "codex") registry[sameKey] = s;
+        } else registry.push(s);
+      }
       if (lands === "project") registry.push(single(h, h === "codex" ? { scope: "/proj/.codex/config.toml", codexHome: "/proj/.codex" } : { scope: "/proj" }));
+      return { ok: true, detail: "" };
+    },
+    addBack: (r) => {
+      trace.order.push(`addBack:${r.name}`);
+      registry.push(r);
       return { ok: true, detail: "" };
     },
     now: () => NOW,
@@ -314,3 +326,78 @@ describe("maybeAutoMigrate —— 一次性、失败限频、进程内路径不�
     rmSync(h, { recursive: true, force: true });
   });
 });
+
+// codex stop-time review on a998ba9：旧注册若恰好也叫 `party`（早期文档就是这么教的），
+// 「先加后删」会变成 add 覆盖旧的、remove 按名字把新的一起删掉。真机核实：codex 同名 add 覆盖，
+// claude 同名 add 拒绝但退出码 0。所以同名冲突要「删旧 → 加新 → 读回；加不上就原样加回」。
+describe("同名冲突：旧注册就叫 party", () => {
+  const codexCollision = reg({ name: "party", args: ["mcp", "--channel", "king", "--identity", "king-codex"], env: { AGENTPARTY_CONFIG: "/cfg/king.json" } });
+  const claudeCollision = reg({ name: "party", harness: "claude", scope: "user", codexHome: undefined, args: ["mcp", "--channel", "king"], env: { AGENTPARTY_CONFIG: "/cfg/king.json" } });
+
+  test("codex：先删同名旧的、再加新的、不再按名字删第二次；最后只剩新的", () => {
+    const { deps: d, trace, registry } = deps([codexCollision, reg({ name: "party-other", args: ["mcp", "--channel", "ops"] })]);
+    const r = runMcpMigrate(planMcpMigrate(d), d, () => undefined);
+    expect(r.code).toBe(0);
+    expect(trace.order).toEqual(["remove:party", "add:codex", "remove:party-other"]);
+    expect(registry.map((x) => `${x.name}:${x.args.join(" ")}`)).toEqual(["party:mcp --all-channels"]);
+    expect(r.moved.map((m) => m.reg.name).sort()).toEqual(["party", "party-other"]);
+    expect(trace.defaults).toEqual([["https://s1", "king", "/cfg/king.json"], ["https://s1", "ops", "/cfg/party-other.json"]]);
+  });
+
+  test("claude：同名 user 级旧注册同样先删再加（直接 add 会被『already exists』顶住）", () => {
+    const { deps: d, trace, registry } = deps([claudeCollision]);
+    const r = runMcpMigrate(planMcpMigrate(d), d, () => undefined);
+    expect(r.code).toBe(0);
+    expect(trace.order).toEqual(["remove:party", "add:claude"]);
+    expect(registry).toHaveLength(1);
+    expect(registry[0]!.args).toEqual(["mcp", "--all-channels"]);
+  });
+
+  test("删了同名旧的但新的加不上 ⇒ 立刻把旧的原样加回、退出码非 0、印手工命令", () => {
+    const { deps: d, trace, registry } = deps([codexCollision], { addSingle: () => ({ ok: false, detail: "codex: boom" }) });
+    const lines: string[] = [];
+    const r = runMcpMigrate(planMcpMigrate(d), d, (l) => lines.push(l));
+    expect(r.code).toBe(1);
+    expect(trace.order).toEqual(["remove:party", "addBack:party"]);
+    expect(registry.map((x) => x.args.join(" "))).toEqual(["mcp --channel king --identity king-codex"]); // 一切照旧
+    expect(lines.join("\n")).toContain("原样加回");
+    expect(lines.join("\n")).toContain("codex mcp add party -- party mcp --all-channels");
+  });
+
+  test("同名旧的删不掉 ⇒ 该 harness 一条都不动，非零退出", () => {
+    const { deps: d, trace, registry } = deps([codexCollision, reg({ name: "party-other" })], { removeLies: true });
+    const r = runMcpMigrate(planMcpMigrate(d), d, () => undefined);
+    expect(r.code).toBe(1);
+    expect(trace.added).toEqual([]);
+    expect(registry).toHaveLength(2);
+  });
+
+  test("项目级（local）叫 party 的旧注册不算冲突：scope 不同，按 local 删掉，user 级新的留着", () => {
+    const local = reg({ name: "party", harness: "claude", scope: "/proj/x", codexHome: undefined, args: ["mcp", "--channel", "dev"] });
+    const { deps: d, registry } = deps([local]);
+    const r = runMcpMigrate(planMcpMigrate(d), d, () => undefined);
+    expect(r.code).toBe(0);
+    expect(registry.map((x) => `${x.scope}:${x.args.join(" ")}`)).toEqual(["user:mcp --all-channels"]);
+  });
+});
+
+describe("收尾读回：删旧时单注册被连带删掉 ⇒ 自愈重加", () => {
+  test("remove 连新的一起删了 ⇒ 结束前发现并重加；重加失败则非零退出", () => {
+    // 模拟：删 party-a 时 harness CLI 连 user 级 party 也删了
+    const { deps: d, trace, registry } = deps([reg({ name: "party-a" })]);
+    const originalRemove = d.remove;
+    d.remove = (r) => {
+      const res = originalRemove(r);
+      const i = registry.findIndex((x) => x.name === "party");
+      if (i !== -1) registry.splice(i, 1);
+      return res;
+    };
+    const lines: string[] = [];
+    const r = runMcpMigrate(planMcpMigrate(d), d, (l) => lines.push(l));
+    expect(r.code).toBe(0);
+    expect(trace.added).toEqual(["codex", "codex"]); // 第二次是自愈
+    expect(registry.map((x) => x.name)).toEqual(["party"]);
+    expect(lines.join("\n")).toContain("已重新加回");
+  });
+});
+

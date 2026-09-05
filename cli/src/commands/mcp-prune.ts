@@ -174,7 +174,9 @@ export const harnessMcpRemove: RemoveFn = (reg) =>
 export const claudeMcpRemove: RemoveFn = (reg) => {
   const args = ["mcp", "remove", reg.name];
   const cwd = reg.scope === "user" ? (process.env.HOME ?? homedir()) : reg.scope;
-  if (reg.scope === "user") args.push("--scope", "user");
+  // scope 必须显式给：user 级与项目级同名时，不带 scope 的 remove 会拒绝并打一句提示、退出码仍是 0，
+  // 什么都没删（#1083 迁移实测）。projects[path].mcpServers 里的就是 local scope。
+  args.push("--scope", reg.scope === "user" ? "user" : "local");
   const res = spawnSync("claude", args, { cwd, encoding: "utf8" });
   if (res.error !== undefined && res.error !== null) return { ok: false, detail: res.error.message };
   if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };

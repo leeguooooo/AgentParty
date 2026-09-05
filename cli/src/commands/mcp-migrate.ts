@@ -60,7 +60,15 @@ export interface MigrateDeps {
   remove: (reg: McpRegistration) => { ok: boolean; detail: string };
   /** 必须加到 user / global scope——local/project 只对一个目录生效，别的项目会永久没有 party。 */
   addSingle: (harness: RegistrationHarness) => { ok: boolean; detail: string };
+  /** 回滚：把一条刚删掉的旧注册按原 scope / args / env 原样加回去。 */
+  addBack: (reg: McpRegistration) => { ok: boolean; detail: string };
   now: () => number;
+}
+
+/** 这条旧注册与单注册同名同 scope：加新会覆盖它（codex）或被它顶住（claude），删它会连新的一起删。 */
+export function collidesWithSingle(reg: McpRegistration, globalCodexHome: string): boolean {
+  if (reg.name !== SINGLE_NAME) return false;
+  return registrationHarness(reg) === "codex" ? reg.codexHome === globalCodexHome : reg.scope === "user";
 }
 
 export function isSingleRegistration(reg: McpRegistration): boolean {
@@ -122,6 +130,22 @@ export function defaultMigrateDeps(home: string = homedir()): MigrateDeps {
             encoding: "utf8",
             cwd: home,
           });
+      if (res.error) return { ok: false, detail: res.error.message };
+      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };
+      return { ok: true, detail: (res.stdout ?? "").trim() };
+    },
+    addBack: (reg) => {
+      const envArgs = Object.entries(reg.env).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
+      const res = registrationHarness(reg) === "codex"
+        ? spawnSync("codex", ["mcp", "add", reg.name, ...envArgs, "--", reg.command, ...reg.args], {
+            encoding: "utf8",
+            env: { ...process.env, CODEX_HOME: reg.codexHome ?? globalCodexHome },
+          })
+        : spawnSync(
+            "claude",
+            ["mcp", "add", "--scope", reg.scope === "user" ? "user" : "local", reg.name, ...envArgs, "--", reg.command, ...reg.args],
+            { encoding: "utf8", cwd: reg.scope === "user" ? home : reg.scope },
+          );
       if (res.error) return { ok: false, detail: res.error.message };
       if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };
       return { ok: true, detail: (res.stdout ?? "").trim() };
@@ -204,33 +228,90 @@ export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: 
     identitiesByChannel.set(key, (identitiesByChannel.get(key) ?? new Set()).add(item.configPath));
   }
 
-  // 1) 每个涉及的 harness：先把单条注册加到 user/global，读回确认
+  const manualAdd = (harness: RegistrationHarness): string =>
+    harness === "codex"
+      ? `      codex mcp add ${SINGLE_NAME} -- party mcp --all-channels`
+      : `      claude mcp add --scope user ${SINGLE_NAME} -- party mcp --all-channels`;
+
+  const recordDefaultFor = (item: LegacyRegistration): { ok: true } | { ok: false; detail: string } => {
+    const key = JSON.stringify([item.server, item.channel]);
+    if (identitiesByChannel.get(key)!.size > 1) return { ok: true }; // 多身份频道不设默认（下面统一提示）
+    try {
+      deps.recordDefault(item.server, item.channel, item.configPath);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
+  // 1) 每个涉及的 harness：把单条注册加到 user/global，读回确认。
+  //    同名同 scope 的旧注册（早期文档就教 `claude mcp add party -- party mcp --channel X`）要先删再加：
+  //    codex 的同名 add 会**覆盖**，随后按名字删旧就把新的一起删了（codex stop-time review on a998ba9）；
+  //    claude 的同名 add 会被顶住（"already exists" 且退出码 0）。加不上就把旧的原样加回，绝不留空档。
   const harnesses = new Set(plan.legacy.map((l) => l.harness));
   const covered = new Set<RegistrationHarness>();
+  const replaced = new Set<McpRegistration>();
   for (const harness of harnesses) {
     if (plan.alreadySingle.has(harness)) {
       covered.add(harness);
       continue;
     }
+    const collisions = plan.legacy.filter((l) => l.harness === harness && collidesWithSingle(l.reg, deps.globalCodexHome));
+    let collisionRemoved: LegacyRegistration | null = null;
+    if (collisions.length > 0) {
+      const c = collisions[0]!;
+      // 同名旧注册用的身份同样要记为默认；记不下来就不动它（否则这个频道从「能用」变「歧义」）。
+      const recorded = recordDefaultFor(c);
+      if (!recorded.ok) {
+        addFailed.push({ harness, detail: `同名旧注册 ${c.reg.name} 的默认身份记不下来（${recorded.detail}）` });
+        log(`  ✗ ${harness}：同名旧注册 ${c.reg.name} 的默认身份记不下来（${recorded.detail}）——该 harness 一条都不动`);
+        continue;
+      }
+      const removed = deps.remove(c.reg);
+      if (!removed.ok || stillRegistered(deps, c.reg)) {
+        const detail = removed.ok ? "命令返回 0，但读回注册表时它还在" : removed.detail;
+        addFailed.push({ harness, detail: `同名旧注册 ${c.reg.name} 删不掉（${detail}），无法腾出名字` });
+        log(`  ✗ ${harness}：同名旧注册 ${c.reg.name} 删不掉（${detail}）——该 harness 一条都不动`);
+        continue;
+      }
+      collisionRemoved = c;
+    }
     const res = deps.addSingle(harness);
     if (res.ok && hasMachineWideSingle(deps, harness)) {
       covered.add(harness);
       added.push(harness);
-      log(`  ✓ ${harness}：已在 user/global scope 加一条 \`party mcp --all-channels\`（读回确认）`);
-    } else {
-      const detail = res.ok ? "命令返回 0，但读回注册表时它不在 user/global scope" : res.detail;
-      addFailed.push({ harness, detail });
-      log(`  ✗ ${harness}：单条注册没加上（${detail}）——该 harness 的旧注册一条都不动。手工加：`);
-      log(harness === "codex"
-        ? `      codex mcp add ${SINGLE_NAME} -- party mcp --all-channels`
-        : `      claude mcp add --scope user ${SINGLE_NAME} -- party mcp --all-channels`);
+      if (collisionRemoved !== null) {
+        replaced.add(collisionRemoved.reg);
+        moved.push(collisionRemoved);
+        log(`  ✓ ${harness}：同名旧注册 ${SINGLE_NAME} 已换成 \`party mcp --all-channels\`（读回确认）`);
+      } else {
+        log(`  ✓ ${harness}：已在 user/global scope 加一条 \`party mcp --all-channels\`（读回确认）`);
+      }
+      continue;
     }
+    const detail = res.ok ? "命令返回 0，但读回注册表时它不在 user/global scope" : res.detail;
+    addFailed.push({ harness, detail });
+    if (collisionRemoved !== null) {
+      // 旧的已删、新的没加上：立刻把旧的原样加回，并读回确认。
+      const back = deps.addBack(collisionRemoved.reg);
+      const restored = back.ok && stillRegistered(deps, collisionRemoved.reg);
+      log(
+        restored
+          ? `  ✗ ${harness}：单条注册没加上（${detail}）；已把同名旧注册原样加回，一切照旧。手工加：`
+          : `  ✗ ${harness}：单条注册没加上（${detail}），且旧注册加回也失败（${back.detail}）——现在没有 party，请立刻手工加：`,
+      );
+    } else {
+      log(`  ✗ ${harness}：单条注册没加上（${detail}）——该 harness 的旧注册一条都不动。手工加：`);
+    }
+    log(manualAdd(harness));
   }
 
   // 2) 记默认 + 删旧（只对已覆盖的 harness），每条删完读回验证
   const warned = new Set<string>();
   for (const item of plan.legacy) {
     if (!covered.has(item.harness)) continue;
+    if (replaced.has(item.reg)) continue; // 同名旧注册已在上一步换掉，再按名字删就是删新的
+    if (collidesWithSingle(item.reg, deps.globalCodexHome)) continue; // 保险：任何情况下都不按单注册的名字删
     const key = JSON.stringify([item.server, item.channel]);
     const contenders = identitiesByChannel.get(key)!;
     if (contenders.size > 1) {
@@ -265,6 +346,18 @@ export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: 
   }
   for (const f of failed) {
     log(`  ! ${f.reg.name}：${f.step === "default" ? "记默认身份失败，未删" : "删除失败，仍保留"}（${f.detail}）`);
+  }
+  // 3) 收尾读回：删旧的过程中单注册若被 harness CLI 连带删掉（同名、scope 落空……），当场自愈。
+  for (const harness of covered) {
+    if (hasMachineWideSingle(deps, harness)) continue;
+    const res = deps.addSingle(harness);
+    if (res.ok && hasMachineWideSingle(deps, harness)) {
+      log(`  ! ${harness}：删旧注册时单条注册被连带删掉了，已重新加回（读回确认）`);
+    } else {
+      addFailed.push({ harness, detail: "删旧注册后单条注册消失，重加失败" });
+      log(`  ✗ ${harness}：删旧注册后单条注册消失，重加失败——现在没有 party，请立刻手工加：`);
+      log(manualAdd(harness));
+    }
   }
   return { code: addFailed.length > 0 ? 1 : 0, moved, failed, added, addFailed };
 }
