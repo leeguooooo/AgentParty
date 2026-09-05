@@ -21,7 +21,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { agentpartyHome } from "../config";
-import { codexMcpRemove, codexRegistryScopes, readCodexMcpRegistrations } from "../codex-mcp-registry";
+import { codexRegistryScopes, readCodexMcpRegistrations } from "../codex-mcp-registry";
+import { harnessMcpRemove } from "./mcp-prune";
 import { recordChannelDefault } from "../mcp-channel-identity";
 import {
   isPartyMcpRegistration,
@@ -51,16 +52,29 @@ export interface MigratePlan {
 
 export interface MigrateDeps {
   home: string;
+  /** codex 的全局注册表所在 home（CODEX_HOME 或 ~/.codex）。单条注册必须加在这里，项目级不算覆盖。 */
+  globalCodexHome: string;
   registrations: () => McpRegistration[];
   readServer: (configPath: string) => string | null;
   recordDefault: (server: string, channel: string, configPath: string) => void;
   remove: (reg: McpRegistration) => { ok: boolean; detail: string };
-  addSingle: (harness: RegistrationHarness, sample: McpRegistration) => { ok: boolean; detail: string };
+  /** 必须加到 user / global scope——local/project 只对一个目录生效，别的项目会永久没有 party。 */
+  addSingle: (harness: RegistrationHarness) => { ok: boolean; detail: string };
   now: () => number;
 }
 
 export function isSingleRegistration(reg: McpRegistration): boolean {
   return isPartyMcpRegistration(reg) && reg.args.includes("--all-channels");
+}
+
+/**
+ * 这条单注册是否覆盖整台机器。Claude Code 的 local/project scope 只对一个目录生效，codex 的项目级
+ * config.toml 同理——那样的 `--all-channels` 不能当作「已迁好」：其它项目的旧注册一删就永久失联
+ * （codex stop-time review on f5c7bfc 抓到的，owner 机器上实测 `party` 真落在了 local scope）。
+ */
+export function isMachineWideSingle(reg: McpRegistration, globalCodexHome: string): boolean {
+  if (!isSingleRegistration(reg)) return false;
+  return registrationHarness(reg) === "codex" ? reg.codexHome === globalCodexHome : reg.scope === "user";
 }
 
 function readServerFromConfig(configPath: string): string | null {
@@ -83,25 +97,31 @@ function readJson(path: string): unknown | undefined {
 
 /** 真机依赖：两边注册表都读，删/加都走 harness 自己的 CLI。 */
 export function defaultMigrateDeps(home: string = homedir()): MigrateDeps {
+  const scopes = codexRegistryScopes(process.env, process.cwd(), home);
+  const globalCodexHome = scopes.find((sc) => sc.kind === "global")?.codexHome ?? join(home, ".codex");
   return {
     home,
+    globalCodexHome,
     registrations: () => [
       ...parseClaudeMcpRegistrations(readJson(join(home, ".claude.json")) ?? null),
-      ...readCodexMcpRegistrations(codexRegistryScopes(process.env, process.cwd(), home)),
+      ...readCodexMcpRegistrations(scopes),
     ],
     readServer: readServerFromConfig,
     recordDefault: (server, channel, configPath) => recordChannelDefault(server, channel, configPath),
-    remove: (reg) => {
-      if (registrationHarness(reg) === "codex") return codexMcpRemove(reg);
-      const res = spawnSync("claude", ["mcp", "remove", reg.name], { encoding: "utf8" });
-      if (res.error) return { ok: false, detail: res.error.message };
-      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };
-      return { ok: true, detail: (res.stdout ?? "").trim() };
-    },
-    addSingle: (harness, sample) => {
-      const bin = harness === "codex" ? "codex" : "claude";
-      const env = harness === "codex" && sample.codexHome ? { ...process.env, CODEX_HOME: sample.codexHome } : process.env;
-      const res = spawnSync(bin, ["mcp", "add", SINGLE_NAME, "--", "party", "mcp", "--all-channels"], { encoding: "utf8", env });
+    // 删除复用 prune 的实现：它按注册所属 scope 切 cwd / 加 --scope user。不带 scope 的
+    // `claude mcp remove` 在别的目录里找不到那个名字**也返回 0**——上一版就是这样把 26 条
+    // 一条没删却全报了 ✓。
+    remove: harnessMcpRemove,
+    addSingle: (harness) => {
+      const res = harness === "codex"
+        ? spawnSync("codex", ["mcp", "add", SINGLE_NAME, "--", "party", "mcp", "--all-channels"], {
+            encoding: "utf8",
+            env: { ...process.env, CODEX_HOME: globalCodexHome },
+          })
+        : spawnSync("claude", ["mcp", "add", "--scope", "user", SINGLE_NAME, "--", "party", "mcp", "--all-channels"], {
+            encoding: "utf8",
+            cwd: home,
+          });
       if (res.error) return { ok: false, detail: res.error.message };
       if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };
       return { ok: true, detail: (res.stdout ?? "").trim() };
@@ -121,7 +141,8 @@ export function planMcpMigrate(deps: MigrateDeps): MigratePlan {
     if (!isPartyMcpRegistration(reg)) continue;
     const harness = registrationHarness(reg);
     if (isSingleRegistration(reg)) {
-      alreadySingle.add(harness);
+      if (isMachineWideSingle(reg, deps.globalCodexHome)) alreadySingle.add(harness);
+      else skipped.push({ reg, reason: "是 --all-channels 但只在 local/project scope，覆盖不了整台机器；会另加一条 user/global 的" });
       continue;
     }
     const channel = registrationChannel(reg);
@@ -154,24 +175,62 @@ export interface MigrateResult {
   addFailed: { harness: RegistrationHarness; detail: string }[];
 }
 
+function hasMachineWideSingle(deps: MigrateDeps, harness: RegistrationHarness): boolean {
+  return deps.registrations().some((r) => registrationHarness(r) === harness && isMachineWideSingle(r, deps.globalCodexHome));
+}
+
+function stillRegistered(deps: MigrateDeps, reg: McpRegistration): boolean {
+  return deps.registrations().some(
+    (r) => registrationHarness(r) === registrationHarness(reg) && r.scope === reg.scope && r.name === reg.name,
+  );
+}
+
 /**
- * 执行迁移。返回码非 0 只有一种情况：**有 harness 的新注册没加上**——那时用户可能处在
- * 「旧的删了、新的没加上」的空档，必须显眼。单条旧注册删失败不算（它只是多留一个进程）。
+ * 执行迁移。顺序是**先加后删**：单条注册加不上（或加上了但读回来不在 user/global scope）的
+ * harness，一条旧注册都不删——绝不让用户处在「旧的删了、新的没加上」的空档。返回码非 0 只有
+ * 这一种情况。每一步都读回注册表验证，不信 harness CLI 的退出码。
  */
 export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: string) => void): MigrateResult {
   const moved: LegacyRegistration[] = [];
   const failed: MigrateResult["failed"] = [];
-  const harnesses = new Set<RegistrationHarness>();
+  const added: RegistrationHarness[] = [];
+  const addFailed: MigrateResult["addFailed"] = [];
+
   // 同一 (server, channel) 有多条旧注册且指向**不同**身份时，不能默默挑一个当默认——老模型下这两个
-  // 身份本来就同时在跑（两个 MCP 进程、两套工具前缀），迁移后按调用解析会失败关闭并列出候选，
-  // 这是对的：让人选，而不是替人选。owner 那台机器上 #bug-7744 / #welcome 就是这种情况。
+  // 身份本来就同时在跑，迁移后按调用解析会失败关闭并列出候选：让人选，而不是替人选。
   const identitiesByChannel = new Map<string, Set<string>>();
   for (const item of plan.legacy) {
     const key = JSON.stringify([item.server, item.channel]);
     identitiesByChannel.set(key, (identitiesByChannel.get(key) ?? new Set()).add(item.configPath));
   }
+
+  // 1) 每个涉及的 harness：先把单条注册加到 user/global，读回确认
+  const harnesses = new Set(plan.legacy.map((l) => l.harness));
+  const covered = new Set<RegistrationHarness>();
+  for (const harness of harnesses) {
+    if (plan.alreadySingle.has(harness)) {
+      covered.add(harness);
+      continue;
+    }
+    const res = deps.addSingle(harness);
+    if (res.ok && hasMachineWideSingle(deps, harness)) {
+      covered.add(harness);
+      added.push(harness);
+      log(`  ✓ ${harness}：已在 user/global scope 加一条 \`party mcp --all-channels\`（读回确认）`);
+    } else {
+      const detail = res.ok ? "命令返回 0，但读回注册表时它不在 user/global scope" : res.detail;
+      addFailed.push({ harness, detail });
+      log(`  ✗ ${harness}：单条注册没加上（${detail}）——该 harness 的旧注册一条都不动。手工加：`);
+      log(harness === "codex"
+        ? `      codex mcp add ${SINGLE_NAME} -- party mcp --all-channels`
+        : `      claude mcp add --scope user ${SINGLE_NAME} -- party mcp --all-channels`);
+    }
+  }
+
+  // 2) 记默认 + 删旧（只对已覆盖的 harness），每条删完读回验证
   const warned = new Set<string>();
   for (const item of plan.legacy) {
+    if (!covered.has(item.harness)) continue;
     const key = JSON.stringify([item.server, item.channel]);
     const contenders = identitiesByChannel.get(key)!;
     if (contenders.size > 1) {
@@ -180,46 +239,32 @@ export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: 
         log(`  ! #${item.channel} 有 ${contenders.size} 份不同身份的旧注册，不设默认；迁移后调用时传 identity，或用 party join 重新绑定其中一个`);
       }
     } else {
-      // 1) 先记默认——记不下来就不删，否则迁完这个频道会从「能用」变成「歧义」。
       try {
         deps.recordDefault(item.server, item.channel, item.configPath);
       } catch (e) {
         failed.push({ reg: item.reg, step: "default", detail: e instanceof Error ? e.message : String(e) });
-        continue;
+        continue; // 记不下来就不删，否则这个频道从「能用」变「歧义」
       }
     }
-    // 2) 删旧
     const removed = deps.remove(item.reg);
     if (!removed.ok) {
       failed.push({ reg: item.reg, step: "remove", detail: removed.detail });
       continue;
     }
+    if (stillRegistered(deps, item.reg)) {
+      // harness CLI 返回 0 但注册还在：不带 scope 的 remove 在别的目录里就是这样。
+      failed.push({ reg: item.reg, step: "remove", detail: "命令返回 0，但读回注册表时它还在（scope 没对上？）" });
+      continue;
+    }
     moved.push(item);
-    harnesses.add(item.harness);
     log(
       contenders.size > 1
         ? `  ✓ #${item.channel} 的注册 ${item.reg.name} 已收进单条注册（未设默认）`
         : `  ✓ #${item.channel} 的注册 ${item.reg.name} 已收进单条注册（默认身份：${item.configPath}）`,
     );
   }
-  // 3) 每个涉及的 harness 补一条 --all-channels（已有就不加）
-  const added: RegistrationHarness[] = [];
-  const addFailed: MigrateResult["addFailed"] = [];
-  for (const harness of harnesses) {
-    if (plan.alreadySingle.has(harness)) continue;
-    const sample = plan.legacy.find((l) => l.harness === harness)!.reg;
-    const res = deps.addSingle(harness, sample);
-    if (res.ok) {
-      added.push(harness);
-      log(`  ✓ ${harness}：已加一条 \`party mcp --all-channels\``);
-    } else {
-      addFailed.push({ harness, detail: res.detail });
-      log(`  ✗ ${harness}：新注册没加上（${res.detail}）——旧注册已删，请立刻手工加：`);
-      log(`      ${harness} mcp add ${SINGLE_NAME} -- party mcp --all-channels`);
-    }
-  }
   for (const f of failed) {
-    log(`  ! ${f.reg.name}：${f.step === "default" ? "记默认身份失败，未删" : "删除失败"}（${f.detail}）`);
+    log(`  ! ${f.reg.name}：${f.step === "default" ? "记默认身份失败，未删" : "删除失败，仍保留"}（${f.detail}）`);
   }
   return { code: addFailed.length > 0 ? 1 : 0, moved, failed, added, addFailed };
 }
