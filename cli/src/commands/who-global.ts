@@ -234,6 +234,62 @@ export function renderGlobalRow(
   return `${REACH_MARK[row.reach]} ${sanitize(display)}${owner}  ${row.kind}${paused}  ${where}${age}${noMention}${aka}`;
 }
 
+/** 离线行保留多久：与频道内名单「历史会话不上榜」（#1069）同一口径——一周没露面就折叠。 */
+export const OFFLINE_FOLD_MS = 7 * 86_400_000;
+
+export interface GlobalWhoSummary {
+  /** 逐行打印的那些（在线 / 可唤醒 / 最近 / 一周内离线）。 */
+  shown: GlobalWhoRow[];
+  /** 被折进一行的陈旧离线行数。 */
+  folded: number;
+  /** 表头：按档位报计数，**不**说「reachable」——除非真有人在线或可唤醒。 */
+  header: string;
+  /** 折叠行；没折叠就是 undefined。 */
+  foldLine: string | undefined;
+  /** 图例：只在至少一行用到了记号时给。 */
+  legend: string | undefined;
+}
+
+/**
+ * 全局 who 的文本呈现（不含逐行渲染）。
+ *
+ * 此前表头恒写「reachable across N channel(s)」，而列表里可以一个在线的都没有：owner 那台机器
+ * 实测 7 行全是 offline（最老 60 天），全靠一个没有图例的 `·` 区分——系统自信地讲了一件错事。
+ * 表头改成按档位报数；一周以上没露面的离线行折成一行计数（频道内名单同一口径）；记号给图例。
+ */
+export function summarizeGlobalWho(rows: GlobalWhoRow[], channelCount: number, now: number): GlobalWhoSummary {
+  const counts: Record<GlobalReach, number> = { online: 0, wakeable: 0, recent: 0, offline: 0 };
+  for (const row of rows) counts[row.reach] += 1;
+  const stale = (row: GlobalWhoRow): boolean =>
+    row.reach === "offline" && row.last_seen !== undefined && now - row.last_seen > OFFLINE_FOLD_MS;
+  const shown = rows.filter((row) => !stale(row));
+  const foldedRows = rows.filter(stale);
+  const reachable = counts.online + counts.wakeable;
+  const parts = (Object.keys(counts) as GlobalReach[])
+    .filter((tier) => counts[tier] > 0)
+    .map((tier) => `${counts[tier]} ${tier}`);
+  const header = reachable > 0
+    ? `${reachable} reachable across ${channelCount} channel(s) (${parts.join(" · ")}) — pass a channel for wake diagnostics:`
+    : `no one reachable right now across ${channelCount} channel(s) (${parts.join(" · ")}) — pass a channel for wake diagnostics:`;
+  let foldLine: string | undefined;
+  if (foldedRows.length > 0) {
+    const ages = foldedRows.map((row) => now - (row.last_seen ?? now));
+    const newest = fmtAge(Math.min(...ages));
+    const oldest = fmtAge(Math.max(...ages));
+    foldLine =
+      `  · ${foldedRows.length} more offline for over a week (last seen ${newest} – ${oldest}) — ` +
+      `party who <channel> lists them`;
+  }
+  const marks = new Set(shown.map((row) => REACH_MARK[row.reach]));
+  const legend = shown.length === 0
+    ? undefined
+    : "  " + (["online", "wakeable", "recent", "offline"] as GlobalReach[])
+        .filter((tier) => marks.has(REACH_MARK[tier]))
+        .map((tier) => `${REACH_MARK[tier]} ${tier}`)
+        .join("  ");
+  return { shown, folded: foldedRows.length, header, foldLine, legend };
+}
+
 function fmtAge(ms: number): string {
   if (ms < 60_000) return "just now";
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;

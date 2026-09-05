@@ -3,7 +3,7 @@
 import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type RuntimePeerDiscovery, type SenderKind, type TaskLeaseScope, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { listChannels } from "../rest";
-import { activeChannelSlugs, buildGlobalWho, globalWhoDisplay, renderGlobalRow } from "./who-global";
+import { activeChannelSlugs, buildGlobalWho, globalWhoDisplay, renderGlobalRow, summarizeGlobalWho } from "./who-global";
 import { resolveChannel } from "../config";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis, shouldSurfaceCodexWakeDiagnosis } from "../wake-diagnosis";
 import { claudeDormantToSurface, diagnoseClaudeDormantSessions, formatClaudeDormantDiagnosis } from "../claude-armed-listener";
@@ -1029,13 +1029,17 @@ async function runGlobalWho(cfg: { server: string; token: string; name?: string 
     }
     return 0;
   }
-  console.log(`reachable across ${snapshots.length} channel(s) — pass a channel for wake diagnostics:`);
-  for (const row of rows) {
+  // 表头按档位报数、陈旧离线折一行、记号给图例——不再对着一屏离线的人说「reachable」。
+  const summary = summarizeGlobalWho(rows, snapshots.length, now);
+  console.log(summary.header);
+  for (const row of summary.shown) {
     const entry = snapshots
       .flatMap((snapshot) => snapshot.presence)
       .find((candidate) => candidate.name === row.name);
     console.log("  " + renderGlobalRow(row, entry === undefined ? row.name : globalWhoDisplay(entry), now, terminalIdentityText));
   }
+  if (summary.foldLine !== undefined) console.log(summary.foldLine);
+  if (summary.legend !== undefined) console.log(summary.legend);
   if (failed.length > 0) {
     console.log(`\ncould not read presence for: ${failed.join(", ")} — this list is incomplete`);
     return 1;
