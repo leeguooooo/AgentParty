@@ -78,6 +78,7 @@ import { resolveClaudeDefaultArgs, type ClaudeDefaultArgsResolution } from "../c
 import { claudeLaunchPlan } from "./claude-launch";
 import { STEP_INDENT, runSteps, type Step, type StepResult } from "../onboarding/steps";
 import { processStyle, styleFor, type Style } from "../onboarding/color";
+import { recordChannelDefault } from "../mcp-channel-identity";
 import { verifyWakeRoundTrip, type VerifyWakeDeps } from "../onboarding/verify-wake";
 import { normalizeWakeLang, resolveWakeLang, type WakeLang } from "../wake-note-i18n";
 import { findHarnessAncestor } from "../join-binding";
@@ -926,6 +927,15 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
         };
       }
       ctx.identity = identity;
+      // #1083：把这份身份记为该频道在本机的默认。`party mcp --all-channels` 按频道解析身份时，
+      // 多份身份 + 没登记默认 ⇒ 失败关闭；join 是唯一知道「你刚绑的就是这个」的地方。
+      // 登记失败不阻断接入（只是少一条默认），但要说出来。
+      try {
+        recordChannelDefault(cfg.server, slug, configPath);
+        detail.push(outcomeLine("记为本机默认身份", { level: "ok", msg: `#${slug} 上的 MCP 调用缺省用 ${identity}` }));
+      } catch (e) {
+        detail.push(outcomeLine("记为本机默认身份", { level: "warn", msg: `写登记表失败：${e instanceof Error ? e.message : String(e)}` }));
+      }
       // 注册 MCP（先探后加，#898）。claude/codex 各走各的；other（探不出）两条都试——「不知道就都覆盖」。
       if (harness === "claude" || harness === "other") detail.push(outcomeLine("注册 claude MCP", registerClaudeMcp(deps, mcpName, configPath, slug)));
       if (harness === "codex" || harness === "other") {
