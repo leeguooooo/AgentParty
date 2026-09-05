@@ -239,7 +239,7 @@ export function inspectAgentPartyPluginInstall(
   const expectedMcp = {
     agentparty: {
       command: "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime",
-      args: ["mcp"],
+      args: ["mcp", "--all-channels"],
     },
     "agentparty-channel": {
       command: "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime",
