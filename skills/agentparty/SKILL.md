@@ -105,6 +105,9 @@ If your harness can use MCP tools, prefer the local stdio server after configura
 # The name probe below only catches a same-named registration — a new identity name always
 # slips through, which is how one channel silently accumulated 14 identities (#907).
 party mcp identities --channel <slug> --server <server> --exclude <agent-name> || true
+# Machines with the AgentParty plugin (claude / codex) need NO registration: the plugin's own
+# `agentparty` MCP is already `party mcp --all-channels` (#1089). The lines below are for
+# machines without the plugin.
 # ONE registration serves every channel on this machine (#1083). Probe first — each
 # registration is one resident process in every session (#898); never add per channel.
 claude mcp get party >/dev/null 2>&1 \

@@ -55,13 +55,15 @@ interface Knobs extends Partial<MigrateDeps> {
   addLands?: "global" | "project" | "none";
   /** remove 返回 ok 但实际不删（模拟 scope 没对上的 `claude mcp remove`）。 */
   removeLies?: boolean;
+  /** #1089：插件已自带 --all-channels 的 harness。 */
+  pluginCoversHarnesses?: RegistrationHarness[];
 }
 
 function deps(initial: McpRegistration[], knobs: Knobs = {}): { deps: MigrateDeps; trace: Trace; registry: McpRegistration[] } {
   const registry = [...initial];
   const trace: Trace = { defaults: [], removed: [], added: [], order: [] };
   const servers = knobs.servers ?? {};
-  const { servers: _s, addLands, removeLies, ...over } = knobs;
+  const { servers: _s, addLands, removeLies, pluginCoversHarnesses, ...over } = knobs;
   const d: MigrateDeps = {
     home: "/home",
     globalCodexHome: GLOBAL_CODEX,
@@ -97,6 +99,7 @@ function deps(initial: McpRegistration[], knobs: Knobs = {}): { deps: MigrateDep
       registry.push(r);
       return { ok: true, detail: "" };
     },
+    pluginCovers: (h) => (pluginCoversHarnesses ?? []).includes(h),
     now: () => NOW,
     ...over,
   };
@@ -457,3 +460,44 @@ describe("同名的非 AgentParty MCP 注册：不动它", () => {
     expect(trace.added).toEqual([]);
   });
 });
+
+// #1089：AgentParty 插件自带的 MCP 改成 --all-channels 之后，它就是一条覆盖整台机器的单注册。
+// 装了插件的用户：join 不该再加 `party`；迁移只删旧注册不加新的；已有的 `party` 是多余进程，收掉。
+describe("插件已自带 --all-channels", () => {
+  test("ensureMachineWideSingle ⇒ present，不加任何注册", async () => {
+    const { ensureMachineWideSingle } = await import("../src/commands/mcp-migrate");
+    const { deps: d, trace } = deps([], { pluginCoversHarnesses: ["claude", "codex"] });
+    expect(ensureMachineWideSingle("claude", d)).toMatchObject({ ok: true, action: "present" });
+    expect(trace.added).toEqual([]);
+  });
+
+  test("迁移旧注册：只删旧、不加 party（插件已覆盖）", () => {
+    const { deps: d, trace, registry } = deps([reg({ name: "party-a" })], { pluginCoversHarnesses: ["codex"] });
+    const r = runMcpMigrate(planMcpMigrate(d), d, () => undefined);
+    expect(r.code).toBe(0);
+    expect(trace.added).toEqual([]);
+    expect(trace.removed).toEqual(["party-a"]);
+    expect(registry).toEqual([]);
+  });
+
+  test("已有的 party 单注册在插件覆盖后是多余的 ⇒ 收掉并读回", () => {
+    const { deps: d, trace, registry } = deps([single("claude"), single("codex")], { pluginCoversHarnesses: ["claude"] });
+    const plan = planMcpMigrate(d);
+    expect(plan.redundant.map((r) => r.harness)).toEqual(["claude"]); // codex 没插件覆盖，留着
+    const lines: string[] = [];
+    const r = runMcpMigrate(plan, d, (l) => lines.push(l));
+    expect(r.code).toBe(0);
+    expect(trace.removed).toEqual(["party"]);
+    expect(registry.map((x) => x.harness)).toEqual(["codex"]);
+    expect(lines.join("\n")).toContain("多余的单注册 party 已收掉");
+  });
+
+  test("插件覆盖 + 没有多余单注册 ⇒ 自动迁移什么都不做", () => {
+    const h = mkdtempSync(join(tmpdir(), "ap-migrate-"));
+    const { deps: d, trace } = deps([], { pluginCoversHarnesses: ["claude", "codex"] });
+    expect(maybeAutoMigrate("who", { deps: d, agentpartyHome: h }).ran).toBe(false);
+    expect(trace.removed).toEqual([]);
+    rmSync(h, { recursive: true, force: true });
+  });
+});
+
