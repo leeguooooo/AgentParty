@@ -26,6 +26,8 @@ import {
 import { jsonFrame } from "../json";
 import { applyMcpProcessTitle, parseMcpServerArgv } from "../mcp-registry";
 import { watchParentLiveness } from "../parent-liveness";
+import { resolveChannelIdentity } from "../mcp-channel-identity";
+import { withMcpIdentity } from "../mcp-identity-context";
 import { reportWakeSelfCheck } from "../wake-reachability";
 import { resolveAuth, resolveAuthDetailed } from "../oidc-cli";
 import { inspectMcpSessionBinding, mcpSessionBindingDenial } from "../mcp-session-binding";
@@ -67,7 +69,7 @@ import { acquireTaskLeaseAcrossMachines, releaseTaskLeaseAcrossMachines } from "
 import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
 import { settleClaudeDeliveryRecovery } from "../delivery-recovery-journal";
 
-const HELP = `usage: party mcp [--channel <slug>] [--identity <label>]
+const HELP = `usage: party mcp [--channel <slug> | --all-channels] [--identity <label>]
        party mcp prune [--yes] [--check-remote] [--json]
        party mcp identities [--channel C] [--server S] [--keep NAME] [--yes] [--json]
 
@@ -75,6 +77,11 @@ Run an AgentParty stdio MCP server.
 
 Options:
   --channel <slug>   default channel for tools that take an optional channel
+  --all-channels     one registration for every channel on this machine (#1083):
+                     tools take channel (required) / identity / server, and the
+                     identity is resolved per call from ~/.agentparty/agents.
+                     Ambiguous channels (several identities, no recorded default)
+                     are refused with the candidates listed — never guessed.
   --identity <label> cosmetic label carried in argv so 'ps -axww' shows whose
                      server this process is (#898). It never affects which
                      identity is used — that always comes from AGENTPARTY_CONFIG.
@@ -455,11 +462,95 @@ function charterText(data: Record<string, unknown>): string {
   return decisions.length === 0 ? base : `${base}\n\n${decisions.join("\n")}`;
 }
 
-export function createMcpServer(defaultChannel?: string): McpServer {
+
+/**
+ * 把每个工具的 handler 包进「按本次调用的 channel 解析出的身份」上下文里（#1083 聚合档）。
+ *
+ * 解析不出来（本机没这个频道 / 多份身份且没登记默认）时**直接把原因回给调用方**，不往下跑：
+ * 让它带着错身份或空身份去调用，只会变成一条以别人名义发出的消息或一句无法诊断的 401。
+ */
+function wrapToolsWithPerCallIdentity(server: McpServer, defaultChannel: string | undefined): void {
+  // 资源（party://charter、party://{channel}/charter）不走 registerTool，得单独包：否则聚合档下
+  // 读 charter 会在没有任何身份的进程里发请求，拿到一句无法诊断的 401。频道取自模板变量，
+  // 模板没给（具体的 party://charter）就用启动时绑定的那个。
+  const originalResource = server.registerResource.bind(server);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server as any).registerResource = (name: string, uriOrTemplate: unknown, meta: unknown, cb: (...a: any[]) => any) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    originalResource(name as any, uriOrTemplate as any, meta as any, (async (uri: any, variables: any, ...rest: any[]) => {
+      const rawVar = variables?.channel;
+      const fromTemplate = Array.isArray(rawVar) ? rawVar[0] : rawVar;
+      const channel = typeof fromTemplate === "string" && fromTemplate !== "" ? fromTemplate : defaultChannel;
+      if (channel === undefined || channel === "") {
+        throw new Error("这条 MCP 服务本机所有频道，请读 party://<channel>/charter 指明是哪一个");
+      }
+      const resolved = resolveChannelIdentity({ channel });
+      if (!resolved.ok) throw new Error(resolved.message);
+      return withMcpIdentity(resolved.config.path, () => cb(uri, variables, ...rest));
+    }) as any);
+
+  const original = server.registerTool.bind(server);
+  // 用 any 是因为 registerTool 的重载签名带一长串泛型，这里只做透传包装，不改变任何一个参数。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server as any).registerTool = (name: string, spec: unknown, handler: (...args: any[]) => any) => {
+    // 聚合档下 channel / identity 必须出现在**每个**工具的 inputSchema 里：MCP SDK 会按 schema
+    // 校验入参，没声明的字段会被直接丢掉——handler 再怎么读也读不到（party_whoami 的 schema
+    // 本来是空的，实测就是这么丢的）。已经声明过 channel 的工具保持原样，不覆盖它的描述与校验。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const input = (spec as any)?.inputSchema;
+    const extra = {
+      channel: z.string().describe("channel slug — 这条 MCP 服务本机所有频道，必须指明是哪一个"),
+      identity: z.string().optional().describe("同一频道在本机有多份身份时，指定用哪一个（party who --all 可查）"),
+      server: z.string().optional().describe("同名频道分属多个实例时，用实例 URL 限定（party who --all 可查）"),
+    };
+    if (input !== null && typeof input === "object") {
+      if (typeof input.extend === "function" && input.shape !== undefined) {
+        // ZodObject（party_task_create 用的是 .strict()）：往实例上赋属性是空操作，strict 还会把
+        // 没声明的 identity/server 直接拒掉。必须走 .extend()；已声明的字段保留原描述与校验。
+        const present = input.shape as Record<string, unknown>;
+        const missing = Object.fromEntries(Object.entries(extra).filter(([k]) => present[k] === undefined));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (spec as any).inputSchema = Object.keys(missing).length === 0 ? input : input.extend(missing);
+      } else {
+        // 裸 shape（大多数工具）：直接补键。
+        for (const [k, v] of Object.entries(extra)) if (input[k] === undefined) input[k] = v;
+      }
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return original(name as any, spec as any, (async (args: any, extra: any) => {
+      const channel = typeof args?.channel === "string" && args.channel !== "" ? args.channel : defaultChannel;
+      if (channel === undefined || channel === "") {
+        // 聚合档下频道不是可省的：省了就没有身份，没有身份就没有「我是谁」。
+        return fail(
+          `这条 MCP 服务本机所有频道，请在参数里给出 channel（工具 ${name}）。` +
+            `本机有哪些频道：party who --all`,
+        );
+      }
+      const resolved = resolveChannelIdentity({
+        channel,
+        identity: typeof args?.identity === "string" && args.identity !== "" ? args.identity : undefined,
+        server: typeof args?.server === "string" && args.server !== "" ? args.server : undefined,
+      });
+      if (!resolved.ok) return fail(resolved.message);
+      return withMcpIdentity(resolved.config.path, () => handler(args, extra));
+    }) as any);
+  };
+}
+
+export function createMcpServer(defaultChannel?: string, aggregateChannels: boolean = false): McpServer {
   const server = new McpServer({
     name: "agentparty",
     version: pkg.version,
   });
+
+  // #1083 聚合档：一条注册服务本机所有频道，身份按每次调用的 channel 解析。包住 registerTool
+  // 这一处即可——所有工具都从这里进来，22 个 auth() 调用点一处都不用改（它们都走
+  // explicitConfigPath 这个瓶颈）。
+  //
+  // **必须显式开启**（--all-channels）。曾经想用「没设 AGENTPARTY_CONFIG 就算聚合」来自动判定，
+  // 那是错的：很多现存装法本来就不设这个 env（靠 cwd 绑定或全局 config），自动判定会让他们
+  // 突然被要求每次调用都传 channel——一次静默的破坏性变更。默认档行为一字不变。
+  if (aggregateChannels) wrapToolsWithPerCallIdentity(server, defaultChannel);
 
   // 启动时解析一次「我在哪个频道」——flag 优先，否则吃 cwd 绑定（party init --channel）。
   // 工具、concrete resource、whoami 提示三者共用这一个答案，不能各认各的。
@@ -1827,7 +1918,7 @@ export async function run(argv: string[]): Promise<number> {
     agentName: parsed.identity,
     configPath: process.env.AGENTPARTY_CONFIG ?? null,
   });
-  const server = createMcpServer(defaultChannel);
+  const server = createMcpServer(defaultChannel, parsed.allChannels);
   await server.connect(new StdioServerTransport());
   // #926：会话启动时自检一次「这台机器上这个身份叫不醒吗」，把结论挂到 presence 上。
   // MCP 不受 codex hook 信任闸管辖（owner 那台实测：26 条 hook 全 disabled，8 个 party mcp 照跑），

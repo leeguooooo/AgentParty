@@ -17,6 +17,7 @@
 // 两条都成立时，这条 @ 会在该身份下次在**本机**跑 codex 时被它自己取走。别的机器有没有装、
 // 用户还会不会再开那个会话，本机一概不知道——所以措辞只说「本机可拉取」，绝不说「可达」。
 import { readFileSync } from "node:fs";
+import { listSessions } from "./claude-session-registry";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { localAgentConfigsForChannel } from "./config";
@@ -46,8 +47,12 @@ export interface PullWakeHint {
    * `missing` 不会走到这里——那时压根不产生 hint。
    */
   hook: Exclude<CodexStopHookStatus, "missing">;
-  /** 判据清单，便于调用方解释「凭什么这么说」。 */
-  evidence: ["codex_stop_hook", "local_agent_config"];
+  /**
+   * 判据清单，便于调用方解释「凭什么这么说」。三条缺一不可：装了 hook、本机有这份身份的
+   * config、**而且本机现在有一个用该身份的活会话**（#1083）。第三条是后补的——前两条都为真
+   * 但会话早就关了的情况，此前会一直宣称可达。
+   */
+  evidence: ["codex_stop_hook", "local_agent_config", "live_codex_session"];
 }
 
 /** 这条拉取通道当下真的会取走 @ 吗。false ⇒ 装了但 codex 不会执行它。 */
@@ -104,6 +109,24 @@ export function locallyConfiguredNames(channel: string, server: string): Set<str
   return names;
 }
 
+/**
+ * 本机**活着**的 codex 会话在该频道用的身份名（#1083）。
+ *
+ * listSessions 已按 pid 过滤死条目；这里再比 channel 与 server。没有记下 identity 的老条目
+ * （#906 之前入册的）一律不计入——**读不到就当没有**：少给一条提示只是少一句话，
+ * 错标一个「可拉取」会让发送方安心去等一个永远不会来的回复。
+ */
+export function liveCodexSessionNames(channel: string, server: string): Set<string> {
+  const names = new Set<string>();
+  for (const entry of listSessions("codex")) {
+    if (entry.channel !== channel) continue;
+    // server 记不下来的条目同样跳过：#865 的同名频道在两台实例上是两回事。
+    if (entry.server !== server) continue;
+    if (typeof entry.identity === "string" && entry.identity !== "") names.add(entry.identity);
+  }
+  return names;
+}
+
 export interface PullWakeLookup {
   /** 该身份在本机是否有拉取式唤醒通道。 */
   hintFor: (name: string) => PullWakeHint | undefined;
@@ -121,6 +144,13 @@ export function buildPullWakeLookup(
     /** hook 会不会被 codex 执行（#926）。缺省走 #925 的四态判定；`missing` 视同没装。 */
     hookStatus?: () => CodexStopHookStatus;
     names?: (channel: string, server: string) => Set<string>;
+    /**
+     * #1083：本机**当前活着**的会话身份。前两道闸只证明「装了 hook」和「本机有这份 config」，
+     * 而 config 文件从不删除——于是一个几天前就关掉的会话，会一直对全频道宣称
+     * 「@ 我，这台机器上的 codex 会通过 Stop hook 接」。实测名单里有 3~11 天前关掉的会话仍在这么说。
+     * Stop hook 只在**有会话在跑**时才会触发，所以「有活会话」才是这个承诺的真正前提。
+     */
+    liveNames?: (channel: string, server: string) => Set<string>;
   } = {},
 ): PullWakeLookup {
   // hasHook 是「文件里有没有」，hookStatus 是「会不会跑」——两件事，两道闸，缺一不可。
@@ -131,10 +161,16 @@ export function buildPullWakeLookup(
   // missing：文件里有指纹但四态判定说没有（例如 hooks.json 刚被改坏）——以「不会跑」为准，闭嘴。
   if (status === "missing") return { hintFor: () => undefined };
   const names = (deps.names ?? locallyConfiguredNames)(channel, server);
+  const live = (deps.liveNames ?? liveCodexSessionNames)(channel, server);
   return {
     hintFor: (name: string) =>
-      names.has(name)
-        ? { scope: "local", harness: "codex", hook: status, evidence: ["codex_stop_hook", "local_agent_config"] }
+      names.has(name) && live.has(name)
+        ? {
+            scope: "local",
+            harness: "codex",
+            hook: status,
+            evidence: ["codex_stop_hook", "local_agent_config", "live_codex_session"],
+          }
         : undefined,
   };
 }

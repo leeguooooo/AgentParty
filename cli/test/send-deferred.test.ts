@@ -24,7 +24,13 @@ function stale(over: Partial<PresenceEntry> & { name: string }): PresenceEntry {
 }
 
 const lookup = (names: string[], hook: "ok" | "disabled" = "ok") =>
-  buildPullWakeLookup(CH, "https://s", { hasHook: () => true, hookStatus: () => hook, names: () => new Set(names) });
+  buildPullWakeLookup(CH, "https://s", {
+    hasHook: () => true,
+    hookStatus: () => hook,
+    names: () => new Set(names),
+    // #1083：不注入就会去读这台机器真实的会话注册表，测试随机器状态摇摆。
+    liveNames: () => new Set(names),
+  });
 
 function report(presence: PresenceEntry[], sentSeq: number, pullWake = lookup(["codex1"])) {
   return reachReport({ mentions: ["codex1"], presence, now: NOW, channel: CH, sentSeq, wantLine: false, wantWarn: true, pullWake });

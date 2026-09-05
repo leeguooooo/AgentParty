@@ -339,24 +339,27 @@ describe("party mcp 的 argv 解析（--identity，#898）", () => {
     expect(parseMcpServerArgv(["--channel", "dev", "--identity", "party-bot"])).toEqual({
       channel: "dev",
       identity: "party-bot",
+      allChannels: false,
       error: null,
     });
     expect(parseMcpServerArgv(["--identity", "party-bot", "--channel", "dev"])).toEqual({
       channel: "dev",
       identity: "party-bot",
+      allChannels: false,
       error: null,
     });
   });
 
   test("两者都缺席（真机常态：裸 `party mcp`）仍然合法", () => {
-    expect(parseMcpServerArgv([])).toEqual({ channel: null, identity: null, error: null });
+    expect(parseMcpServerArgv([])).toEqual({ channel: null, identity: null, allChannels: false, error: null });
   });
 
   test("只给其中一个也合法（旧注册只有 --channel，绝不能被新解析器拒掉）", () => {
-    expect(parseMcpServerArgv(["--channel", "dev"])).toEqual({ channel: "dev", identity: null, error: null });
+    expect(parseMcpServerArgv(["--channel", "dev"])).toEqual({ channel: "dev", identity: null, allChannels: false, error: null });
     expect(parseMcpServerArgv(["--identity", "party-bot"])).toEqual({
       channel: null,
       identity: "party-bot",
+      allChannels: false,
       error: null,
     });
   });
@@ -370,8 +373,13 @@ describe("party mcp 的 argv 解析（--identity，#898）", () => {
     expect(parseMcpServerArgv(["dev"]).error).toContain("usage: party mcp");
   });
 
-  test("标签只影响展示：解析结果里没有任何可以改写身份来源的字段", () => {
+  test("标签只影响展示：argv 里没有任何字段能**指名**一个身份", () => {
     const parsed = parseMcpServerArgv(["--identity", "party-someone-else"]);
-    expect(Object.keys(parsed).sort()).toEqual(["channel", "error", "identity"]);
+    // #1083 加了 allChannels。它切换的是「身份怎么解析」（按每次调用的 channel 去盘上找），
+    // 而不是「身份是谁」——argv 依然指名不了任何身份，--identity 依然纯展示。守的是同一条线：
+    // 谁都别想靠改注册命令行冒充别人。
+    expect(Object.keys(parsed).sort()).toEqual(["allChannels", "channel", "error", "identity"]);
+    expect(parsed.identity).toBe("party-someone-else");
+    expect(parsed.allChannels).toBe(false);
   });
 });
