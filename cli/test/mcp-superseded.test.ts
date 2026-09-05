@@ -61,6 +61,13 @@ describe("findYoungerTwin —— 只认同宿主 + 同命令行 + 更年轻", ()
     expect(findYoungerTwin(100, rows)).toBeNull();
   });
 
+  // CodeRabbit on #1092：etime 只有秒级，重载时一批 server 常在同一秒内起来，只比年龄会互相判不出。
+  test("同秒起的兄弟按 pid 定序：pid 大的算更年轻，小的退", () => {
+    const rows = [row(100, 1, 30, "party mcp --all-channels"), row(101, 1, 30, "party mcp --all-channels")];
+    expect(findYoungerTwin(100, rows)?.pid).toBe(101);
+    expect(findYoungerTwin(101, rows)).toBeNull();
+  });
+
   test("自己那行不在表里 ⇒ undefined（判不出，绝不误退）", () => {
     expect(findYoungerTwin(100, [row(101, 1, 30, "party mcp --all-channels")])).toBeUndefined();
   });
