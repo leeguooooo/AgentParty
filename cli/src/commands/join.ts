@@ -305,49 +305,53 @@ function rulesFileName(agentName: string, slug: string): string {
   return `agentparty-${agentName}-${slug}.rules.md`;
 }
 
-/** claude MCP 注册：先探（claude mcp get）后加（claude mcp add）。探不到二进制 → skip 并说明。 */
-function registerClaudeMcp(deps: JoinDeps, name: string, configPath: string, slug: string): StepOutcome {
-  const addCmd =
-    `claude mcp add ${name} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${slug} --identity ${name}`;
-  const probe = deps.spawn("claude", ["mcp", "get", name], { encoding: "utf8", timeout: 30_000 });
+// #1083：join 不再每个频道各注册一条 MCP。那正是「进程数 = 频道数 × 会话数、注册只进不出」的
+// 源头——迁移只能清存量，增量必须在这里堵住。现在 join 只做一件事：确保本机有**一条**
+// `party mcp --all-channels`（Claude 加在 user scope、codex 加在全局 config），已有就跳过。
+// 频道由每次工具调用传入，身份按频道解析（本频道的默认身份在上一步已登记）。
+const SINGLE_MCP_NAME = "party";
+
+/** claude MCP 注册：先探（claude mcp get party）后加（--scope user，覆盖整台机器）。探不到二进制 → skip 并说明。 */
+function registerClaudeMcp(deps: JoinDeps): StepOutcome {
+  const addCmd = `claude mcp add --scope user ${SINGLE_MCP_NAME} -- party mcp --all-channels`;
+  const probe = deps.spawn("claude", ["mcp", "get", SINGLE_MCP_NAME], { encoding: "utf8", timeout: 30_000 });
   if (probe.error !== undefined) {
     return { level: "skip", msg: `claude 二进制不可用，跳过 MCP 注册。装好 claude 后手动：${addCmd}` };
   }
-  // 已注册就跳过——每条注册在每个会话里都是一个常驻进程（#898）。幂等。
+  // 已有就跳过——一条注册服务所有频道，多余的用 party mcp prune / migrate 清。幂等。
   if (probe.status === 0) {
-    return { level: "ok", msg: `MCP 已注册（跳过重复添加）：${name}（多余的用 party mcp prune 清）` };
+    return { level: "ok", msg: `MCP 已注册（跳过重复添加）：${SINGLE_MCP_NAME}（一条服务本机所有频道）` };
   }
   const add = deps.spawn(
     "claude",
-    ["mcp", "add", name, "--env", `AGENTPARTY_CONFIG=${configPath}`, "--", "party", "mcp", "--channel", slug, "--identity", name],
+    ["mcp", "add", "--scope", "user", SINGLE_MCP_NAME, "--", "party", "mcp", "--all-channels"],
     { encoding: "utf8", timeout: 30_000 },
   );
   if (add.error !== undefined || add.status !== 0) {
-    return { level: "fail", msg: `claude MCP 注册失败：${name}`, remedy: addCmd };
+    return { level: "fail", msg: `claude MCP 注册失败：${SINGLE_MCP_NAME}`, remedy: addCmd };
   }
-  return { level: "ok", msg: `MCP 已注册：${name}` };
+  return { level: "ok", msg: `MCP 已注册：${SINGLE_MCP_NAME}（user scope，一条服务本机所有频道）` };
 }
 
-/** codex MCP 注册：先探（读注册表）后加（codex mcp add）。探不到二进制 → skip 并说明。 */
-function registerCodexMcp(deps: JoinDeps, name: string, configPath: string, slug: string): StepOutcome {
-  const addCmd =
-    `codex mcp add ${name} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${slug} --identity ${name}`;
-  const probe = deps.spawn("codex", ["mcp", "get", name], { encoding: "utf8", timeout: 30_000 });
+/** codex MCP 注册：先探（codex mcp get party）后加（全局 config）。探不到二进制 → skip 并说明。 */
+function registerCodexMcp(deps: JoinDeps): StepOutcome {
+  const addCmd = `codex mcp add ${SINGLE_MCP_NAME} -- party mcp --all-channels`;
+  const probe = deps.spawn("codex", ["mcp", "get", SINGLE_MCP_NAME], { encoding: "utf8", timeout: 30_000 });
   if (probe.error !== undefined) {
     return { level: "skip", msg: `codex 二进制不可用，跳过 MCP 注册。装好 codex 后手动：${addCmd}` };
   }
   if (probe.status === 0) {
-    return { level: "ok", msg: `MCP 已注册（跳过重复添加）：${name}` };
+    return { level: "ok", msg: `MCP 已注册（跳过重复添加）：${SINGLE_MCP_NAME}（一条服务本机所有频道）` };
   }
   const add = deps.spawn(
     "codex",
-    ["mcp", "add", name, "--env", `AGENTPARTY_CONFIG=${configPath}`, "--", "party", "mcp", "--channel", slug, "--identity", name],
+    ["mcp", "add", SINGLE_MCP_NAME, "--", "party", "mcp", "--all-channels"],
     { encoding: "utf8", timeout: 30_000 },
   );
   if (add.error !== undefined || add.status !== 0) {
-    return { level: "fail", msg: `codex MCP 注册失败：${name}`, remedy: addCmd };
+    return { level: "fail", msg: `codex MCP 注册失败：${SINGLE_MCP_NAME}`, remedy: addCmd };
   }
-  return { level: "ok", msg: `MCP 已注册：${name}` };
+  return { level: "ok", msg: `MCP 已注册：${SINGLE_MCP_NAME}（全局，一条服务本机所有频道）` };
 }
 
 const CLAUDE_PLUGIN = SHARED_CLAUDE_PLUGIN;
@@ -927,9 +931,9 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       }
       ctx.identity = identity;
       // 注册 MCP（先探后加，#898）。claude/codex 各走各的；other（探不出）两条都试——「不知道就都覆盖」。
-      if (harness === "claude" || harness === "other") detail.push(outcomeLine("注册 claude MCP", registerClaudeMcp(deps, mcpName, configPath, slug)));
+      if (harness === "claude" || harness === "other") detail.push(outcomeLine("注册 claude MCP", registerClaudeMcp(deps)));
       if (harness === "codex" || harness === "other") {
-        detail.push(outcomeLine("注册 codex MCP", registerCodexMcp(deps, mcpName, configPath, slug)));
+        detail.push(outcomeLine("注册 codex MCP", registerCodexMcp(deps)));
       }
       // claude 档：crossSessionInbound=accept（#844），否则跨会话 @ 默认 hold 会被 drop。
       if (harness === "claude") detail.push(outcomeLine("开启跨会话 @ 接收", setClaudeInboxAccept(deps)));

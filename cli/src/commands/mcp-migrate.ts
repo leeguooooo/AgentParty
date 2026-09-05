@@ -131,7 +131,7 @@ export function defaultMigrateDeps(home: string = homedir()): MigrateDeps {
             cwd: home,
           });
       if (res.error) return { ok: false, detail: res.error.message };
-      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };
+      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || (res.stdout ?? "").trim() || `exit ${String(res.status)}` };
       return { ok: true, detail: (res.stdout ?? "").trim() };
     },
     addBack: (reg) => {
@@ -147,7 +147,7 @@ export function defaultMigrateDeps(home: string = homedir()): MigrateDeps {
             { encoding: "utf8", cwd: reg.scope === "user" ? home : reg.scope },
           );
       if (res.error) return { ok: false, detail: res.error.message };
-      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || `exit ${String(res.status)}` };
+      if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || (res.stdout ?? "").trim() || `exit ${String(res.status)}` };
       return { ok: true, detail: (res.stdout ?? "").trim() };
     },
     now: () => Date.now(),

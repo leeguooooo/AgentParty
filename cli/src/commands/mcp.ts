@@ -116,7 +116,9 @@ Boundary:
 
 Example (name the server per agent — a shared name like "party" lets agents in the
 same directory overwrite each other's env-pinned identity):
-  claude mcp add party-<agent-name> --env AGENTPARTY_CONFIG=<config.json> -- party mcp --channel <slug>
+  claude mcp add --scope user party -- party mcp --all-channels   # one registration, every channel
+  (legacy per-channel form: claude mcp add party-<name> --env AGENTPARTY_CONFIG=<config.json> -- party mcp --channel <slug>;
+   'party mcp migrate' folds those into the single registration)
 
 Tools:
   party_whoami

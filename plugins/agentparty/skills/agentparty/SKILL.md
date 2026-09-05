@@ -105,14 +105,20 @@ If your harness can use MCP tools, prefer the local stdio server after configura
 # The name probe below only catches a same-named registration — a new identity name always
 # slips through, which is how one channel silently accumulated 14 identities (#907).
 party mcp identities --channel <slug> --server <server> --exclude <agent-name> || true
-# probe first — every registration becomes one resident process in every session (#898)
-claude mcp get party-<agent-name> >/dev/null 2>&1 \
-  || claude mcp add party-<agent-name> --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/<config>.json" \
-       -- party mcp --channel <slug> --identity party-<agent-name>
+# ONE registration serves every channel on this machine (#1083). Probe first — each
+# registration is one resident process in every session (#898); never add per channel.
+claude mcp get party >/dev/null 2>&1 \
+  || claude mcp add --scope user party -- party mcp --all-channels
+# codex: codex mcp get party >/dev/null 2>&1 || codex mcp add party -- party mcp --all-channels
+# Tools take `channel` per call; the identity is resolved per channel from
+# ~/.agentparty/agents (the join above recorded this identity as that channel's default).
+# Old per-channel registrations (`party mcp --channel <slug>`) are folded in automatically
+# by `party mcp migrate` the first time any interactive party command runs after upgrade.
 ```
 
-`--identity` is a cosmetic argv label so `ps -axww` shows whose server a process is; it never
-affects which identity is used (that is always `AGENTPARTY_CONFIG`).
+`--identity <label>` (optional) is a cosmetic argv label so `ps -axww` shows whose server a
+process is; it never affects which identity is used. With `--all-channels` the identity comes
+from the per-call `channel` (and optional `identity`) argument, not from the registration.
 
 Registrations accumulate: one machine reached 127 resident `party` processes because every
 onboarding added another server and nobody cleaned up. `party mcp prune` lists (and with

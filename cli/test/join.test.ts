@@ -92,13 +92,13 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     const bindings = JSON.parse(readFileSync(bindingsPath(), "utf8")) as { bindings: { harness: string; channel: string }[] };
     expect(bindings.bindings.some((b) => b.harness === "claude" && b.channel === "dev")).toBe(true);
 
-    // 4) MCP 注册落地（先探后加，#898）：claude mcp get 探到未注册 → claude mcp add 带 --identity。
-    expect(record).toContainEqual(["claude", "mcp", "get", "party-bot"]);
+    // 4) MCP 注册落地（先探后加，#898）：探的是**唯一那条** `party`，加的是 user scope 的
+    //    `party mcp --all-channels`（#1083：join 不再每频道各注册一条，那正是进程膨胀的源头）。
+    expect(record).toContainEqual(["claude", "mcp", "get", "party"]);
     const add = record.find((r) => r[0] === "claude" && r[1] === "mcp" && r[2] === "add");
     expect(add).toBeDefined();
-    expect(add).toContain("party-bot");
-    expect(add).toContain("--identity");
-    expect(add).toContain("dev");
+    expect(add).toEqual(["claude", "mcp", "add", "--scope", "user", "party", "--", "party", "mcp", "--all-channels"]);
+    expect(add).not.toContain("--channel"); // 频道不再绑在注册上，由每次调用传入
     // token 绝不出现在任何 spawn 的 argv 里（#676）。
     expect(record.flat().some((a) => a.includes("ap_bot_secret"))).toBe(false);
 
