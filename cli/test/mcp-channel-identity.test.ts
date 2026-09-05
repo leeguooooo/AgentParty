@@ -232,3 +232,66 @@ describe("聚合档必须显式开启（--all-channels）", () => {
     expect(both.error).toBeNull();
   });
 });
+
+// CodeRabbit on #1084：两台实例各登记了同一频道的默认身份时，按枚举顺序取第一个＝按文件名
+// 排序选身份，正是「绝不猜」要防的。收齐所有命中，恰一个才用。
+describe("多实例各登记了默认身份 ⇒ 歧义，不按顺序挑", () => {
+  const prod = cfg({ path: "/p/prod.json", server: "https://prod", channel: "shared", name: "prod-bot" });
+  const x = cfg({ path: "/p/x.json", server: "https://xdream", channel: "shared", name: "x-bot" });
+  const defaults = {
+    [JSON.stringify(["https://prod", "shared"])]: "/p/prod.json",
+    [JSON.stringify(["https://xdream", "shared"])]: "/p/x.json",
+  };
+
+  test("不给 server ⇒ 拒绝并列出两个实例", () => {
+    const r = resolveChannelIdentity({ channel: "shared", configs: [prod, x], defaults });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.message).toContain("https://prod");
+    expect(r.message).toContain("https://xdream");
+  });
+
+  test("给了 server ⇒ 解到那台的默认", () => {
+    const r = resolveChannelIdentity({ channel: "shared", server: "https://xdream", configs: [prod, x], defaults });
+    expect(r.ok && r.via).toBe("default");
+    expect(r.ok && r.config.name).toBe("x-bot");
+  });
+
+  test("枚举顺序反过来结论不变", () => {
+    expect(resolveChannelIdentity({ channel: "shared", configs: [x, prod], defaults }).ok).toBe(false);
+  });
+});
+
+// CodeRabbit on #1084：party_task_create 的 inputSchema 是 .strict() 的 ZodObject。往实例上赋属性
+// 是空操作，strict 还会把没声明的 identity/server 直接拒掉——聚合档下这个工具就没法指定身份。
+describe("聚合档下 strict ZodObject 工具也能收 identity / server", () => {
+  test("party_task_create 的 schema 被 .extend() 出 identity 与 server", async () => {
+    const { createMcpServer } = await import("../src/commands/mcp");
+    const server = createMcpServer(undefined, true);
+    // 私有字段，但这是唯一能不起 stdio 就核对「客户端看到的 schema」的办法。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tool = (server as any)._registeredTools["party_task_create"];
+    const schema = tool.inputSchema;
+    const shape = typeof schema.shape === "function" ? schema.shape() : schema.shape;
+    expect(shape.identity).toBeDefined();
+    expect(shape.server).toBeDefined();
+    expect(shape.channel).toBeDefined();
+    // strict 仍在：随便塞个没声明的键要被拒
+    expect(schema.safeParse({ channel: "dev", title: "t", identity: "me", bogus: 1 }).success).toBe(false);
+    expect(schema.safeParse({ channel: "dev", title: "t", identity: "me", server: "https://s" }).success).toBe(true);
+  });
+
+  test("裸 shape 的工具同样补上三个键，已有的 channel 不被覆盖", async () => {
+    const { createMcpServer } = await import("../src/commands/mcp");
+    const server = createMcpServer(undefined, true);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tools = (server as any)._registeredTools;
+    for (const name of ["party_whoami", "party_send", "party_who"]) {
+      const schema = tools[name].inputSchema;
+      const shape = typeof schema.shape === "function" ? schema.shape() : schema.shape ?? schema;
+      expect(shape.channel, name).toBeDefined();
+      expect(shape.identity, name).toBeDefined();
+      expect(shape.server, name).toBeDefined();
+    }
+  });
+});

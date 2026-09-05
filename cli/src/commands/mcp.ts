@@ -69,7 +69,7 @@ import { acquireTaskLeaseAcrossMachines, releaseTaskLeaseAcrossMachines } from "
 import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
 import { settleClaudeDeliveryRecovery } from "../delivery-recovery-journal";
 
-const HELP = `usage: party mcp [--channel <slug>] [--identity <label>]
+const HELP = `usage: party mcp [--channel <slug> | --all-channels] [--identity <label>]
        party mcp prune [--yes] [--check-remote] [--json]
        party mcp identities [--channel C] [--server S] [--keep NAME] [--yes] [--json]
 
@@ -77,6 +77,11 @@ Run an AgentParty stdio MCP server.
 
 Options:
   --channel <slug>   default channel for tools that take an optional channel
+  --all-channels     one registration for every channel on this machine (#1083):
+                     tools take channel (required) / identity / server, and the
+                     identity is resolved per call from ~/.agentparty/agents.
+                     Ambiguous channels (several identities, no recorded default)
+                     are refused with the candidates listed — never guessed.
   --identity <label> cosmetic label carried in argv so 'ps -axww' shows whose
                      server this process is (#898). It never affects which
                      identity is used — that always comes from AGENTPARTY_CONFIG.
@@ -465,6 +470,25 @@ function charterText(data: Record<string, unknown>): string {
  * 让它带着错身份或空身份去调用，只会变成一条以别人名义发出的消息或一句无法诊断的 401。
  */
 function wrapToolsWithPerCallIdentity(server: McpServer, defaultChannel: string | undefined): void {
+  // 资源（party://charter、party://{channel}/charter）不走 registerTool，得单独包：否则聚合档下
+  // 读 charter 会在没有任何身份的进程里发请求，拿到一句无法诊断的 401。频道取自模板变量，
+  // 模板没给（具体的 party://charter）就用启动时绑定的那个。
+  const originalResource = server.registerResource.bind(server);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server as any).registerResource = (name: string, uriOrTemplate: unknown, meta: unknown, cb: (...a: any[]) => any) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    originalResource(name as any, uriOrTemplate as any, meta as any, (async (uri: any, variables: any, ...rest: any[]) => {
+      const rawVar = variables?.channel;
+      const fromTemplate = Array.isArray(rawVar) ? rawVar[0] : rawVar;
+      const channel = typeof fromTemplate === "string" && fromTemplate !== "" ? fromTemplate : defaultChannel;
+      if (channel === undefined || channel === "") {
+        throw new Error("这条 MCP 服务本机所有频道，请读 party://<channel>/charter 指明是哪一个");
+      }
+      const resolved = resolveChannelIdentity({ channel });
+      if (!resolved.ok) throw new Error(resolved.message);
+      return withMcpIdentity(resolved.config.path, () => cb(uri, variables, ...rest));
+    }) as any);
+
   const original = server.registerTool.bind(server);
   // 用 any 是因为 registerTool 的重载签名带一长串泛型，这里只做透传包装，不改变任何一个参数。
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -473,18 +497,23 @@ function wrapToolsWithPerCallIdentity(server: McpServer, defaultChannel: string 
     // 校验入参，没声明的字段会被直接丢掉——handler 再怎么读也读不到（party_whoami 的 schema
     // 本来是空的，实测就是这么丢的）。已经声明过 channel 的工具保持原样，不覆盖它的描述与校验。
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const shape = (spec as any)?.inputSchema;
-    if (shape !== null && typeof shape === "object") {
-      if (shape.channel === undefined) {
-        shape.channel = z
-          .string()
-          .describe("channel slug — 这条 MCP 服务本机所有频道，必须指明是哪一个");
-      }
-      if (shape.identity === undefined) {
-        shape.identity = z
-          .string()
-          .optional()
-          .describe("同一频道在本机有多份身份时，指定用哪一个（party who --all 可查）");
+    const input = (spec as any)?.inputSchema;
+    const extra = {
+      channel: z.string().describe("channel slug — 这条 MCP 服务本机所有频道，必须指明是哪一个"),
+      identity: z.string().optional().describe("同一频道在本机有多份身份时，指定用哪一个（party who --all 可查）"),
+      server: z.string().optional().describe("同名频道分属多个实例时，用实例 URL 限定（party who --all 可查）"),
+    };
+    if (input !== null && typeof input === "object") {
+      if (typeof input.extend === "function" && input.shape !== undefined) {
+        // ZodObject（party_task_create 用的是 .strict()）：往实例上赋属性是空操作，strict 还会把
+        // 没声明的 identity/server 直接拒掉。必须走 .extend()；已声明的字段保留原描述与校验。
+        const present = input.shape as Record<string, unknown>;
+        const missing = Object.fromEntries(Object.entries(extra).filter(([k]) => present[k] === undefined));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (spec as any).inputSchema = Object.keys(missing).length === 0 ? input : input.extend(missing);
+      } else {
+        // 裸 shape（大多数工具）：直接补键。
+        for (const [k, v] of Object.entries(extra)) if (input[k] === undefined) input[k] = v;
       }
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -500,6 +529,7 @@ function wrapToolsWithPerCallIdentity(server: McpServer, defaultChannel: string 
       const resolved = resolveChannelIdentity({
         channel,
         identity: typeof args?.identity === "string" && args.identity !== "" ? args.identity : undefined,
+        server: typeof args?.server === "string" && args.server !== "" ? args.server : undefined,
       });
       if (!resolved.ok) return fail(resolved.message);
       return withMcpIdentity(resolved.config.path, () => handler(args, extra));

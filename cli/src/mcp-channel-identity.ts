@@ -167,11 +167,22 @@ export function resolveChannelIdentity(input: ResolveChannelIdentityInput): Chan
     };
   }
 
-  for (const key of matches.map((c) => defaultsKey(c.server, c.channel))) {
-    const recorded = defaults[key];
-    if (recorded === undefined) continue;
-    const hit = matches.find((c) => c.path === recorded);
-    if (hit !== undefined) return { ok: true, config: hit, via: "default" };
+  // 把所有登记命中都收齐再判：同一频道在两台实例上各登记了默认时，按枚举顺序取第一个
+  // 等于按文件名排序选身份——正是本文件头上说绝不做的那种「猜」。恰一个命中才算数。
+  const defaultHits = matches.filter((c) => {
+    const recorded = defaults[defaultsKey(c.server, c.channel)];
+    return recorded !== undefined && recorded === c.path;
+  });
+  if (defaultHits.length === 1) return { ok: true, config: defaultHits[0]!, via: "default" };
+  if (defaultHits.length > 1) {
+    return {
+      ok: false,
+      reason: "ambiguous",
+      candidates: defaultHits,
+      message:
+        `#${input.channel} 在 ${defaultHits.length} 个实例上都登记了默认身份，请用 server 限定` +
+        `（候选实例：${[...new Set(defaultHits.map((c) => c.server))].join("、")}）`,
+    };
   }
 
   const distinct = dedupeSameIdentity(matches);
