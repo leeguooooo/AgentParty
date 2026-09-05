@@ -519,7 +519,9 @@ export function maybeAutoMigrate(
   const errlog = opts.errlog ?? ((line: string) => console.error(line));
   const marker = readMarker(markerPath);
   const now = deps.now();
-  if (marker !== null && marker.status !== "failed") return { ran: false };
+  // 标记**只用来限频失败重试**，不用来「做过一次就永不再看」：codex 的项目级注册表是按 cwd 往上找的，
+  // 在别的目录跑时看不见——owner 机器上就有一条项目级旧注册在标记写下「done」之后才被发现，
+  // 之后再也没人替它迁。读两个注册表只是几次文件读取，每次交互式命令都做一遍是划算的。
   if (marker !== null && marker.status === "failed" && now - marker.at < RETRY_AFTER_MS) return { ran: false };
 
   let plan: MigratePlan;
@@ -530,7 +532,8 @@ export function maybeAutoMigrate(
     return { ran: false };
   }
   if (plan.legacy.length === 0) {
-    writeMarker(markerPath, { status: "nothing", at: now });
+    // 没东西可迁就什么都不写：留着 failed 标记也没意义（下次有东西时照常试）。
+    if (marker?.status === "failed") writeMarker(markerPath, { status: "nothing", at: now });
     return { ran: false };
   }
   errlog(

@@ -263,7 +263,7 @@ describe("maybeAutoMigrate —— 一次性、失败限频、进程内路径不�
     return mkdtempSync(join(tmpdir(), "ap-migrate-"));
   }
 
-  test("有旧注册 ⇒ 迁移并写 done 标记；再调一次不再动", () => {
+  test("有旧注册 ⇒ 迁移并写 done 标记；再调一次时注册表已空，不再动", () => {
     const h = home();
     const { deps: d, trace } = deps([reg({ name: "party-a" })]);
     const errs: string[] = [];
@@ -280,14 +280,25 @@ describe("maybeAutoMigrate —— 一次性、失败限频、进程内路径不�
     rmSync(h, { recursive: true, force: true });
   });
 
-  test("没有旧注册 ⇒ 写 nothing 标记，之后连注册表都不再读", () => {
+  // 标记不再是「做过一次就永不再看」：codex 项目级注册表按 cwd 往上找，在别的目录跑时看不见，
+  // owner 机器上就有一条项目级旧注册在标记写下 done 之后才被发现。每次都读（几次文件读取），有就迁。
+  test("done 之后又出现旧注册（比如换到有项目级 codex 注册的目录）⇒ 照样迁", () => {
+    const h = home();
+    writeMigrateMarkerForTest(h, { status: "done", at: NOW - 60_000 });
+    const { deps: d, trace } = deps([reg({ name: "party-late" })]);
+    expect(maybeAutoMigrate("who", { deps: d, agentpartyHome: h }).ran).toBe(true);
+    expect(trace.removed).toEqual(["party-late"]);
+    rmSync(h, { recursive: true, force: true });
+  });
+
+  test("没有旧注册 ⇒ 每次都会读一遍注册表（便宜），不动任何东西", () => {
     const h = home();
     let reads = 0;
     const { deps: d } = deps([], { registrations: () => (reads += 1, []) });
     expect(maybeAutoMigrate("who", { deps: d, agentpartyHome: h }).ran).toBe(false);
-    expect(reads).toBe(1);
     maybeAutoMigrate("who", { deps: d, agentpartyHome: h });
-    expect(reads).toBe(1);
+    expect(reads).toBe(2);
+    expect(migrationDone(h)).toBe(false); // 没写标记
     rmSync(h, { recursive: true, force: true });
   });
 
