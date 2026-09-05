@@ -26,6 +26,7 @@ import {
 import { jsonFrame } from "../json";
 import { applyMcpProcessTitle, parseMcpServerArgv } from "../mcp-registry";
 import { watchParentLiveness } from "../parent-liveness";
+import { watchSuperseded } from "../mcp-superseded";
 import { resolveChannelIdentity } from "../mcp-channel-identity";
 import { withMcpIdentity } from "../mcp-identity-context";
 import { reportWakeSelfCheck } from "../wake-reachability";
@@ -1956,5 +1957,8 @@ export async function run(argv: string[]): Promise<number> {
     // 那个 pipe 不一定会关（claude-channel 那边实测就没关，孤儿跑了 21 小时）。父进程
     // 存活探测不依赖任何 fd 状态，宿主一死就收口。
     watchParentLiveness({ label: "party mcp", terminate: () => resolve(0) });
+    // #1083 第三道闸：宿主活着、stdin 也没关，但宿主重载 MCP 配置时起了一个命令行一模一样的新 server
+    // 而没收旧的（codex / ChatGPT 桌面版实测：一个会话名下 39 个、597 MB）。被顶替的自己退场。
+    watchSuperseded({ label: "party mcp", terminate: () => resolve(0) });
   });
 }
