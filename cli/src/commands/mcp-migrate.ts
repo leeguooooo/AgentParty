@@ -16,7 +16,7 @@
 //
 // 触发：任何交互式 `party` 命令启动时（不含 mcp/hook/serve 这些进程内路径）检查一次，
 // 一次性标记；也提供 `party mcp migrate [--dry-run|--yes]` 让人先看再动。
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -43,6 +43,8 @@ export interface LegacyRegistration {
 export interface MigratePlan {
   /** 要迁走的旧式注册：有 --channel、有 AGENTPARTY_CONFIG、config 读得出 server。 */
   legacy: LegacyRegistration[];
+  /** #1089：插件已提供 --all-channels 时多余的 `party` 单注册，要收掉。 */
+  redundant: McpRegistration[];
   /** party 的注册但不动它：说明为什么。 */
   skipped: { reg: McpRegistration; reason: string }[];
   /** 已经有 --all-channels 注册的 harness。 */
@@ -61,7 +63,47 @@ export interface MigrateDeps {
   addSingle: (harness: RegistrationHarness) => { ok: boolean; detail: string };
   /** 回滚：把一条刚删掉的旧注册按原 scope / args / env 原样加回去。 */
   addBack: (reg: McpRegistration) => { ok: boolean; detail: string };
+  /**
+   * #1089：AgentParty 插件（claude / codex）自带的 MCP 是否已是 --all-channels。插件注册不在
+   * ~/.claude.json / config.toml 里（随插件提供），注册表读不到；但它同样是一条覆盖整台机器的单注册。
+   */
+  pluginCovers: (harness: RegistrationHarness) => boolean;
   now: () => number;
+}
+
+function manifestHasAllChannels(path: string): boolean {
+  const raw = readJson(path) as { mcpServers?: Record<string, { command?: unknown; args?: unknown }> } | undefined;
+  if (raw === undefined || raw === null || typeof raw !== "object") return false;
+  return Object.values(raw.mcpServers ?? {}).some((srv) => {
+    if (typeof srv?.command !== "string" || !Array.isArray(srv.args)) return false;
+    const base = srv.command.split("/").pop() ?? "";
+    return (base === "party" || base === "agentparty-runtime") && srv.args[0] === "mcp" && srv.args.includes("--all-channels");
+  });
+}
+
+/** 真机判定：读 harness 自己的插件安装记录 / 缓存，看装着的 AgentParty 插件的 MCP 是不是 --all-channels。 */
+export function defaultPluginCovers(home: string = homedir()): (harness: RegistrationHarness) => boolean {
+  return (harness) => {
+    try {
+      if (harness === "claude") {
+        const installed = readJson(join(home, ".claude", "plugins", "installed_plugins.json")) as
+          | { plugins?: Record<string, { scope?: string; installPath?: string }[]> }
+          | undefined;
+        for (const [key, entries] of Object.entries(installed?.plugins ?? {})) {
+          if (!key.startsWith("agentparty@")) continue;
+          for (const e of entries ?? []) {
+            if (typeof e.installPath === "string" && manifestHasAllChannels(join(e.installPath, "claude-mcp.json"))) return true;
+          }
+        }
+        return false;
+      }
+      const cacheDir = join(home, ".codex", "plugins", "cache", "agentparty", "agentparty");
+      const versions = readdirSync(cacheDir).filter((v) => /^\d+\.\d+\.\d+$/.test(v));
+      return versions.some((v) => manifestHasAllChannels(join(cacheDir, v, ".mcp.json")));
+    } catch {
+      return false;
+    }
+  };
 }
 
 /** 这条旧注册与单注册同名同 scope：加新会覆盖它（codex）或被它顶住（claude），删它会连新的一起删。 */
@@ -161,6 +203,7 @@ export function defaultMigrateDeps(home: string = homedir(), spawn: typeof spawn
       if (res.status !== 0) return { ok: false, detail: (res.stderr ?? "").trim() || (res.stdout ?? "").trim() || `exit ${String(res.status)}` };
       return { ok: true, detail: (res.stdout ?? "").trim() };
     },
+    pluginCovers: defaultPluginCovers(home),
     now: () => Date.now(),
   };
 }
@@ -172,7 +215,8 @@ export function planMcpMigrate(deps: MigrateDeps): MigratePlan {
   const legacy: LegacyRegistration[] = [];
   const skipped: MigratePlan["skipped"] = [];
   const alreadySingle = new Set<RegistrationHarness>();
-  for (const reg of deps.registrations()) {
+  const all = deps.registrations();
+  for (const reg of all) {
     if (!isPartyMcpRegistration(reg)) continue;
     const harness = registrationHarness(reg);
     if (isSingleRegistration(reg)) {
@@ -199,7 +243,7 @@ export function planMcpMigrate(deps: MigrateDeps): MigratePlan {
     }
     legacy.push({ reg, harness, channel, configPath, server });
   }
-  return { legacy, skipped, alreadySingle };
+  return { legacy, skipped, alreadySingle, redundant: redundantSingles(deps, all) };
 }
 
 export interface MigrateResult {
@@ -228,7 +272,16 @@ function foreignRemedy(harness: RegistrationHarness, foreign: McpRegistration): 
 }
 
 function hasMachineWideSingle(deps: MigrateDeps, harness: RegistrationHarness): boolean {
+  if (deps.pluginCovers(harness)) return true;
   return deps.registrations().some((r) => registrationHarness(r) === harness && isMachineWideSingle(r, deps.globalCodexHome));
+}
+
+/** 插件已提供 --all-channels 时，我们自己加的那条 `party` 单注册就是多余的一个进程（#1089）。 */
+function redundantSingles(deps: MigrateDeps, all: McpRegistration[]): McpRegistration[] {
+  return all.filter((r) => {
+    const harness = registrationHarness(r);
+    return deps.pluginCovers(harness) && isMachineWideSingle(r, deps.globalCodexHome) && r.name === SINGLE_NAME;
+  });
 }
 
 function stillRegistered(deps: MigrateDeps, reg: McpRegistration): boolean {
@@ -280,8 +333,8 @@ export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: 
   const covered = new Set<RegistrationHarness>();
   const replaced = new Set<McpRegistration>();
   for (const harness of harnesses) {
-    if (plan.alreadySingle.has(harness)) {
-      covered.add(harness);
+    if (plan.alreadySingle.has(harness) || deps.pluginCovers(harness)) {
+      covered.add(harness); // 注册表里已有，或插件自带 --all-channels（#1089）：都不用再加
       continue;
     }
     const foreign = foreignSameKey(deps, harness);
@@ -399,6 +452,17 @@ export function runMcpMigrate(plan: MigratePlan, deps: MigrateDeps, log: (line: 
       addFailed.push({ harness, detail: "删旧注册后单条注册消失，重加失败" });
       log(`  ✗ ${harness}：删旧注册后单条注册消失，重加失败——现在没有 party，请立刻手工加：`);
       log(manualAdd(harness));
+    }
+  }
+  // 4) #1089：插件已提供 --all-channels ⇒ 我们自己那条 `party` 是多余的一个进程，收掉（读回验证）。
+  for (const r of plan.redundant) {
+    const harness = registrationHarness(r);
+    const removed = deps.remove(r);
+    if (removed.ok && !stillRegistered(deps, r)) {
+      log(`  ✓ ${harness}：插件已自带 \`party mcp --all-channels\`，多余的单注册 ${r.name} 已收掉`);
+    } else {
+      failed.push({ reg: r, step: "remove", detail: removed.ok ? "命令返回 0，但读回注册表时它还在" : removed.detail });
+      log(`  ! ${harness}：多余的单注册 ${r.name} 没删掉（${removed.ok ? "读回还在" : removed.detail}），多留一个进程而已`);
     }
   }
   return { code: addFailed.length > 0 ? 1 : 0, moved, failed, added, addFailed };
@@ -531,7 +595,7 @@ export function maybeAutoMigrate(
     // 读注册表都炸了（harness 没装 / 文件坏）：不打扰，下次再看。
     return { ran: false };
   }
-  if (plan.legacy.length === 0) {
+  if (plan.legacy.length === 0 && plan.redundant.length === 0) {
     // 没东西可迁就什么都不写：留着 failed 标记也没意义（下次有东西时照常试）。
     if (marker?.status === "failed") writeMarker(markerPath, { status: "nothing", at: now });
     return { ran: false };
@@ -572,7 +636,7 @@ export async function runMigrateCli(argv: string[], deps: MigrateDeps = defaultM
   }
   const yes = argv.includes("--yes");
   const plan = planMcpMigrate(deps);
-  if (plan.legacy.length === 0) {
+  if (plan.legacy.length === 0 && plan.redundant.length === 0) {
     console.log("没有旧式「一频道一注册」的 party 注册，无需迁移。");
     for (const s of plan.skipped) console.log(`  · 跳过 ${s.reg.name}：${s.reason}`);
     return 0;
@@ -580,6 +644,7 @@ export async function runMigrateCli(argv: string[], deps: MigrateDeps = defaultM
   console.log(`${yes ? "迁移" : "计划迁移"} ${plan.legacy.length} 条旧注册：`);
   for (const l of plan.legacy) console.log(`  · ${l.harness}  ${l.reg.name}  #${l.channel}  ← ${l.configPath}`);
   for (const s of plan.skipped) console.log(`  · 跳过 ${s.reg.name}：${s.reason}`);
+  for (const r of plan.redundant) console.log(`  · 多余（插件已自带 --all-channels）：${registrationHarness(r)}  ${r.name}`);
   if (!yes) {
     console.log("（未改任何东西。执行：party mcp migrate --yes）");
     return 0;

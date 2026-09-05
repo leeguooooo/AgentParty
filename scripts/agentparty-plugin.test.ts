@@ -53,7 +53,7 @@ describe("AgentParty marketplace plugin", () => {
         agentparty: {
           command: "./bin/agentparty-runtime",
           cwd: ".",
-          args: ["mcp"],
+          args: ["mcp", "--all-channels"],
         },
       },
     });
@@ -64,7 +64,7 @@ describe("AgentParty marketplace plugin", () => {
       mcpServers: {
         agentparty: {
           command: claudeRuntimeCommand,
-          args: ["mcp"],
+          args: ["mcp", "--all-channels"],
         },
         "agentparty-channel": {
           command: claudeRuntimeCommand,
@@ -237,7 +237,7 @@ describe("AgentParty marketplace plugin", () => {
         }
       }
       // mcp / claude-channel 这些常驻入口不受影响：它们本来就只在被显式启动时才跑。
-      for (const argv of [["mcp"], ["claude-channel", "--require-launch-opt-in"], ["--version"]]) {
+      for (const argv of [["mcp"], ["mcp", "--all-channels"], ["claude-channel", "--require-launch-opt-in"], ["--version"]]) {
         const { home, marker } = stubHome();
         try {
           spawnSync(runtimeLauncher, argv, { env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8" });

@@ -3,7 +3,8 @@
     "agentparty": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime",
       "args": [
-        "mcp"
+        "mcp",
+        "--all-channels"
       ]
     },
     "agentparty-channel": {

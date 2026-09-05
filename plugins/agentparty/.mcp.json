@@ -4,7 +4,8 @@
       "command": "./bin/agentparty-runtime",
       "cwd": ".",
       "args": [
-        "mcp"
+        "mcp",
+        "--all-channels"
       ]
     }
   }

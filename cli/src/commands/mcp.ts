@@ -486,10 +486,9 @@ function wrapToolsWithPerCallIdentity(server: McpServer, defaultChannel: string 
     originalResource(name as any, uriOrTemplate as any, meta as any, (async (uri: any, variables: any, ...rest: any[]) => {
       const rawVar = variables?.channel;
       const fromTemplate = Array.isArray(rawVar) ? rawVar[0] : rawVar;
-      const channel = typeof fromTemplate === "string" && fromTemplate !== "" ? fromTemplate : defaultChannel;
-      if (channel === undefined || channel === "") {
-        throw new Error("这条 MCP 服务本机所有频道，请读 party://<channel>/charter 指明是哪一个");
-      }
+      const channel = typeof fromTemplate === "string" && fromTemplate !== "" ? fromTemplate : undefined;
+      // 模板没给频道（具体的 party://charter）⇒ 老路：绑定频道 + 进程级身份。
+      if (channel === undefined) return cb(uri, variables, ...rest);
       const resolved = resolveChannelIdentity({ channel });
       if (!resolved.ok) throw new Error(resolved.message);
       return withMcpIdentity(resolved.config.path, () => cb(uri, variables, ...rest));
@@ -505,7 +504,10 @@ function wrapToolsWithPerCallIdentity(server: McpServer, defaultChannel: string 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const input = (spec as any)?.inputSchema;
     const extra = {
-      channel: z.string().describe("channel slug — 这条 MCP 服务本机所有频道，必须指明是哪一个"),
+      channel: z
+        .string()
+        .optional()
+        .describe("channel slug。省略＝当前目录绑定的频道（与不带 --all-channels 时完全相同）；给了就按频道解析身份"),
       identity: z.string().optional().describe("同一频道在本机有多份身份时，指定用哪一个（party who --all 可查）"),
       server: z.string().optional().describe("同名频道分属多个实例时，用实例 URL 限定（party who --all 可查）"),
     };
@@ -524,14 +526,20 @@ function wrapToolsWithPerCallIdentity(server: McpServer, defaultChannel: string 
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return original(name as any, spec as any, (async (args: any, extra: any) => {
-      const channel = typeof args?.channel === "string" && args.channel !== "" ? args.channel : defaultChannel;
-      if (channel === undefined || channel === "") {
-        // 聚合档下频道不是可省的：省了就没有身份，没有身份就没有「我是谁」。
-        return fail(
-          `这条 MCP 服务本机所有频道，请在参数里给出 channel（工具 ${name}）。` +
-            `本机有哪些频道：party who --all`,
-        );
+      const explicit = typeof args?.channel === "string" && args.channel !== "" ? args.channel : undefined;
+      if (explicit === undefined) {
+        // #1089：不传 channel ⇒ **完全**退回不带 --all-channels 时的老路（cwd 绑定 / --channel 默认 /
+        // 进程级身份）。这样 --all-channels 是老行为的严格超集，插件自带的 MCP 才能直接换成它：
+        // 在绑定过频道的目录里工具照旧不用传 channel，跨频道时再传。
+        if (resolveChannel(defaultChannel) === null) {
+          return fail(
+            `这条 MCP 服务本机所有频道，当前目录没有绑定频道，请在参数里给出 channel（工具 ${name}）。` +
+              `本机有哪些频道：party who --all`,
+          );
+        }
+        return handler(args, extra);
       }
+      const channel = explicit;
       const resolved = resolveChannelIdentity({
         channel,
         identity: typeof args?.identity === "string" && args.identity !== "" ? args.identity : undefined,
