@@ -3,6 +3,7 @@
 // 只桩 claude/codex 二进制（spawnSync）与几个探活注入点；init / hook / send 走**真实**实现打到
 // rest-mock，收尾判定读**真实盘状态**——反假绿纪律：桩得越少，测试越接近真机。
 import { mkdtempSync, rmSync } from "node:fs";
+import type { McpRegistration } from "../src/mcp-registry";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JoinDeps, JoinOptions } from "../src/commands/join";
@@ -22,6 +23,8 @@ export interface SpawnBehavior {
   noBinary?: boolean; // 二进制不存在（ENOENT）
   mcpAlreadyRegistered?: boolean; // mcp get 返回 0（已注册）
   failMcpAdd?: boolean; // mcp add 返回非 0
+  /** #1083：预置的 MCP 注册表（比如一条同名的旧式 per-channel 注册）。 */
+  mcpRegistry?: McpRegistration[];
   /**
    * 本机已装的 claude 插件版本（#961）：省略＝与 CLI 同版；null＝没装；"0.2.203" 这类＝旧版。
    * 桩是**有状态**的，照真机行为走：`plugin install` 对已装的只回 already installed（**不升级**），
@@ -63,6 +66,8 @@ function compareSemverLoose(a: string, b: string): number {
 
 interface PluginState {
   installed: string | null;
+  /** #1083：MCP 注册表桩。mcpAlreadyRegistered 时预置两条 user/global 的 --all-channels。 */
+  registry: McpRegistration[];
   /** 还要让多少次 `plugin list` 读失败（pluginListFailsAfterUpdate 用）。 */
   listFailuresLeft?: number;
 }
@@ -78,7 +83,27 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
       return { ...base, status: behavior.mcpAlreadyRegistered ? 0 : 1 };
     }
     if (args[0] === "mcp" && args[1] === "add") {
-      return { ...base, status: behavior.failMcpAdd ? 1 : 0 };
+      if (behavior.failMcpAdd) return { ...base, status: 1 };
+      // #1083：桩是有状态的——加进去的注册在 registrations() 里读得到，不然读回验证恒失败。
+      const name = args.includes("--scope") ? args[args.indexOf("--scope") + 2]! : args[2]!;
+      const dash = args.indexOf("--");
+      const rest = dash === -1 ? [] : args.slice(dash + 1);
+      state.registry.push({
+        scope: cmd === "codex" ? join(process.env.CODEX_HOME ?? "", "config.toml") : args.includes("--scope") ? args[args.indexOf("--scope") + 1]! : process.cwd(),
+        name,
+        command: rest[0] ?? "party",
+        args: rest.slice(1),
+        env: {},
+        harness: cmd === "codex" ? "codex" : "claude",
+        codexHome: cmd === "codex" ? process.env.CODEX_HOME : undefined,
+      });
+      return { ...base, status: 0 };
+    }
+    if (args[0] === "mcp" && args[1] === "remove") {
+      const name = args[2]!;
+      const i = state.registry.findIndex((r) => r.name === name && (r.harness ?? "claude") === (cmd === "codex" ? "codex" : "claude"));
+      if (i !== -1) state.registry.splice(i, 1);
+      return { ...base, status: 0 };
     }
     if (cmd === "claude" && args[0] === "--version") return { ...base, status: 0, stdout: "2.1.200 (Claude Code)\n" };
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "list") {
@@ -150,11 +175,18 @@ export function joinEnv(): { setup: () => string; teardown: () => void } {
 export function joinDeps(tmp: string, record: string[][], behavior: SpawnBehavior, logs: string[]): JoinDeps {
   const state: PluginState = {
     installed: behavior.installedPluginVersion === undefined ? RUNNING_VERSION : behavior.installedPluginVersion,
+    registry: behavior.mcpAlreadyRegistered
+      ? [
+          { scope: "user", name: "party", command: "party", args: ["mcp", "--all-channels"], env: {}, harness: "claude" },
+          { scope: join(process.env.CODEX_HOME ?? "", "config.toml"), name: "party", command: "party", args: ["mcp", "--all-channels"], env: {}, harness: "codex", codexHome: process.env.CODEX_HOME },
+        ]
+      : [...(behavior.mcpRegistry ?? [])],
   };
   const spawn = fakeSpawn(record, behavior, state);
   const clock = { t: 1_000_000 };
   return {
     spawn,
+    mcpRegistrations: () => [...state.registry],
     initRun,
     hookRun,
     sendRun,

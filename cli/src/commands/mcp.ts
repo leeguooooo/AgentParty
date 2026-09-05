@@ -70,6 +70,7 @@ import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
 import { settleClaudeDeliveryRecovery } from "../delivery-recovery-journal";
 
 const HELP = `usage: party mcp [--channel <slug> | --all-channels] [--identity <label>]
+       party mcp migrate [--dry-run] [--yes]
        party mcp prune [--yes] [--check-remote] [--json]
        party mcp identities [--channel C] [--server S] [--keep NAME] [--yes] [--json]
 
@@ -87,6 +88,9 @@ Options:
                      identity is used — that always comes from AGENTPARTY_CONFIG.
 
 Subcommands:
+  migrate merge legacy one-registration-per-channel entries into a single
+          \`party mcp --all-channels\` (#1083). Interactive party commands run
+          this once automatically; here is the manual / dry-run entry.
   prune   remove Claude Code MCP registrations that point at AgentParty
           identities which no longer exist (dry run unless --yes; never touches
           MCP servers belonging to other tools). See 'party mcp prune --help'.
@@ -112,7 +116,9 @@ Boundary:
 
 Example (name the server per agent — a shared name like "party" lets agents in the
 same directory overwrite each other's env-pinned identity):
-  claude mcp add party-<agent-name> --env AGENTPARTY_CONFIG=<config.json> -- party mcp --channel <slug>
+  claude mcp add --scope user party -- party mcp --all-channels   # one registration, every channel
+  (legacy per-channel form: claude mcp add party-<name> --env AGENTPARTY_CONFIG=<config.json> -- party mcp --channel <slug>;
+   'party mcp migrate' folds those into the single registration)
 
 Tools:
   party_whoami
@@ -1890,6 +1896,10 @@ export async function run(argv: string[]): Promise<number> {
     return runManagedMcp(argv[1]);
   }
   // #898 方案 C 第 2 件：清理指向已删身份/已失效 config 的注册。默认 dry-run。
+  if (argv[0] === "migrate") {
+    const { runMigrateCli } = await import("./mcp-migrate");
+    return runMigrateCli(argv.slice(1));
+  }
   if (argv[0] === "prune") {
     const { runPruneCli } = await import("./mcp-prune");
     return runPruneCli(argv.slice(1));
