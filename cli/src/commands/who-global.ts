@@ -260,17 +260,24 @@ export interface GlobalWhoSummary {
 export function summarizeGlobalWho(rows: GlobalWhoRow[], channelCount: number, now: number): GlobalWhoSummary {
   const counts: Record<GlobalReach, number> = { online: 0, wakeable: 0, recent: 0, offline: 0 };
   for (const row of rows) counts[row.reach] += 1;
+  // 暂停中的身份不折：⏸ 是有人**刻意**设的状态（被 @ 也不唤醒），折进计数里等于把这个决定藏掉。
   const stale = (row: GlobalWhoRow): boolean =>
-    row.reach === "offline" && row.last_seen !== undefined && now - row.last_seen > OFFLINE_FOLD_MS;
+    row.reach === "offline" &&
+    row.paused !== true &&
+    row.last_seen !== undefined &&
+    now - row.last_seen > OFFLINE_FOLD_MS;
   const shown = rows.filter((row) => !stale(row));
   const foldedRows = rows.filter(stale);
   const reachable = counts.online + counts.wakeable;
   const parts = (Object.keys(counts) as GlobalReach[])
     .filter((tier) => counts[tier] > 0)
     .map((tier) => `${counts[tier]} ${tier}`);
-  const header = reachable > 0
-    ? `${reachable} reachable across ${channelCount} channel(s) (${parts.join(" · ")}) — pass a channel for wake diagnostics:`
-    : `no one reachable right now across ${channelCount} channel(s) (${parts.join(" · ")}) — pass a channel for wake diagnostics:`;
+  // 空列表也从这里出文案，与非空时同一口径（此前 who.ts 自己写了一句「… yet」，两处措辞打架）。
+  const header = rows.length === 0
+    ? `no one reachable right now across ${channelCount} channel(s)`
+    : reachable > 0
+      ? `${reachable} reachable across ${channelCount} channel(s) (${parts.join(" · ")}) — pass a channel for wake diagnostics:`
+      : `no one reachable right now across ${channelCount} channel(s) (${parts.join(" · ")}) — pass a channel for wake diagnostics:`;
   let foldLine: string | undefined;
   if (foldedRows.length > 0) {
     const ages = foldedRows.map((row) => now - (row.last_seen ?? now));

@@ -1022,7 +1022,7 @@ async function runGlobalWho(cfg: { server: string; token: string; name?: string 
     return failed.length > 0 ? 1 : 0;
   }
   if (rows.length === 0) {
-    console.log(`no one reachable across ${snapshots.length} channel(s) yet`);
+    console.log(summarizeGlobalWho(rows, snapshots.length, now).header);
     if (failed.length > 0) {
       console.log(`could not read presence for: ${failed.join(", ")}`);
       return 1;

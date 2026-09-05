@@ -268,4 +268,24 @@ describe("summarizeGlobalWho —— 表头按档位报数、陈旧离线折叠�
     expect(none.shown).toHaveLength(0);
     expect(none.legend).toBeUndefined();
   });
+
+  // CodeRabbit on #1085：⏸ 是有人刻意设的状态，折进「N more offline」里等于把这个决定藏掉。
+  test("暂停中的身份哪怕离线很久也不折叠，且照常显示 ⏸", () => {
+    const rows = [
+      row({ name: "paused-bot", reach: "offline", paused: true, last_seen: NOW - 40 * DAY }),
+      row({ name: "old", reach: "offline", last_seen: NOW - 40 * DAY }),
+    ];
+    const s = summarizeGlobalWho(rows, 1, NOW);
+    expect(s.shown.map((r) => r.name)).toEqual(["paused-bot"]);
+    expect(s.folded).toBe(1);
+    expect(renderGlobalRow(s.shown[0]!, "paused-bot", NOW)).toContain("⏸ paused");
+  });
+
+  test("空列表：表头与非空时同一口径，不再是另一句「… yet」", () => {
+    const s = summarizeGlobalWho([], 2, NOW);
+    expect(s.header).toBe("no one reachable right now across 2 channel(s)");
+    expect(s.shown).toHaveLength(0);
+    expect(s.foldLine).toBeUndefined();
+    expect(s.legend).toBeUndefined();
+  });
 });
