@@ -16,19 +16,18 @@ import {
 const root = resolve(import.meta.dir, "../..");
 const pluginRoot = resolve(root, "plugins/agentparty");
 const version = JSON.parse(readFileSync(resolve(root, "cli/package.json"), "utf8")).version as string;
-const runtimeCommand = "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime";
+// #1096：这里曾经手抄一份 mcpServers（`args: ["mcp"]`）。#1089 把包里的改成了
+// `mcp --all-channels`，检查器那侧也照抄着旧值——两边一起错，测试全绿，而真机上
+// 每个装了 0.2.263+ 插件的人都被判成 bundle 坏掉。所以这份**只能**从包里读。
+const shippedMcpServers = JSON.parse(
+  readFileSync(resolve(pluginRoot, "claude-mcp.json"), "utf8"),
+).mcpServers as Record<string, { command: string; args: string[] }>;
 const pluginEntry = {
   id: "agentparty@agentparty",
   version,
   enabled: true,
   installPath: pluginRoot,
-  mcpServers: {
-    agentparty: { command: runtimeCommand, args: ["mcp"] },
-    "agentparty-channel": {
-      command: runtimeCommand,
-      args: ["claude-channel", "--require-launch-opt-in"],
-    },
-  },
+  mcpServers: shippedMcpServers,
 };
 
 const identity: Identity = {
@@ -111,6 +110,62 @@ describe("party doctor claude-plugin", () => {
       valid: true,
       launcherExecutable: true,
     });
+  });
+
+  // #1096 的变异自检：真机上坏掉的正是「Claude 注册的 args 跟包里发的对不上」这一档。
+  // 上面那条只证明「当前包自洽」——没有下面这条，检查器退化成恒真也照样绿。
+  test("rejects MCP wiring that drifted from what this bundle ships, and says which check tripped", () => {
+    const drifted = inspectClaudePluginBundle({
+      ...pluginEntry,
+      mcpServers: {
+        ...shippedMcpServers,
+        agentparty: { ...shippedMcpServers.agentparty, args: ["mcp"] },
+      },
+    });
+    expect(drifted.valid).toBe(false);
+    expect(drifted.launcherExecutable).toBe(true);
+    expect(drifted.reason).toContain("MCP");
+
+    // 键序不同不是漂移：`claude plugin list --json` 不保证跟文件同序。
+    const reordered = inspectClaudePluginBundle({
+      ...pluginEntry,
+      mcpServers: Object.fromEntries(Object.entries(shippedMcpServers).reverse()),
+    });
+    expect(reordered.valid).toBe(true);
+
+    // 少一台 server / 换掉 command，同样要拦。
+    expect(inspectClaudePluginBundle({
+      ...pluginEntry,
+      mcpServers: { agentparty: shippedMcpServers.agentparty },
+    }).valid).toBe(false);
+    expect(inspectClaudePluginBundle({
+      ...pluginEntry,
+      mcpServers: {
+        ...shippedMcpServers,
+        agentparty: { ...shippedMcpServers.agentparty, command: "/usr/local/bin/evil" },
+      },
+    }).valid).toBe(false);
+  });
+
+  // #1096：插件与 CLI 同版时 `claude plugin update` 只会回 already latest——它不能是修法。
+  test("does not hand out a no-op plugin update when the bundle is invalid at the matching version", () => {
+    const sameVersion = claudePluginDoctorFixLines({
+      blockers: ["plugin_bundle_invalid"],
+      plugin: { installed: true, enabled: true, version, bundle_valid: false, launcher_executable: true, bundle_reason: "MCP 对不上" },
+      runtime_version: version,
+    });
+    expect(sameVersion.some((line) => /claude plugin update/.test(line))).toBe(false);
+    expect(sameVersion.some((line) => /claude plugin uninstall/.test(line))).toBe(true);
+    // 包是 defaultEnabled: false：重装完不 enable，人就从 bundle_invalid 掉进 plugin_disabled。
+    expect(sameVersion.some((line) => /claude plugin enable/.test(line))).toBe(true);
+    expect(sameVersion.some((line) => line.includes("MCP 对不上"))).toBe(true);
+
+    const olderPlugin = claudePluginDoctorFixLines({
+      blockers: ["plugin_bundle_invalid"],
+      plugin: { installed: true, enabled: true, version: "0.0.1", bundle_valid: false, launcher_executable: true },
+      runtime_version: version,
+    });
+    expect(olderPlugin.some((line) => /claude plugin update/.test(line))).toBe(true);
   });
 
   test("inspects the Marketplace lifecycle shell without touching auth, channel, or presence", () => {

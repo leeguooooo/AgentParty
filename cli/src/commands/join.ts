@@ -515,11 +515,22 @@ function claudePluginRemedy(shell: ClaudePluginShellInspection, rerun: string = 
       };
     case "plugin_disabled":
       return { do: `claude plugin enable ${CLAUDE_PLUGIN}`, notes: [restart] };
-    case "plugin_bundle_invalid":
-      return {
-        do: `claude plugin update ${CLAUDE_PLUGIN}`,
-        notes: ["本机插件包与这个版本的 CLI 对不上（缺 launcher / hooks 接线）", restart],
-      };
+    case "plugin_bundle_invalid": {
+      // #1096：版本已经对齐时 update 只会回 already latest，端出去就是让人原地转圈；
+      // 到底哪一项对不上由 bundle_reason 说，别再猜「缺 launcher / hooks 接线」。
+      const detail = shell.plugin.bundle_reason ?? "本机插件包的接线跟这个版本对不上";
+      if (shell.plugin.version === RUNNING_VERSION) {
+        return {
+          do: `claude plugin uninstall ${CLAUDE_PLUGIN} && claude plugin install ${CLAUDE_PLUGIN} && claude plugin enable ${CLAUDE_PLUGIN}`,
+          notes: [
+            `${detail}；插件 ${RUNNING_VERSION} 已经和 CLI 同版，再更新一次只会回 already latest——所以要重装`,
+            "重装后还是这条，就是我们的 bug：https://github.com/leeguooooo/AgentParty/issues",
+            restart,
+          ],
+        };
+      }
+      return { do: `claude plugin update ${CLAUDE_PLUGIN}`, notes: [detail, restart] };
+    }
     case "claude_unavailable":
       return { do: `把 claude 放到 PATH 上（或先装 Claude Code），然后重跑 ${rerun}`, notes: [] };
     case "claude_version_unsupported":
