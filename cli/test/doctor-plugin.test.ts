@@ -156,6 +156,8 @@ describe("party doctor claude-plugin", () => {
     });
     expect(sameVersion.some((line) => /claude plugin update/.test(line))).toBe(false);
     expect(sameVersion.some((line) => /claude plugin uninstall/.test(line))).toBe(true);
+    // 包是 defaultEnabled: false：重装完不 enable，人就从 bundle_invalid 掉进 plugin_disabled。
+    expect(sameVersion.some((line) => /claude plugin enable/.test(line))).toBe(true);
     expect(sameVersion.some((line) => line.includes("MCP 对不上"))).toBe(true);
 
     const olderPlugin = claudePluginDoctorFixLines({

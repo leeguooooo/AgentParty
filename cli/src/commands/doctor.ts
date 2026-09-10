@@ -398,6 +398,12 @@ function expectedMcpServers(root: string, manifest: Record<string, unknown>): Re
   return servers;
 }
 
+/**
+ * 逐项核对已装的插件包：launcher 可执行、plugin.json 与已装版本一致、channels 接线、
+ * Claude 注册的 MCP == 包里发的清单、hooks 指向包内 launcher。
+ *
+ * 不过就带上 `reason` 说清是哪一项——「插件坏了」这四个字对修它的人毫无用处（#1096）。
+ */
 export function inspectClaudePluginBundle(plugin: InstalledClaudePlugin): ClaudePluginBundleInspection {
   let launcherExecutable = false;
   try {
@@ -422,7 +428,8 @@ export function inspectClaudePluginBundle(plugin: InstalledClaudePlugin): Claude
     const expected = expectedMcpServers(root, manifest);
     if (expected === null) return fail("包里的 MCP 清单缺 agentparty / agentparty-channel，或它们没指向包内的 launcher");
     if (!sameJson(plugin.mcpServers, expected)) {
-      return fail("Claude 注册的 MCP 接线跟这个包发的清单对不上（重装插件；若刚升过 CLI，先 party upgrade）");
+      // 只陈述事实：该重装还是该升级由 fix 行按版本关系判，remedy 写进 reason 会跟它打架。
+      return fail("Claude 注册的 MCP 接线跟这个包发的清单对不上");
     }
     const hooks = json(resolve(root, "hooks/hooks.json"));
     if (!record(hooks) || !record(hooks.hooks)) return fail("hooks/hooks.json 不是一个带 hooks 的对象");
@@ -734,7 +741,10 @@ export function claudePluginDoctorFixLines(
       lines.push(
         `  fix: installed plugin ${report.plugin.version} already matches runtime ${report.runtime_version}, ` +
           "so updating it again changes nothing (it just reports \"already at the latest version\"); reinstall instead: " +
-          "claude plugin uninstall agentparty@agentparty && claude plugin install agentparty@agentparty",
+          // 包是 defaultEnabled: false，重装后不 enable 就直接掉进 plugin_disabled——
+          // 一条「别再让人白跑」的修法自己白跑一趟，那就白改了。
+          "claude plugin uninstall agentparty@agentparty && claude plugin install agentparty@agentparty" +
+          " && claude plugin enable agentparty@agentparty, then restart Claude Code",
       );
       lines.push("  fix: still invalid after a reinstall? that is our bug — report it at https://github.com/leeguooooo/AgentParty/issues");
     } else {
