@@ -7,7 +7,7 @@ import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../
 import { configResolutionLabel, localAgentConfigsForChannel, readConfigWithSource, resolveChannel } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, fetchPresence, fetchRuntimePeers, RestError, type Identity } from "../rest";
-import { stripTerminalControls } from "../format";
+import { sanitizeSingleLine, stripTerminalControls } from "../format";
 import { shellQuote } from "../codex-trust-gate";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { INSTALL_LINE, OWNER_REPO, RUNNING_VERSION, compareVersions, pendingUpgrade } from "../upgrade";
@@ -235,6 +235,8 @@ interface InstalledClaudePlugin {
 export interface ClaudePluginBundleInspection {
   valid: boolean;
   launcherExecutable: boolean;
+  /** #1096：具体是哪一项没过。valid 时缺席——「缺 launcher / hooks 接线」那种猜测式说法害人。 */
+  reason?: string;
 }
 
 export interface ClaudePluginShellInspection {
@@ -248,6 +250,8 @@ export interface ClaudePluginShellInspection {
     version?: string;
     bundle_valid: boolean;
     launcher_executable: boolean;
+    /** #1096：bundle_valid 为 false 时，说清是哪一项对不上。 */
+    bundle_reason?: string;
   };
   model_calls_started: false;
 }
@@ -265,6 +269,8 @@ export interface ClaudePluginDoctorReport {
     version?: string;
     bundle_valid: boolean;
     launcher_executable: boolean;
+    /** #1096：bundle_valid 为 false 时，说清是哪一项对不上。 */
+    bundle_reason?: string;
   };
   auth: {
     configured: boolean;
@@ -353,25 +359,73 @@ function json(path: string): unknown {
   return JSON.parse(readFileSync(path, "utf8")) as unknown;
 }
 
+/** 深比较：`claude plugin list --json` 回来的键序不保证跟文件一致，别拿 JSON.stringify 当相等。 */
+function sameJson(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((item, index) => sameJson(item, right[index]));
+  }
+  if (record(left) && record(right)) {
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length &&
+      keys.every((key) => key in right && sameJson(left[key], right[key]));
+  }
+  return false;
+}
+
+/**
+ * 期望的 MCP 接线取自这个包**自己**的清单，而不是 CLI 里的一份硬编码副本。
+ *
+ * #1096：#1089 把包里的 `agentparty` 改成了 `mcp --all-channels`，而这里还写着 `["mcp"]`，
+ * 于是每台装了 0.2.263+ 插件的机器都被判成 bundle 坏掉——而给出的修法（plugin update）
+ * 永远是空操作，人就卡死在那儿。包装参数属于打包细节，只有「Claude 注册的 == 这个包发的」
+ * 才是这里要守的不变量；下面那几条 command / 关键 flag 的断言守的是安全语义。
+ */
+function expectedMcpServers(root: string, manifest: Record<string, unknown>): Record<string, unknown> | null {
+  const declared = manifest.mcpServers;
+  const source = typeof declared === "string" ? json(resolve(root, declared)) : declared;
+  const servers = record(source) && record(source.mcpServers) ? source.mcpServers : source;
+  if (!record(servers)) return null;
+  for (const name of ["agentparty", "agentparty-channel"]) {
+    const server = servers[name];
+    if (!record(server) || server.command !== CLAUDE_RUNTIME_COMMAND || !Array.isArray(server.args)) return null;
+  }
+  const mcp = servers.agentparty as { args: unknown[] };
+  const channel = servers["agentparty-channel"] as { args: unknown[] };
+  if (mcp.args[0] !== "mcp") return null;
+  if (channel.args[0] !== "claude-channel" || !channel.args.includes("--require-launch-opt-in")) return null;
+  return servers;
+}
+
 export function inspectClaudePluginBundle(plugin: InstalledClaudePlugin): ClaudePluginBundleInspection {
+  let launcherExecutable = false;
   try {
     const root = realpathSync(plugin.installPath);
     const launcher = resolve(root, "bin/agentparty-runtime");
     const stat = lstatSync(launcher);
-    const launcherExecutable = stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o111) !== 0;
+    launcherExecutable = stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o111) !== 0;
+    const fail = (reason: string): ClaudePluginBundleInspection => ({ valid: false, launcherExecutable, reason });
+    if (!launcherExecutable) return fail("bin/agentparty-runtime 不是一个可执行的普通文件");
     const manifest = json(resolve(root, ".claude-plugin/plugin.json"));
+    if (!record(manifest)) return fail(".claude-plugin/plugin.json 不是一个对象");
+    if (manifest.version !== plugin.version) {
+      // 版本串是文件里的内容，进终端前清洗成一行（#372/#652）。
+      return fail(
+        `.claude-plugin/plugin.json 里写着 ${sanitizeSingleLine(String(manifest.version)).slice(0, 60)}，已装的却是 ${plugin.version}`,
+      );
+    }
+    if (manifest.defaultEnabled !== false) return fail("plugin.json 的 defaultEnabled 必须是 false");
+    if (!sameJson(manifest.channels, [{ server: "agentparty-channel" }])) {
+      return fail("plugin.json 没把 channels 接到 agentparty-channel 上");
+    }
+    const expected = expectedMcpServers(root, manifest);
+    if (expected === null) return fail("包里的 MCP 清单缺 agentparty / agentparty-channel，或它们没指向包内的 launcher");
+    if (!sameJson(plugin.mcpServers, expected)) {
+      return fail("Claude 注册的 MCP 接线跟这个包发的清单对不上（重装插件；若刚升过 CLI，先 party upgrade）");
+    }
     const hooks = json(resolve(root, "hooks/hooks.json"));
-    const expectedMcp = {
-      agentparty: { command: CLAUDE_RUNTIME_COMMAND, args: ["mcp"] },
-      "agentparty-channel": {
-        command: CLAUDE_RUNTIME_COMMAND,
-        args: ["claude-channel", "--require-launch-opt-in"],
-      },
-    };
-    if (!record(manifest) || manifest.version !== plugin.version || manifest.defaultEnabled !== false ||
-        JSON.stringify(manifest.channels) !== JSON.stringify([{ server: "agentparty-channel" }]) ||
-        JSON.stringify(plugin.mcpServers) !== JSON.stringify(expectedMcp) || !record(hooks) ||
-        !record(hooks.hooks)) return { valid: false, launcherExecutable };
+    if (!record(hooks) || !record(hooks.hooks)) return fail("hooks/hooks.json 不是一个带 hooks 的对象");
     for (const event of REQUIRED_HOOK_EVENTS) {
       const entries = hooks.hooks[event];
       const hookCommand = `"${CLAUDE_RUNTIME_COMMAND}" hook ${event === "Stop" ? "stop-guard" : "report"}`;
@@ -379,12 +433,16 @@ export function inspectClaudePluginBundle(plugin: InstalledClaudePlugin): Claude
           !Array.isArray(entries[0].hooks) || entries[0].hooks.length !== 1 ||
           !record(entries[0].hooks[0]) || entries[0].hooks[0].command !== hookCommand ||
           entries[0].hooks[0].args !== undefined) {
-        return { valid: false, launcherExecutable };
+        return fail(`hooks/hooks.json 的 ${event} 没接到 ${hookCommand}`);
       }
     }
-    return { valid: launcherExecutable, launcherExecutable };
-  } catch {
-    return { valid: false, launcherExecutable: false };
+    return { valid: true, launcherExecutable };
+  } catch (error) {
+    return {
+      valid: false,
+      launcherExecutable,
+      reason: `读插件包失败：${sanitizeSingleLine(error instanceof Error ? error.message : String(error)).slice(0, 200)}`,
+    };
   }
 }
 
@@ -462,6 +520,7 @@ export function inspectClaudePluginShell(
       ...(plugin === null ? {} : { version: plugin.version }),
       bundle_valid: bundle.valid,
       launcher_executable: bundle.launcherExecutable,
+      ...(bundle.reason === undefined ? {} : { bundle_reason: bundle.reason }),
     },
     model_calls_started: false,
   };
@@ -666,7 +725,21 @@ export function claudePluginDoctorFixLines(
         : `  fix: claude plugin update agentparty@agentparty (installed ${installed}, runtime ${report.runtime_version}; \`plugin install\` only reports "already installed" and never upgrades), then restart Claude Code`,
     );
   } else if (report.blockers.includes("plugin_bundle_invalid")) {
-    lines.push("  fix: claude plugin update agentparty@agentparty, then restart Claude Code");
+    // 包的内容来自文件系统，进终端前先清洗（#372/#652 的老规矩）。
+    const reason = report.plugin.bundle_reason;
+    if (reason !== undefined && reason !== "") lines.push(`  detail: ${stripTerminalControls(reason)}`);
+    // #1096：版本已经对齐时 `plugin update` 只会回 "already at the latest version"——
+    // 把它当修法端出去，人就在「更新→已是最新→还是坏的」里转圈。
+    if (report.plugin.version !== undefined && report.plugin.version === report.runtime_version) {
+      lines.push(
+        `  fix: installed plugin ${report.plugin.version} already matches runtime ${report.runtime_version}, ` +
+          "so updating it again changes nothing (it just reports \"already at the latest version\"); reinstall instead: " +
+          "claude plugin uninstall agentparty@agentparty && claude plugin install agentparty@agentparty",
+      );
+      lines.push("  fix: still invalid after a reinstall? that is our bug — report it at https://github.com/leeguooooo/AgentParty/issues");
+    } else {
+      lines.push("  fix: claude plugin update agentparty@agentparty, then restart Claude Code");
+    }
   }
   if (report.blockers.includes("claude_version_unsupported")) {
     lines.push(`  fix: update Claude Code to >= ${CLAUDE_PLUGIN_MIN_VERSION.join(".")}`);

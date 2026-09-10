@@ -127,7 +127,9 @@ export type ClaudeLaunchPreflight = {
  * 只有这些会随「刚跑过的那次 update」而失效；其余 blocker 的修法与插件无关。
  */
 export function isPluginFixLine(line: string): boolean {
-  return /claude plugin (install|enable|update)|party upgrade/.test(line);
+  // `detail:` 目前只有 plugin_bundle_invalid 会产出（#1096），它跟插件那条修法同生共死：
+  // 自愈动过插件又没能重新检查时，两条一起收起来，别留一句过时的诊断。
+  return /claude plugin (install|uninstall|enable|update)|party upgrade/.test(line) || /^\s*detail: /.test(line);
 }
 
 /** 版本号带预发行/构建后缀（-beta.1、+build）——数字段比较对它不成立。 */
