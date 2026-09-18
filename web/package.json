@@ -14,26 +14,26 @@
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-autostart": "2.5.1",
-    "@tauri-apps/plugin-deep-link": "2.4.9",
-    "@tauri-apps/plugin-dialog": "^2.3.0",
-    "@tauri-apps/plugin-notification": "2.3.3",
-    "@tauri-apps/plugin-opener": "2.5.4",
+    "@tauri-apps/plugin-deep-link": "2.4.10",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
+    "@tauri-apps/plugin-notification": "2.4.0",
+    "@tauri-apps/plugin-opener": "2.5.5",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
-    "dompurify": "^3.4.14",
+    "@tauri-apps/plugin-updater": "^2.11.0",
+    "dompurify": "^3.4.15",
     "highlight.js": "^11.12.0",
-    "marked": "^18.0.11",
-    "pinyin-pro": "^3.29.3",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "marked": "^18.0.12",
+    "pinyin-pro": "^3.29.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.5",
-    "@types/react-test-renderer": "19.1.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/react-test-renderer": "19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
-    "react-test-renderer": "19.2.8",
+    "react-test-renderer": "19.3.0",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2"
+    "vite": "^8.3.0"
   }
 }
