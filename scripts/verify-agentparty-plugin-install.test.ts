@@ -20,16 +20,8 @@ function installedEntry(installPath: string, enabled: boolean) {
     scope: "user",
     enabled,
     installPath,
-    mcpServers: {
-      agentparty: {
-        command: "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime",
-        args: ["mcp", "--all-channels"],
-      },
-      "agentparty-channel": {
-        command: "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime",
-        args: ["claude-channel", "--require-launch-opt-in"],
-      },
-    },
+    // #1099：从包本身读，不手抄。
+    mcpServers: JSON.parse(readFileSync(resolve(root, "plugins/agentparty/claude-mcp.json"), "utf8")).mcpServers,
   };
 }
 
@@ -121,6 +113,7 @@ describe("AgentParty plugin install acceptance", () => {
       cached_bundle_exact: true,
       generic_mcp_exact: true,
       channel_mcp_exact: true,
+      doctor_bundle_valid: true,
       channel_declared: true,
       lifecycle_hooks_present: true,
       standard_hooks_autoload_safe: true,
@@ -148,6 +141,23 @@ describe("AgentParty plugin install acceptance", () => {
       [installedEntry(enabledEarly.installPath, true)],
       [installedEntry(enabledEarly.installPath, true)],
     )).toThrow("plugin enablement or version did not match");
+  });
+
+  test("runs the installed entry through the doctor's bundle inspector, not just a self-consistency check", () => {
+    // #1099：包和检查器一起漂时，「装上的 == 包里的」照样成立；只有喂给检查器才会红。
+    const marketplace = mkdtempSync(join(tmpdir(), "agentparty-plugin-install-market-"));
+    cleanup.push(marketplace);
+    mkdirSync(join(marketplace, "cli"), { recursive: true });
+    cpSync(resolve(root, "cli/package.json"), join(marketplace, "cli/package.json"));
+    cpSync(resolve(root, "plugins/agentparty"), join(marketplace, "plugins/agentparty"), { recursive: true });
+    const drifted = JSON.parse(readFileSync(join(marketplace, "plugins/agentparty/claude-mcp.json"), "utf8"));
+    drifted.mcpServers.agentparty.args[0] = "mcx";
+    writeFileSync(join(marketplace, "plugins/agentparty/claude-mcp.json"), `${JSON.stringify(drifted, null, 2)}\n`);
+    const { configDirectory, installPath } = fixture();
+    cpSync(join(marketplace, "plugins/agentparty/claude-mcp.json"), join(installPath, "claude-mcp.json"));
+    const entry = (enabled: boolean) => ({ ...installedEntry(installPath, enabled), mcpServers: drifted.mcpServers });
+    expect(() => inspectAgentPartyPluginInstall(marketplace, configDirectory, [entry(false)], [entry(true)]))
+      .toThrow("installed plugin failed inspectClaudePluginBundle");
   });
 
   test("parses only complete plugin list entries", () => {
