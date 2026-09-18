@@ -1,0 +1,79 @@
+# dependabot 的 bun 更新只抬根上的 zod，依赖 zod 的包会在 bun.lock 里留着嵌套的
+# "<pkg>/zod" 旧版本，两份 zod 让 cli 的 tsc 报一片 AnySchema 类型错误（#1101、#1112）。
+# 这里在 dependabot 推到 dependabot/bun/** 时自动去重、删掉 node_modules 重装，
+# 再把 bun.lock 推回原分支。
+#
+# 为什么不会循环：
+#   - 只在 dependabot[bot] 推送时运行（if: github.actor），我们自己推的提交作者不是它；
+#   - 用 GITHUB_TOKEN 推送的提交本来就不会触发新的 workflow run；
+#   - 没有嵌套 zod 时直接退出，不提交任何东西。
+# 只动 bun.lock：重装后如果 bun.lock 以外还有文件变化，就失败退出，不推送。
+#
+# 注意：GITHUB_TOKEN 推的提交也不会触发 PR 的 CI。推送后会在 PR 上留评论，
+# 需要有人关掉再重新打开 PR（或推一个空提交）让 CI 在新 head 上重跑。
+name: dependabot zod dedupe
+
+on:
+  push:
+    branches:
+      - "dependabot/bun/**"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependabot-zod-dedupe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dedupe:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: strip nested zod entries
+        id: strip
+        run: |
+          out=$(bun scripts/dedupe-zod-lock.ts bun.lock)
+          echo "$out"
+          if [ "$out" = "removed 0 nested zod entries" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: clean reinstall
+        if: steps.strip.outputs.changed == 'true'
+        run: |
+          rm -rf node_modules */node_modules
+          bun install
+          count=$(grep -cE '^\s*"([^"]+/)?zod": \["zod@' bun.lock)
+          if [ "$count" != "1" ]; then
+            echo "::error::bun.lock still has $count zod entries after reinstall"
+            exit 1
+          fi
+      - name: push bun.lock back
+        if: steps.strip.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          changed=$(git status --porcelain | awk '{print $2}')
+          if [ "$changed" != "bun.lock" ]; then
+            echo "::error::expected only bun.lock to change, got: $changed"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bun.lock
+          git commit -m "chore(deps): dedupe nested zod in bun.lock"
+          git push origin "HEAD:$BRANCH"
+          pr=$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number')
+          if [ -n "$pr" ]; then
+            gh pr comment "$pr" --body "已自动给 bun.lock 去重，只保留一份 zod。这次推送用的是 GITHUB_TOKEN，不会触发 CI；请关掉再重新打开这个 PR，让 CI 在新 head 上重跑。"
+          fi

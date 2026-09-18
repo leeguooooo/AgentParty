@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripNestedZod, zodEntries } from "./dedupe-zod-lock";
 
 type DependabotUpdate = {
   "package-ecosystem": string;
@@ -101,5 +102,37 @@ describe("release.yml bun audit 步骤 (#137 供应链输入侧)", () => {
 
   test('required 门禁 job 名字仍是 "full check"（改名会让分支保护的 required check 消失）', () => {
     expect(releaseYml).toContain("name: full check");
+  });
+});
+
+// #1101 / #1112：zod 在 bun.lock 里必须只有一份，两份会让 cli 的 tsc 报 AnySchema 类型错误。
+describe("bun.lock 里 zod 只有一份", () => {
+  const lock = readFileSync(join(repoRoot, "bun.lock"), "utf8");
+  const dupFixture = [
+    '    "zod": ["zod@4.6.5", "", {}, "sha512-a"],',
+    '    "@modelcontextprotocol/sdk/zod": ["zod@4.6.2", "", {}, "sha512-b"],',
+    '    "zodiac": ["zodiac@1.0.0", "", {}, "sha512-c"],',
+    "",
+  ].join("\n");
+
+  function assertSingleZod(text: string) {
+    const entries = zodEntries(text);
+    if (entries.length !== 1) {
+      throw new Error(
+        `bun.lock 里有 ${entries.length} 份 zod：${entries.map((e) => `${e.key}@${e.version}`).join(", ")}。` +
+          "跑 `bun scripts/dedupe-zod-lock.ts && rm -rf node_modules && bun install` 去重。",
+      );
+    }
+  }
+
+  test("真实 bun.lock 只有一条 zod 条目", () => {
+    assertSingleZod(lock);
+  });
+
+  test("变异自检：重复的 fixture 必须被判红，去重后变绿", () => {
+    expect(() => assertSingleZod(dupFixture)).toThrow(/2 份 zod.*@modelcontextprotocol\/sdk\/zod@4\.6\.2/);
+    const fixed = stripNestedZod(dupFixture);
+    expect(() => assertSingleZod(fixed)).not.toThrow();
+    expect(fixed).toContain('"zodiac"');
   });
 });
