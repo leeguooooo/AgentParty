@@ -23,6 +23,14 @@ updates:
       - "dependencies"
     commit-message:
       prefix: "chore(deps)"
+    # worker 测试跑在 @cloudflare/vitest-pool-workers 上，它钉死 peer vitest ^4.1.0
+    # （0.22.0 仍是），vitest 5 下 workerd 直接 SyntaxError（#1095）。池子支持 5 之前
+    # 别让 dependabot 再开 vitest major 的 PR；池子升级后删掉这条。
+    ignore:
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@vitest/*"
+        update-types: ["version-update:semver-major"]
     groups:
       minor-and-patch:
         update-types:
