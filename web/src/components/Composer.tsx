@@ -16,6 +16,7 @@ import {
 } from "../lib/mentions";
 import { useT, type TFunc } from "../i18n/useT";
 import { FeatureTip } from "./FeatureTip";
+import { desktopClipboardReader } from "../lib/desktopClipboard";
 import "../i18n/strings/Composer";
 import "../i18n/strings/WakeReceipt";
 
@@ -42,6 +43,8 @@ interface Props {
   readClipboard?: () => Promise<ClipboardPayload>;
   // 默认取 window.isSecureContext；测试注入以模拟 http://公网IP。
   secureContext?: boolean;
+  // 桌面壳原生剪贴板桥（只读文本）。缺省自动探测；非 null 时优先走它，不看 secureContext。
+  nativeClipboard?: (() => Promise<string>) | null;
 }
 
 // 剪贴板读取结果：文本进草稿，文件走现有 onPickFiles。
@@ -185,6 +188,7 @@ export function Composer({
   uploadError = null,
   readClipboard = defaultReadClipboard,
   secureContext = typeof window === "undefined" ? false : window.isSecureContext === true,
+  nativeClipboard = desktopClipboardReader(),
 }: Props) {
   const t = useT();
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -377,14 +381,15 @@ export function Composer({
 
   // 显式粘贴（#1102）：非安全上下文不碰 Clipboard API，直接说明原因；
   // 安全上下文读剪贴板——文件走 onPickFiles，文本插到光标处（草稿空则整段填入）。
+  const canReadClipboard = nativeClipboard !== null || secureContext;
   const onPasteClick = async () => {
-    if (!secureContext) {
+    if (nativeClipboard === null && !secureContext) {
       setPasteError(t("Composer.paste.insecureHint"));
       return;
     }
     let payload: ClipboardPayload;
     try {
-      payload = await readClipboard();
+      payload = nativeClipboard !== null ? { text: await nativeClipboard(), files: [] } : await readClipboard();
     } catch {
       setPasteError(t("Composer.paste.denied"));
       return;
@@ -597,10 +602,10 @@ export function Composer({
         )}
         <button
           type="button"
-          className={"d-btn composer-paste" + (secureContext ? "" : " composer-paste--insecure")}
-          aria-disabled={secureContext ? undefined : true}
+          className={"d-btn composer-paste" + (canReadClipboard ? "" : " composer-paste--insecure")}
+          aria-disabled={canReadClipboard ? undefined : true}
           onClick={() => void onPasteClick()}
-          title={secureContext ? t("Composer.paste.title") : t("Composer.paste.insecureTitle")}
+          title={canReadClipboard ? t("Composer.paste.title") : t("Composer.paste.insecureTitle")}
         >
           {t("Composer.paste.label")}
         </button>
