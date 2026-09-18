@@ -69,6 +69,7 @@ import {
 import { acquireTaskLeaseAcrossMachines, releaseTaskLeaseAcrossMachines } from "../task-lease-remote";
 import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
 import { settleClaudeDeliveryRecovery } from "../delivery-recovery-journal";
+import { readOcsRoster } from "../ocs-roster";
 
 const HELP = `usage: party mcp [--channel <slug> | --all-channels] [--identity <label>]
        party mcp migrate [--dry-run] [--yes]
@@ -935,7 +936,7 @@ export function createMcpServer(defaultChannel?: string, aggregateChannels: bool
     {
       title: "Channel presence",
       description:
-        "Return current presence/wakeability for a channel, plus send_budget — how many more messages you may send before the loop guard blocks you (#815). Check it before composing a long message.",
+        "Return current presence/wakeability for a channel, plus local_agents — other live sessions on this machine from `ocs who` (addr + copyable intervene command; mention only when party_name is set; never @ an ocs addr), plus send_budget — how many more messages you may send before the loop guard blocks you (#815). Check it before composing a long message.",
       inputSchema: {
         channel: z.string().optional(),
       },
@@ -951,10 +952,13 @@ export function createMcpServer(defaultChannel?: string, aggregateChannels: bool
           fetchPresence(cfg.server, cfg.token, resolved),
           getLoopGuard(cfg.server, cfg.token, resolved).catch(() => null),
         ]);
+        // #1104：本机 ocs 会话（频道外也能叫来介入）；ocs 缺席只给 hint，不当故障。
+        const ocs = readOcsRoster({ presence, channel: resolved });
         return ok({
           type: "who",
           channel: resolved,
           presence,
+          local_agents: ocs.status === "ok" ? { available: true, rows: ocs.rows } : { available: false, hint: ocs.hint },
           ...(budget === null
             ? {}
             : {
