@@ -16,12 +16,14 @@
 //    + config 路径（#924 加入即绑定）；token 只在 config 文件里，绝不进 argv / 日志（#676）。
 //  - **token 有效与否要真问服务端**：本地有 config 不等于还能用——token 被 owner 撤了、身份被改名了，
 //    只有 /api/me 知道。401/403 ⇒ 停在第 1 步，说清是 token 失效，修法是走 party join（带占位 token）。
-//  - **没绑定不猜**：本机该频道没有绑定就是没接入过（或绑定文件丢了），修法只有一条：party join。
+//  - **没绑定先扫再下结论**（#1098）：绑定文件里没有时扫 agents/*.json 并真问 /api/me；一份活的就用它并补写绑定，
+//    多份就列出来不猜，一份都没有才说没接入过，修法 party join。
 //  - **不交互**：recover 没有要问人的步骤；--yes 只为与 join 同形（接入包/技能表照抄不用改）。
 import { readFileSync } from "node:fs";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { agentpartyHome } from "../config";
-import { detectHarnessFromAncestry, joinBindingsPath, readJoinBindings, type BindingHarness, type JoinBinding } from "../join-binding";
+import { detectHarnessFromAncestry, joinBindingsPath, normalizeBindingServer, readJoinBindings, writeJoinBinding, type BindingHarness, type JoinBinding } from "../join-binding";
+import { probeLiveAlternateIdentities } from "./doctor";
 import { type JoinPackHarness, mcpServerName } from "@agentparty/shared/onboarding";
 import { RestError, fetchMe, type Identity } from "../rest";
 import { isSlug } from "../validation";
@@ -61,6 +63,11 @@ export interface RecoverDeps extends JoinDeps {
   fetchMe: (server: string, token: string) => Promise<Identity>;
   /** 进程祖先链探出的 harness（缺省 detectHarnessFromAncestry）；探不出 null。 */
   detectHarness: () => BindingHarness | null;
+  /**
+   * #1098：绑定文件里没有该频道时，扫本机 ~/.agentparty/agents/*.json 并逐个问 /api/me 验活——
+   * 就是 doctor 的 probeLiveAlternateIdentities（#1015），这里不重写。返回验活通过的那些。
+   */
+  probeLocalIdentities: (channel: string) => Promise<Array<{ name: string; path: string; server: string }>>;
 }
 
 export interface RecoverOptions {
@@ -124,6 +131,17 @@ function readBindingConfig(path: string): RecoveredBinding["config"] | null {
   }
 }
 
+/** 补写绑定用：config 里服务端确认过的 owner；读不到就 null（与老配置同组）。 */
+function readConfigOwner(path: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { identity?: { owner?: unknown } | null };
+    const owner = parsed.identity?.owner;
+    return typeof owner === "string" && owner !== "" ? owner : null;
+  } catch {
+    return null;
+  }
+}
+
 interface RecoverCtx extends JoinCtx {
   recoverDeps: RecoverDeps;
   recovered: RecoveredBinding | null;
@@ -142,20 +160,66 @@ export function recoverIdentityStep(rerun: string): Step<RecoverCtx> {
       const detected = deps.detectHarness();
       const bindings = readJoinBindings(deps.bindingsPath);
       const picked = pickBinding(bindings, { channel: slug, cwd: deps.cwd, harnessFlag: opts.harnessFlag, detected });
+      let chosen: JoinBinding;
+      let candidates = 1;
+      const detail: string[] = [];
       if (picked === null) {
+        // #1098：绑定文件里没有 ≠ 机器上没有。老用户、party init --token、party claude 直接重绑、
+        // 绑定文件丢了——这些身份都只在 agents/*.json 里。先扫、逐个真问 /api/me，再下结论。
         const harness = opts.harnessFlag ?? detected;
         const scope = opts.harnessFlag === null ? "" : `（${opts.harnessFlag} 档）`;
-        return {
-          ok: false,
-          summary: `本机没有 #${slug} 的身份绑定${scope}——这台机器没接入过这个频道（或 ${deps.bindingsPath} 丢了）`,
-          fix: {
-            do: joinCommandHint({ server: null, channel: slug, agentName: null, harness }),
-            notes: ["recover 只能找回接入过的身份；第一次接入（或绑定文件丢了）要走 party join，token 找邀请人 / owner 拿。"],
-          },
+        const live = await deps.probeLocalIdentities(slug);
+        if (live.length === 0) {
+          return {
+            ok: false,
+            summary: `本机没有 #${slug} 能用的身份${scope}：${deps.bindingsPath} 里没有绑定，agents 目录里也没有验活通过的 #${slug} 身份配置——这台机器没接入过这个频道`,
+            fix: {
+              do: joinCommandHint({ server: null, channel: slug, agentName: null, harness }),
+              notes: ["recover 只能找回接入过的身份；第一次接入要走 party join，token 找邀请人 / owner 拿。"],
+            },
+          };
+        }
+        if (live.length > 1) {
+          return {
+            ok: false,
+            summary: `本机有 ${live.length} 份验活通过的 #${slug} 身份配置，不替你猜用哪一份`,
+            detail: live.map((c) => `${c.name} · ${c.server} · config ${c.path}`),
+            fix: {
+              do: `AGENTPARTY_CONFIG=<上面挑一份 config 路径> party claude ${slug}`,
+              notes: ["或者把用不着的那几份 config 移走，再重跑 party recover。"],
+            },
+          };
+        }
+        const found = live[0]!;
+        if (harness === null) {
+          return {
+            ok: false,
+            summary: `找到了本机 #${slug} 的身份 ${found.name}（config ${found.path}），但认不出它跑在哪个 harness 上`,
+            fix: { do: `party recover ${slug} --harness claude`, notes: ["codex 档换成 --harness codex；两者都不是用 --harness other。"] },
+          };
+        }
+        chosen = {
+          harness,
+          server: normalizeBindingServer(found.server),
+          channel: slug,
+          owner: readConfigOwner(found.path),
+          identity: found.name,
+          config_path: found.path,
+          cwd: deps.cwd,
+          created_at: Date.now(),
         };
+        detail.push(`${deps.bindingsPath} 里没有 #${slug} 的绑定；在本机身份配置里找到了 ${found.name}（服务端验活通过）`);
+        try {
+          writeJoinBinding(deps.bindingsPath, chosen, { replace: false });
+          detail.push(`已把这条绑定补写回 ${deps.bindingsPath}，下次不用再扫`);
+        } catch (e) {
+          detail.push(`补写绑定失败（${e instanceof Error ? e.message : String(e)}），不影响这次恢复`);
+        }
+      } else {
+        chosen = picked.chosen;
+        candidates = picked.candidates;
       }
-      const { chosen, candidates } = picked;
-      const detail: string[] = [`绑定：${chosen.harness} 档 · ${chosen.server} · config ${chosen.config_path}`];
+      detail.push(`绑定：${chosen.harness} 档 · ${chosen.server} · config ${chosen.config_path}`);
       if (candidates > 1) {
         detail.push(`本机 #${slug} 有 ${candidates} 条绑定，选了${chosen.cwd === deps.cwd ? "本目录（cwd 相同）" : "最近加入"}的这条；不对就带 --harness 指定`);
       }
@@ -326,5 +390,6 @@ export function defaultRecoverDeps(slug: string): RecoverDeps {
     cwd: process.cwd(),
     fetchMe: (server, token) => fetchMe(server, token),
     detectHarness: () => detectHarnessFromAncestry(process.ppid),
+    probeLocalIdentities: (channel) => probeLiveAlternateIdentities(channel, null),
   };
 }
