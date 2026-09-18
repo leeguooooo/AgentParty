@@ -20,6 +20,7 @@ import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../
 import { sanitizeSingleLine } from "../format";
 import { buildPullWakeLookup, pullWakeDelivers, type PullWakeHint, type PullWakeLookup } from "../pull-wake";
 import { isSlug } from "../validation";
+import { emitOcsJson, readOcsRoster, renderOcsSection } from "../ocs-roster";
 
 const WHO_FLAGS = ["channel", "json", "all"];
 const HELP = `usage: party who [channel|--channel C] [--all] [--json]
@@ -101,6 +102,14 @@ routes, or changes delivery state.
 Then bring one in: party send "@name …" --mention name
 A human is @-notified by their handle (their web client matches on handle, not the
 session name), so mention the "@handle" shown here — not a UUID session name.
+
+Local agents (#1104): after the channel list, sessions from \`ocs who\` on this
+machine (Claude / Codex / Pi, in or out of the channel) are listed with a copyable
+\`ocs dm <addr> "…"\`, plus \`party send --mention <name>\` when that session holds a
+party identity here. Order: current project, then party-wakeable, then others;
+your own session is marked (you). JSON rows carry source:"ocs" (addr/harness/cwd/
+same_project/host/self/wake/party_name/intervene/mention). ocs short ids are NOT
+channel names — never --mention them. Without ocs: one install hint, never an error.
 
 Options:
   --all         ignore the bound channel: list everyone you can reach across all
@@ -937,15 +946,19 @@ export async function run(argv: string[]): Promise<number> {
       taskLease = undefined;
     }
     const rows = buildRows(presence, { now, channel, cursorOf, runtimePeers, pullWake, ...(taskLease === undefined ? {} : { taskLease }) });
+    // #1104：本机 ocs 可达会话（频道外也能叫来介入）。永不抛、永不改退出码。
+    const ocs = readOcsRoster({ presence, channel });
     if (flags.json === true) {
       for (const r of rows) console.log(JSON.stringify(r));
+      emitOcsJson(ocs);
       return 0;
     }
     if (rows.length === 0) {
       console.log(`no one to mention in ${channel} yet`);
-      return 0;
     }
     for (const r of rows) console.log(renderRow(r, now, lastSeq, channel));
+    console.log("");
+    for (const line of renderOcsSection(ocs)) console.log(line);
     // #931：who 里出现了「这个身份还有别的执行体」，而本机那把闸没落下——这两件事必须放在一起
     // 说出来。此前它只在 `party status` 的 stderr 里有一行 warn，而 who 那行还在断言「会被拒」。
     if (taskLease !== undefined && shouldSurfaceTaskLeaseEnforcement(taskLease, rows.some(hasBlockingConflict))) {
@@ -1015,14 +1028,18 @@ async function runGlobalWho(cfg: { server: string; token: string; name?: string 
   }
   const now = Date.now();
   const rows = buildGlobalWho({ channels: snapshots, ...(cfg.name === undefined ? {} : { self: cfg.name }), now });
+  const ocs = readOcsRoster({ presence: snapshots.flatMap((snapshot) => snapshot.presence) });
   if (json) {
     for (const row of rows) console.log(JSON.stringify(row));
+    emitOcsJson(ocs);
     if (failed.length > 0) console.error(`could not read presence for: ${failed.join(", ")}`);
     // 部分频道读不到时结果是不完整的：退出码要反映这一点，否则脚本会把不完整当完整。
     return failed.length > 0 ? 1 : 0;
   }
   if (rows.length === 0) {
     console.log(summarizeGlobalWho(rows, snapshots.length, now).header);
+    console.log("");
+    for (const line of renderOcsSection(ocs)) console.log(line);
     if (failed.length > 0) {
       console.log(`could not read presence for: ${failed.join(", ")}`);
       return 1;
@@ -1040,9 +1057,12 @@ async function runGlobalWho(cfg: { server: string; token: string; name?: string 
   }
   if (summary.foldLine !== undefined) console.log(summary.foldLine);
   if (summary.legend !== undefined) console.log(summary.legend);
+  console.log("");
+  for (const line of renderOcsSection(ocs)) console.log(line);
   if (failed.length > 0) {
     console.log(`\ncould not read presence for: ${failed.join(", ")} — this list is incomplete`);
     return 1;
   }
   return 0;
 }
+

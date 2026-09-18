@@ -23,6 +23,7 @@ import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError } f
 import { buildRuntimeTopology } from "../runtime-topology";
 import { sanitizeSingleLine } from "../format";
 import { isSlug } from "../validation";
+import { emitOcsJson, readOcsRoster, renderOcsSection } from "../ocs-roster";
 
 const AGENTS_FLAGS = ["channel", "json"];
 const HELP = `usage: party agents [channel|--channel C] [--json]
@@ -46,7 +47,12 @@ Columns:
 Options:
   --channel C   read channel C instead of the bound channel
   --json        one JSON object per line
-                (name/kind/reach/channel/reach_reason/wake/busy/read_seq/behind/age_ms)`;
+                (name/kind/reach/channel/reach_reason/wake/busy/read_seq/behind/age_ms)
+
+Local agents (#1104): sessions from \`ocs who\` on this machine are listed after the
+table (JSON: source:"ocs", addr/harness/cwd/same_project/host/self/wake/intervene),
+each with a copyable \`ocs dm <addr> "…"\`, plus \`party send --mention <name>\` when
+that session also holds a party identity in this channel. No ocs = one install hint.`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描 / who.ts 一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 幽灵线，与 who.ts 一致
@@ -268,8 +274,16 @@ export async function run(argv: string[]): Promise<number> {
   }
   const channel = resolveChannel(str(flags.channel) ?? positionals[0]);
   if (!channel) {
-    console.error("no channel, pass one or bind with: party init --channel C");
-    return 1;
+    // #1104：没频道也能回答「本机还能叫谁介入」——列 ocs 会话，频道成员需显式给频道。
+    const ocs = readOcsRoster({});
+    if (flags.json === true) {
+      emitOcsJson(ocs);
+      return 0;
+    }
+    console.log("no channel bound — channel members need: party agents --channel C");
+    console.log("");
+    for (const line of renderOcsSection(ocs)) console.log(line);
+    return 0;
   }
   if (!isSlug(channel)) {
     console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
@@ -301,15 +315,19 @@ export async function run(argv: string[]): Promise<number> {
       lastSeq,
       localHealth: { cache: readHealthCache(process.cwd(), channel) },
     });
+    const ocs = readOcsRoster({ presence, channel });
     if (flags.json === true) {
       for (const r of rows) console.log(JSON.stringify(r));
+      emitOcsJson(ocs);
       return 0;
     }
     if (rows.length === 0) {
       console.log(`no addressable agents in ${channel} yet`);
-      return 0;
+    } else {
+      for (const line of renderAgentTable(rows)) console.log(line);
     }
-    for (const line of renderAgentTable(rows)) console.log(line);
+    console.log("");
+    for (const line of renderOcsSection(ocs)) console.log(line);
     return 0;
   } catch (e) {
     return handleRestError(e);
