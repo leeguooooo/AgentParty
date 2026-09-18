@@ -16,6 +16,7 @@ import {
 } from "../lib/mentions";
 import { useT, type TFunc } from "../i18n/useT";
 import { FeatureTip } from "./FeatureTip";
+import { desktopClipboardReader } from "../lib/desktopClipboard";
 import "../i18n/strings/Composer";
 import "../i18n/strings/WakeReceipt";
 
@@ -38,6 +39,51 @@ interface Props {
   onCancelUpload?: (id: string) => void;
   uploading?: boolean;
   uploadError?: string | null;
+  // 显式「粘贴」入口（#1102）。DI：默认读系统剪贴板；测试注入桩。
+  readClipboard?: () => Promise<ClipboardPayload>;
+  // 默认取 window.isSecureContext；测试注入以模拟 http://公网IP。
+  secureContext?: boolean;
+  // 桌面壳原生剪贴板桥（只读文本）。缺省自动探测；非 null 时优先走它，不看 secureContext。
+  nativeClipboard?: (() => Promise<string>) | null;
+}
+
+// 剪贴板读取结果：文本进草稿，文件走现有 onPickFiles。
+export interface ClipboardPayload {
+  text: string;
+  files: File[];
+}
+
+// 默认读取：优先 clipboard.read()（能拿到图片），不支持时退回 readText()。
+// 只在安全上下文调用；非安全上下文由组件直接分流，不会走到这里。
+export async function defaultReadClipboard(): Promise<ClipboardPayload> {
+  const clip = typeof navigator === "undefined" ? undefined : navigator.clipboard;
+  if (clip === undefined) throw new Error("clipboard unavailable");
+  if (typeof clip.read === "function") {
+    const items = await clip.read();
+    const files: File[] = [];
+    let text = "";
+    for (const item of items) {
+      const nonText = item.types.find((type) => !type.startsWith("text/"));
+      if (nonText !== undefined) {
+        const blob = await item.getType(nonText);
+        const ext = nonText.split("/")[1] ?? "bin";
+        files.push(new File([blob], `clipboard.${ext}`, { type: nonText }));
+      } else if (item.types.includes("text/plain")) {
+        text += await (await item.getType("text/plain")).text();
+      }
+    }
+    return { text, files };
+  }
+  return { text: await clip.readText(), files: [] };
+}
+
+function toFileList(files: File[]): FileList {
+  if (typeof DataTransfer === "function") {
+    const dt = new DataTransfer();
+    for (const f of files) dt.items.add(f);
+    return dt.files;
+  }
+  return files as unknown as FileList;
 }
 
 // 上传中/失败的附件（#176）：已完成的进 attachments，在途/失败的进 uploads，各自成 chip。
@@ -140,6 +186,9 @@ export function Composer({
   onCancelUpload,
   uploading = false,
   uploadError = null,
+  readClipboard = defaultReadClipboard,
+  secureContext = typeof window === "undefined" ? false : window.isSecureContext === true,
+  nativeClipboard = desktopClipboardReader(),
 }: Props) {
   const t = useT();
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -169,6 +218,7 @@ export function Composer({
   const composingGenRef = useRef(0);
   const activeMentionRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<MentionMenuState | null>(null);
+  const [pasteError, setPasteError] = useState<string | null>(null);
 
   // 自动增高（#340）：随内容长高、封顶 40vh（超出后框内滚动）；清空 draft 时缩回初始 3 行。
   useLayoutEffect(() => {
@@ -329,6 +379,45 @@ export function Composer({
     }
   };
 
+  // 显式粘贴（#1102）：非安全上下文不碰 Clipboard API，直接说明原因；
+  // 安全上下文读剪贴板——文件走 onPickFiles，文本插到光标处（草稿空则整段填入）。
+  const canReadClipboard = nativeClipboard !== null || secureContext;
+  const onPasteClick = async () => {
+    if (nativeClipboard === null && !secureContext) {
+      setPasteError(t("Composer.paste.insecureHint"));
+      return;
+    }
+    let payload: ClipboardPayload;
+    try {
+      payload = nativeClipboard !== null ? { text: await nativeClipboard(), files: [] } : await readClipboard();
+    } catch {
+      setPasteError(t("Composer.paste.denied"));
+      return;
+    }
+    if (payload.files.length > 0 && canAttach) {
+      setPasteError(null);
+      onPickFiles?.(toFileList(payload.files));
+      if (payload.text === "") return;
+    }
+    if (payload.text === "") {
+      setPasteError(t("Composer.paste.empty"));
+      return;
+    }
+    setPasteError(null);
+    const ta = taRef.current;
+    const start = draft === "" ? 0 : (ta?.selectionStart ?? draft.length);
+    const end = draft === "" ? 0 : (ta?.selectionEnd ?? start);
+    const next = draft.slice(0, start) + payload.text + draft.slice(end);
+    setDraft(next);
+    const pos = start + payload.text.length;
+    if (ta !== null && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+      });
+    }
+  };
+
   return (
     <div
       className={"composer" + (dragging ? " composer--dragging" : "")}
@@ -480,6 +569,11 @@ export function Composer({
         </ul>
       )}
       {uploadError !== null && <p className="banner banner--red composer-upload-error">{uploadError}</p>}
+      {pasteError !== null && (
+        <p className="composer-paste-error" role="alert">
+          {pasteError}
+        </p>
+      )}
       <FeatureTip tip="Tips.wake" className="composer-wake-tip" />
       <div className="composer-actions">
         {canAttach && (
@@ -506,6 +600,15 @@ export function Composer({
             </button>
           </>
         )}
+        <button
+          type="button"
+          className={"d-btn composer-paste" + (canReadClipboard ? "" : " composer-paste--insecure")}
+          aria-disabled={canReadClipboard ? undefined : true}
+          onClick={() => void onPasteClick()}
+          title={canReadClipboard ? t("Composer.paste.title") : t("Composer.paste.insecureTitle")}
+        >
+          {t("Composer.paste.label")}
+        </button>
         <button
           type="button"
           className="d-btn d-btn--primary composer-send"

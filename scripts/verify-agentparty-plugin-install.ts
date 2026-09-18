@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { inspectClaudePluginBundle } from "../cli/src/commands/doctor";
 
 const ACCEPTANCE_SCHEMA = "agentparty.plugin-install-acceptance.v1";
 const PLUGIN_ID = "agentparty@agentparty";
@@ -30,6 +31,7 @@ export type PluginInstallAcceptanceErrorCode =
   | "plugin_enable_failed"
   | "plugin_state_invalid"
   | "cached_bundle_mismatch"
+  | "doctor_bundle_invalid"
   | "internal_error";
 
 export class PluginInstallAcceptanceError extends Error {
@@ -56,6 +58,7 @@ export interface PluginInstallAcceptanceEvidence {
   cached_bundle_exact: true;
   generic_mcp_exact: true;
   channel_mcp_exact: true;
+  doctor_bundle_valid: true;
   channel_declared: true;
   lifecycle_hooks_present: true;
   standard_hooks_autoload_safe: true;
@@ -236,19 +239,29 @@ export function inspectAgentPartyPluginInstall(
     throw new PluginInstallAcceptanceError("cached_bundle_mismatch", "cached runtime launcher did not resolve the configured party binary");
   }
 
-  const expectedMcp = {
-    agentparty: {
-      command: "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime",
-      args: ["mcp", "--all-channels"],
-    },
-    "agentparty-channel": {
-      command: "${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime",
-      args: ["claude-channel", "--require-launch-opt-in"],
-    },
-  };
-  if (JSON.stringify(before.mcpServers) !== JSON.stringify(expectedMcp) ||
-      JSON.stringify(after.mcpServers) !== JSON.stringify(expectedMcp)) {
+  // #1099：期望的 MCP 接线从发出去的包本身读，不再在这里手抄一份——手抄副本会跟包一起漂
+  // （#1096 的 fixture 就是这么恒绿的），也会在包合法改动时误报。
+  const shippedMcp = JSON.parse(
+    readFileSync(resolve(pluginRoot, "claude-mcp.json"), "utf8"),
+  ) as { mcpServers?: unknown };
+  if (!record(shippedMcp.mcpServers)) {
+    throw new PluginInstallAcceptanceError("plugin_state_invalid", "claude-mcp.json did not declare mcpServers");
+  }
+  if (JSON.stringify(before.mcpServers) !== JSON.stringify(shippedMcp.mcpServers) ||
+      JSON.stringify(after.mcpServers) !== JSON.stringify(shippedMcp.mcpServers)) {
     throw new PluginInstallAcceptanceError("plugin_state_invalid", "AgentParty plugin MCP entries did not match");
+  }
+
+  // #1099：装完的条目必须过得了 `party doctor claude-plugin` 用的同一个检查器。
+  // 单测证明检查器会拒漂移的接线；这里证明我们自己发的包过得了它——两条缺一条 #1096 就会再来。
+  for (const entry of [before, after]) {
+    const inspection = inspectClaudePluginBundle(entry);
+    if (!inspection.valid) {
+      throw new PluginInstallAcceptanceError(
+        "doctor_bundle_invalid",
+        `installed plugin failed inspectClaudePluginBundle: ${inspection.reason ?? "unknown"}`,
+      );
+    }
   }
 
   const manifest = JSON.parse(
@@ -301,6 +314,7 @@ export function inspectAgentPartyPluginInstall(
     cached_bundle_exact: true,
     generic_mcp_exact: true,
     channel_mcp_exact: true,
+    doctor_bundle_valid: true,
     channel_declared: true,
     lifecycle_hooks_present: true,
     standard_hooks_autoload_safe: true,
@@ -396,6 +410,7 @@ deletes the temporary configuration on every exit.`);
       schema: ACCEPTANCE_SCHEMA,
       status: "failed",
       error_code: code,
+      ...(error instanceof PluginInstallAcceptanceError ? { reason: error.message } : {}),
       model_calls_started: false,
     }, null, 2));
     return 1;

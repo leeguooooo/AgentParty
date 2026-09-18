@@ -27,6 +27,12 @@ export const ComposerStrings: LocaleDict = {
     "Composer.upload.uploading": "uploading…",
     "Composer.upload.failed": "upload failed",
     "Composer.upload.retry": "retry",
+    "Composer.paste.label": "paste",
+    "Composer.paste.title": "paste clipboard text into the draft",
+    "Composer.paste.insecureTitle": "this page is not a secure context (plain http on an IP), so the browser blocks clipboard reads. Press Cmd/Ctrl+V inside the box, or open the domain address.",
+    "Composer.paste.insecureHint": "Paste button unavailable over plain http on an IP. Press Cmd/Ctrl+V inside the box, or open the domain address.",
+    "Composer.paste.empty": "clipboard is empty",
+    "Composer.paste.denied": "clipboard access was denied. Allow it in the browser, or press Cmd/Ctrl+V inside the box.",
   },
   zh: {
     "Composer.tier.online": "在线",
@@ -54,6 +60,12 @@ export const ComposerStrings: LocaleDict = {
     "Composer.upload.uploading": "上传中…",
     "Composer.upload.failed": "上传失败",
     "Composer.upload.retry": "重试",
+    "Composer.paste.label": "粘贴",
+    "Composer.paste.title": "把剪贴板里的文本粘贴到输入框",
+    "Composer.paste.insecureTitle": "当前页面不是安全上下文（用 http 直连 IP 打开），浏览器不允许读剪贴板。请在输入框里按 Cmd/Ctrl+V，或改用域名访问。",
+    "Composer.paste.insecureHint": "http 直连 IP 时无法用粘贴按钮。请在输入框里按 Cmd/Ctrl+V，或改用域名访问。",
+    "Composer.paste.empty": "剪贴板是空的",
+    "Composer.paste.denied": "没有读取剪贴板的权限。请在浏览器里允许，或在输入框里按 Cmd/Ctrl+V。",
   },
 };
 

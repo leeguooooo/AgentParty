@@ -16,6 +16,8 @@ import { fetchMe } from "../src/rest";
 import { runJoin } from "../src/commands/join";
 import { pickBinding, run as runRecoverCli, runRecover, type RecoverDeps, type RecoverOptions } from "../src/commands/recover";
 import { main } from "../src/index";
+import { probeLiveAlternateIdentities } from "../src/commands/doctor";
+import { readJoinBindings } from "../src/join-binding";
 import { startRestMock, type RestMock } from "./rest-mock";
 import { STUB_WAKE_VERIFY_SUMMARY, baseJoinOpts, fixCount, fixLine, joinDeps, joinEnv, stepLine, type SpawnBehavior } from "./join-fixture";
 
@@ -74,6 +76,8 @@ function deps(logs: string[], over: Partial<RecoverDeps> = {}, behavior: SpawnBe
     cwd: CWD,
     fetchMe: (server, token) => fetchMe(server, token),
     detectHarness: () => null,
+    explicitConfig: () => null,
+    probeLocalIdentities: (channel) => probeLiveAlternateIdentities(channel, null, (server, token) => fetchMe(server, token), agentpartyHome()),
     ...over,
   };
 }
@@ -159,7 +163,7 @@ describe("party recover —— 第 1 步 找回身份", () => {
 
     expect(code).toBe(1);
     const step1 = stepLine(logs, 1);
-    expect(step1).toContain("没有 #dev 的身份绑定");
+    expect(step1).toContain("没接入过这个频道");
     expect(step1?.endsWith("✗")).toBe(true);
     expect(fixCount(logs)).toBe(1);
     expect(fixLine(logs)).toContain("party join");
@@ -167,6 +171,104 @@ describe("party recover —— 第 1 步 找回身份", () => {
     expect(out).toContain("party join");
     expect(mock.requests.some((r) => r.path === "/api/me")).toBe(false);
     expect(stepLine(logs, 2)).toBeUndefined();
+  });
+
+  // #1098：身份配置在 agents/ 里、join-bindings.json 却没这条（老用户 / party init --token / 绑定文件丢了）。
+  // 变异自检：把 recoverIdentityStep 里 picked===null 分支的扫描删掉（直接判「没接入过」）⇒ 下面三条全红。
+  function seedUnboundConfig(name: string, scope = "dev", token = `${TOKEN}-${name}`): string {
+    const agentsDir = join(agentpartyHome(), "agents");
+    mkdirSync(agentsDir, { recursive: true });
+    const path = join(agentsDir, `agentparty-${name}-${scope}.json`);
+    writeFileSync(path, JSON.stringify({
+      server: mock.url,
+      token,
+      identity: { name, email: null, kind: "agent", role: "agent", owner: "leo", channel_scope: scope, verified_at: 1 },
+    }));
+    return path;
+  }
+  const scopedMeMock = (byToken: Record<string, string>) =>
+    startRestMock((req) => {
+      if (req.path !== "/api/me") return undefined;
+      const name = byToken[(req.headers.authorization ?? "").replace(/^Bearer /, "")];
+      return name === undefined
+        ? Response.json({ error: { code: "unauthorized", message: "no" } }, { status: 401 })
+        : Response.json({ name, email: null, kind: "agent", role: "agent", owner: "leo", channel_scope: "dev" });
+    });
+
+  test("#1098 没绑定、但本机有一份验活通过的 #dev 身份配置 ⇒ 用它继续恢复，并补写绑定", async () => {
+    mock = scopedMeMock({ [`${TOKEN}-git-claude`]: "git-claude" });
+    const path = seedUnboundConfig("git-claude");
+    const logs: string[] = [];
+    const code = await runRecover(opts(), deps(logs, { detectHarness: () => "claude", claudeArmedListener: () => ({ live: null, sessions: 1 }) }));
+    const out = logs.join("\n");
+
+    const step1 = stepLine(logs, 1);
+    expect(step1).toContain("git-claude");
+    expect(step1).toContain("token 有效");
+    expect(step1?.endsWith("✓")).toBe(true);
+    expect(out).not.toContain("没接入过");
+    expect(out).not.toContain(`${TOKEN}-git-claude`);
+    // 走到了第 3 步（本机没武装监听就停在那），而不是停在第 1 步让人去要 token。
+    expect(stepLine(logs, 3)).toContain("起一个可唤醒的会话");
+    expect(code).toBe(1);
+    const written = readJoinBindings(joinBindingsPath(agentpartyHome()));
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({ harness: "claude", channel: "dev", identity: "git-claude", config_path: path, owner: "leo", cwd: CWD });
+  });
+
+  test("#1098 没绑定、本机有两份验活通过的 #dev 身份 ⇒ 列出来不猜，也不补写绑定", async () => {
+    mock = scopedMeMock({ [`${TOKEN}-a`]: "a", [`${TOKEN}-b`]: "b" });
+    const pa = seedUnboundConfig("a");
+    const pb = seedUnboundConfig("b");
+    const logs: string[] = [];
+    const code = await runRecover(opts(), deps(logs, { detectHarness: () => "claude" }));
+    const out = logs.join("\n");
+
+    expect(code).toBe(1);
+    expect(stepLine(logs, 1)).toContain("2 份验活通过");
+    expect(out).toContain(pa);
+    expect(out).toContain(pb);
+    expect(out).not.toContain("没接入过");
+    expect(stepLine(logs, 2)).toBeUndefined();
+    expect(readJoinBindings(joinBindingsPath(agentpartyHome()))).toHaveLength(0);
+  });
+
+  test.each([["claude", "--harness claude"], ["codex", "--harness codex"], [null, "--harness <claude|codex|other>"]] as const)(
+    "#1098 多份身份的修法按 harness 给（%s）",
+    async (harness, expected) => {
+      mock = scopedMeMock({ [`${TOKEN}-a`]: "a", [`${TOKEN}-b`]: "b" });
+      seedUnboundConfig("a");
+      seedUnboundConfig("b");
+      const logs: string[] = [];
+      await runRecover(opts(), deps(logs, { detectHarness: () => harness }));
+      const fix = fixLine(logs) ?? "";
+      expect(fix).toContain("party recover dev");
+      expect(fix.endsWith(expected)).toBe(true);
+      expect(fix).not.toContain("party claude");
+    },
+  );
+
+  test("#1098 多份身份时用 AGENTPARTY_CONFIG 挑了一份 ⇒ 按修法重跑就能恢复那一份", async () => {
+    mock = scopedMeMock({ [`${TOKEN}-a`]: "a", [`${TOKEN}-b`]: "b" });
+    seedUnboundConfig("a");
+    const pb = seedUnboundConfig("b");
+    const logs: string[] = [];
+    await runRecover(opts(), deps(logs, { detectHarness: () => "codex", explicitConfig: () => pb }));
+    const step1 = stepLine(logs, 1);
+    expect(step1).toContain("b");
+    expect(step1?.endsWith("✓")).toBe(true);
+    expect(readJoinBindings(joinBindingsPath(agentpartyHome()))[0]).toMatchObject({ harness: "codex", identity: "b", config_path: pb });
+  });
+
+  test("#1098 没绑定、本机那份 #dev 配置的 token 已失效 ⇒ 才说没接入过", async () => {
+    mock = scopedMeMock({});
+    seedUnboundConfig("dead");
+    const logs: string[] = [];
+    const code = await runRecover(opts(), deps(logs, { detectHarness: () => "claude" }));
+    expect(code).toBe(1);
+    expect(stepLine(logs, 1)).toContain("没接入过这个频道");
+    expect(mock.requests.some((r) => r.path === "/api/me")).toBe(true);
+    expect(fixLine(logs)).toContain("party join");
   });
 
   test("绑定在、config 丢了 ⇒ 停在第 1 步（config 是 token 的唯一载体），修法 party join", async () => {
