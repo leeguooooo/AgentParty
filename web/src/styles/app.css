@@ -8488,3 +8488,7 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-card-sessions, .team-card-accounts { padding: 0 6px; border-radius: 999px; border: 1px solid var(--t-border); font-size: 11.5px; color: var(--t-muted); }
 .team-card-accounts { border-color: var(--d-amber, #b7791f); color: var(--d-amber, #b7791f); }
 .roster-error { margin: 0 0 6px; font-size: 12.5px; color: var(--d-red, #c0392b); }
+
+/* #1102 显式粘贴：非安全上下文按钮置灰但可点（点了给原因），错误行紧贴输入框 */
+.composer-paste--insecure { opacity: 0.55; }
+.composer-paste-error { margin: 4px 0 0; font-size: 12px; color: var(--red, #c0392b); }
