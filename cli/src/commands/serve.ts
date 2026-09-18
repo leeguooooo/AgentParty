@@ -1,7 +1,8 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, isWakeVerifyFrame, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
+import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, isWakeVerifyFrame, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame, type SessionOutputKind } from "@agentparty/shared";
+import { SessionOutputReporter } from "../session-output";
 import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { createHash, randomUUID } from "node:crypto";
@@ -1014,6 +1015,14 @@ export interface RunnerProcessOptions {
   env: Record<string, string | undefined>;
   /** serve runner 超时或退出时取消子进程；默认执行器会终止整个进程组。 */
   signal?: AbortSignal;
+  /** #1103：进程输出的实时片段（live session 观测流）。回调抛错不影响 runner。 */
+  onOutput?: (stream: "stdout" | "stderr", text: string) => void;
+}
+
+/** #1103：runner 这一轮的 live session 输出汇（serve 的 SessionOutputReporter 实现它）。 */
+export interface RunnerSessionOutputSink {
+  chunk(stream: "stdout" | "stderr", text: string): void;
+  line(kind: SessionOutputKind, text: string): void;
 }
 
 export type RunnerProcess = (
@@ -1197,6 +1206,8 @@ export interface BuiltinRunnerOptions {
   uploadAttachment?: typeof uploadAttachment;
   /** 模型 session 落盘后自报给频道 presence（issue #522）。 */
   onSession?: (session: AgentSessionInfo) => void;
+  /** #1103：live session 输出汇；缺省不上报。 */
+  sessionOutput?: RunnerSessionOutputSink;
 }
 
 export interface ThreadLike {
@@ -2411,6 +2422,36 @@ async function deliverRunnerResult(opts: {
   return {};
 }
 
+/**
+ * 读完整个输出流（返回全文，语义同 `new Response(stream).text()`），同时把每个解码块交给
+ * onOutput（#1103 live session）。回调抛错被吞——观测流绝不能让 runner 失败。
+ */
+export async function readRunnerStream(
+  stream: ReadableStream<Uint8Array>,
+  name: "stdout" | "stderr",
+  onOutput?: (stream: "stdout" | "stderr", text: string) => void,
+): Promise<string> {
+  if (onOutput === undefined) return await new Response(stream).text();
+  const decoder = new TextDecoder();
+  let all = "";
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const text = decoder.decode(value, { stream: true });
+    all += text;
+    if (text !== "") {
+      try { onOutput(name, text); } catch { /* observation only */ }
+    }
+  }
+  const tail = decoder.decode();
+  if (tail !== "") {
+    all += tail;
+    try { onOutput(name, tail); } catch { /* observation only */ }
+  }
+  return all;
+}
+
 async function defaultRunnerProcess(
   args: string[],
   opts: RunnerProcessOptions,
@@ -2434,8 +2475,8 @@ async function defaultRunnerProcess(
   let code: number;
   try {
     [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+      readRunnerStream(proc.stdout, "stdout", opts.onOutput),
+      readRunnerStream(proc.stderr, "stderr", opts.onOutput),
       proc.exited,
     ]);
   } finally {
@@ -3004,6 +3045,10 @@ export function resolveBuiltinCodexLaunch(
   return resolveCodexLaunch(configured, env, cwd);
 }
 
+function runnerOutputHook(sink: RunnerSessionOutputSink | undefined): Pick<RunnerProcessOptions, "onOutput"> {
+  return sink === undefined ? {} : { onOutput: (stream, text) => sink.chunk(stream, text) };
+}
+
 async function runHarness(
   opts: BuiltinRunnerOptions,
   codexBinary: string,
@@ -3057,8 +3102,9 @@ async function runHarness(
     const args = sid
       ? [codexBinary, ...codexArgsPrefix, "exec", ...flags, "resume", sid, prompt]
       : [codexBinary, ...codexArgsPrefix, "exec", ...flags, prompt];
-    const result = await runProcess(args, { cwd, env, signal });
+    const result = await runProcess(args, { cwd, env, signal, ...runnerOutputHook(opts.sessionOutput) });
     const text = result.code === 0 && existsSync(outFile) ? readFileSync(outFile, "utf8").trimEnd() : "";
+    if (text !== "") opts.sessionOutput?.line("text", text);
     return { result, text, sessionId: sid ? sid : parseCodexSessionId(result.stdout, result.stderr), outFile };
   }
 
@@ -3111,9 +3157,26 @@ async function runHarness(
         "json",
         prompt,
       ];
-  const result = await runProcess(args, { cwd, env, signal });
-  if (sid && opts.outputSchema === undefined) return { result, text: result.stdout.trimEnd(), sessionId: sid };
+  // #1103：plain-text 续会的 stdout 就是模型输出，可实时流出；JSON 输出（冷启动 / schema）的 stdout
+  // 是一整块结构化结果，原样流出只会是一坨 JSON——只流 stderr，结束后把解析出的正文作为 text 行补上。
+  const plainStdout = Boolean(sid) && opts.outputSchema === undefined;
+  const sink = opts.sessionOutput;
+  const result = await runProcess(args, {
+    cwd,
+    env,
+    signal,
+    ...(sink === undefined
+      ? {}
+      : {
+          onOutput: (stream: "stdout" | "stderr", chunk: string) => {
+            if (stream === "stderr") sink.chunk("stderr", chunk);
+            else if (plainStdout) sink.line("text", chunk);
+          },
+        }),
+  });
+  if (plainStdout) return { result, text: result.stdout.trimEnd(), sessionId: sid };
   const parsed = parseClaudeJson(result.stdout);
+  if (parsed.text.trim() !== "") sink?.line("text", parsed.text.trimEnd());
   return { result, text: parsed.text.trimEnd(), sessionId: sid ?? coldSessionId };
 }
 
@@ -5483,6 +5546,12 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // 重连 welcome 会从本地 wake-session.json 再报；一次 WS 窗口失败不阻断 runner。
     }
   };
+  // #1103：live session 输出流。每轮 begin/end，期间 builtin runner 的进程输出与 hook 工具活动
+  // 经这条已认证的 WS 发给 DO；DO 扇出给频道观看者。发送失败即丢，不影响 runner。
+  const sessionOutput = new SessionOutputReporter({
+    send: (frame) => conn.send(frame),
+    ...(o.now === undefined ? {} : { now: o.now }),
+  });
   const run: ServeRunner = o.runCommand ?? (o.sdkRunner
     ? createSdkRunner({
         ...o.sdkRunner,
@@ -5494,6 +5563,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     : o.builtinRunner
       ? createBuiltinRunner({
           ...o.builtinRunner,
+          sessionOutput,
           onSession: (session) => {
             o.builtinRunner?.onSession?.(session);
             reportAgentSession(session);
@@ -6125,6 +6195,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
             ? { current_task: frame.seq, task_started_at: taskStartedAt, heartbeat_at: at }
             : { current_task: null, task_started_at: null, heartbeat_at: null };
           const activity = active && activityFile !== null ? readActivityFile(activityFile, at) : null;
+          if (active) sessionOutput.tool(activity?.tool ?? null);
           // runner 健康（#603）：有连败才带；恢复后缺省即清（服务端不 COALESCE）。
           const runnerHealthField = runnerHealth.consecutive_failures > 0
             ? {
@@ -6146,6 +6217,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
             /* WS 未就绪就漏一拍：本机 health 仍新鲜，且下一拍/清除会补 */
           }
         };
+        // #1103：本轮 live session 开始（先于首拍心跳，保证观看者先看到 session 再看到 tool 行）。
+        sessionOutput.begin(frame.seq, `runner started for seq ${frame.seq} (runner=${runnerKind})`);
         // t=0 立刻发一拍「started」：不必等第一个间隔，频道/本机马上就能看到「已开始处理 seq=X」。
         emitTaskBeat(true, taskStartedAt);
         // runner_started 审计（#228）：上面那拍是 presence-only 的 heartbeat——**不落 history、任务结束即清**，
@@ -6294,6 +6367,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
                 };
           }
           emitTaskBeat(false, nowFn());
+          // #1103：终态帧——观看者停在最后一屏并看到结束原因，而不是空白。
+          if (delivered) sessionOutput.end("done", `run finished for seq ${frame.seq}`);
+          else if (shutdownError !== null) sessionOutput.end("failed", "runner shutting down");
+          else sessionOutput.end("blocked", lastError === "" ? `run did not complete for seq ${frame.seq}` : sanitizeBlockedError(lastError).slice(0, 300));
           // WebSocket.send 只把帧交给本地发送队列；若服务端的终局帧已在入站队列里，下一轮会
           // 立刻 break 并 close socket。让出一拍，确保仍处于 OPEN 的连接有机会把 idle-clear
           // 刷到服务端，避免频道永久显示一条已经结束的 current_task。

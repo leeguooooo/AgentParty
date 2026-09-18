@@ -6,6 +6,8 @@ import {
 } from "./mentions";
 
 export { mentionMatchKey } from "./mentions";
+export * from "./session-output";
+import type { SessionOutputClientFrame, SessionOutputFrame } from "./session-output";
 
 // ---- 常量 ----
 
@@ -1481,6 +1483,11 @@ export interface HelloFrame {
   wake_kind?: "watch" | "daemon";
   /** Privacy-preserving, server-scoped coordination identity for this live runtime. */
   runtime_topology?: RuntimeTopology;
+  /**
+   * #1103：agent 连接显式订阅 live session 输出帧（session_output）。人类连接恒收，无需声明；
+   * agent 默认不收——别把每个 runner 的 stdout 灌进所有 serve/watch 连接。
+   */
+  session_output?: "v1";
 }
 
 /**
@@ -1680,7 +1687,8 @@ export type ClientFrame =
   | ServeLeaseClaimFrame
   | DeliveryAdapterRegisterFrame
   | DeliveryUpdateFrame
-  | DeliveryRecoverFrame;
+  | DeliveryRecoverFrame
+  | SessionOutputClientFrame;
 
 // ---- 服务端 → 客户端帧 ----
 
@@ -2645,4 +2653,5 @@ export type ServerFrame =
   | DirectedDeliveryFrame
   | DeliveryStateFrame
   | DeliveryRecoveryResultFrame
-  | IdleNoticeFrame;
+  | IdleNoticeFrame
+  | SessionOutputFrame;

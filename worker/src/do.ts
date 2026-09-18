@@ -1,5 +1,7 @@
 // channel durable object — seq 分配 / 广播 / presence / 补拉 / 各类熔断 / webhook 投递 / temp 归档
 import {
+  parseSessionOutputClientFrame,
+  type SessionOutputFrame,
   applyLiveConnection,
   BODY_LIMIT,
   IDEMPOTENCY_KEY_MAX,
@@ -126,6 +128,7 @@ import {
 } from "@agentparty/shared/mentions";
 import { anchorAttachmentUrls, parseAttachments, parseStoredAttachments } from "./attachments";
 import { sha256Hex } from "./auth";
+import { SessionOutputRing } from "./session-output-ring";
 import { Server, type Connection, type ConnectionContext, type WSMessage } from "partyserver";
 
 interface ConnState {
@@ -191,6 +194,8 @@ interface ConnState {
   authorizationRevoked?: boolean;
   /** Set as soon as onClose begins so comparison reads cannot select a disconnecting peer. */
   closing?: boolean;
+  /** #1103：agent 连接显式订阅 live session 输出（hello.session_output="v1"）；人类连接恒订阅。 */
+  sessionOutputV1?: boolean;
 }
 
 function runtimeTopologiesEqual(left: RuntimeTopology, right: RuntimeTopology): boolean {
@@ -1761,6 +1766,8 @@ export class ChannelDO extends Server<Env> {
   // frame is awaiting I/O. Preserve wire order explicitly: hello must finish token validation and
   // capability setup before an immediately-following serve lease / adapter / send frame runs.
   private readonly wsMessageTails = new Map<string, Promise<void>>();
+  /** #1103：每 agent 最近 live session 的有界环形缓冲（纯内存观测流）。 */
+  private readonly sessionOutputRing = new SessionOutputRing();
   /** #913：上一次 `/internal/next-mention` 查询真实读到的行数。见该处理器里的说明。 */
   nextMentionRowsRead = 0;
   private participantAuthorityRefreshedAt = 0;
@@ -2931,6 +2938,7 @@ export class ChannelDO extends Server<Env> {
         directedDeliveryV1: nextDirectedDeliveryV1,
         deliveryRecoveryV1: nextDeliveryRecoveryV1,
         wakeKindAdvertised: nextWakeKindAdvertised,
+        sessionOutputV1: st.sessionOutputV1 === true || frame.session_output === "v1",
         ...(clientVersion === null ? {} : { clientVersion }),
         // Topology is a live snapshot, not a sticky capability. A later hello
         // that omits or corrupts it must clear the previous assertion.
@@ -2999,6 +3007,12 @@ export class ChannelDO extends Server<Env> {
       // their source first. Compound keyset pagination keeps each SQLite materialization bounded even
       // when one source fans out to many agents.
       this.replayDirectedDeliveryStates(connection);
+      // #1103：晚到的观看者拿到每个 agent 最近 session 的完整保留尾部（含已结束/断线的最后一屏）。
+      if (this.wantsSessionOutput(st)) {
+        for (const snapshot of this.sessionOutputRing.snapshot()) {
+          if (!this.sendPublicFrame(connection, snapshot, true)) return;
+        }
+      }
       // A connection may upgrade its declaration after an earlier legacy lease claim. Re-run the
       // election only after backfill so a newly capable executor cannot receive work before history.
       if (st.kind === "agent") {
@@ -3028,6 +3042,20 @@ export class ChannelDO extends Server<Env> {
           this.applyTaskHeartbeat(st.name, connection.id, hb);
         }
         this.applyDirectedDeliveryHeartbeat(st, connection.id, hb, Date.now());
+      }
+      return;
+    }
+    if (frame.type === "session_output") {
+      // #1103：runner live session 输出。只有 agent 连接能上报，身份取自连接（帧里没有 name 字段可冒名）；
+      // 服务端再清洗/脱敏一遍，脏帧静默丢弃、被限速的帧静默丢弃——观测流绝不断连接。
+      if (st.kind !== "agent") {
+        badRequest();
+        return;
+      }
+      const parsed = parseSessionOutputClientFrame(frame);
+      if (parsed !== null) {
+        const out = this.sessionOutputRing.apply(st.name, connection.id, parsed, Date.now());
+        if (out !== null) this.broadcastSessionOutput(out);
       }
       return;
     }
@@ -3206,6 +3234,10 @@ export class ChannelDO extends Server<Env> {
     // awaiting D1; otherwise a final replied update can be undone by premature disconnect cleanup.
     await this.wsMessageTails.get(connection.id)?.catch(() => undefined);
     const st = connection.state;
+    // #1103：上报连接断开 → 它名下仍在 running 的 live session 标 disconnected，观看者停在最后一屏并看到原因。
+    for (const frame of this.sessionOutputRing.disconnect(connection.id, Date.now())) {
+      this.broadcastSessionOutput(frame);
+    }
     if (!st || !st.name || st.archived) return;
     // A failed removal callback must not leave a revoked sibling eligible for a
     // participants broadcast triggered by an unrelated disconnect.
@@ -7863,6 +7895,7 @@ export class ChannelDO extends Server<Env> {
       this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", name);
       this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
       this.removeParticipantDeliveryAdapters(name, removedAt);
+      this.sessionOutputRing.forget(name);
       const frame = {
         type: "participant_removed",
         name,
@@ -9928,6 +9961,22 @@ export class ChannelDO extends Server<Env> {
       bucket,
     );
     return null;
+  }
+
+  /** #1103：谁能收 live session 输出——人类连接（web 观看者）恒收；agent 连接需在 hello 里显式订阅。 */
+  private wantsSessionOutput(st: ConnState): boolean {
+    return st.kind === "human" || st.sessionOutputV1 === true;
+  }
+
+  /** #1103：只发给已完成 hello、未被吊销/移除、且订阅了 live session 输出的连接。 */
+  private broadcastSessionOutput(frame: SessionOutputFrame) {
+    for (const connection of this.getConnections<ConnState>()) {
+      const st = connection.state;
+      if (st === undefined || st === null) continue;
+      if (st.authorizationRevoked === true || st.helloPending === true || st.closing === true) continue;
+      if (!this.wantsSessionOutput(st)) continue;
+      this.sendFrame(connection, frame);
+    }
   }
 
   private broadcastFrame(frame: ServerFrame) {

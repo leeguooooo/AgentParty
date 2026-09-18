@@ -9,6 +9,7 @@ import { guessJoinPackHarness } from "../lib/joinPack";
 import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type MsgFrame, type ParticipantRemovedFrame, type PresenceEntry, type PublicDirectedDelivery, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailPanel } from "../components/AgentDetailModal";
+import { LiveSessionModal, hasLiveSession } from "../components/LiveSessionView";
 import { teamMemberOnlineNames } from "../lib/onlineNames";
 import { AgentJoin, type JoinGuideSession } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
@@ -1898,6 +1899,8 @@ function TeamThread({
   onCreateTask,
   onOpenAgentDetail,
   canOpenAgentDetail,
+  onOpenLiveSession,
+  hasLiveSession,
   onEditDraftChange,
   onEditCancel,
   onEditSave,
@@ -1928,6 +1931,8 @@ function TeamThread({
   onCreateTask: (seq: number) => void;
   onOpenAgentDetail?: (name: string) => void;
   canOpenAgentDetail?: (name: string) => boolean;
+  onOpenLiveSession?: (name: string) => void;
+  hasLiveSession?: (name: string) => boolean;
   onEditDraftChange: (value: string) => void;
   onEditCancel: () => void;
   onEditSave: () => void;
@@ -1984,6 +1989,8 @@ function TeamThread({
             onCreateTask={onCreateTask}
             onOpenAgentDetail={onOpenAgentDetail}
             canOpenAgentDetail={canOpenAgentDetail}
+            onOpenLiveSession={onOpenLiveSession}
+            hasLiveSession={hasLiveSession}
             editing={editingSeq === message.seq}
             editDraft={editingSeq === message.seq ? editDraft : message.body}
             editSaving={editSaving && editingSeq === message.seq}
@@ -3378,6 +3385,19 @@ export function ChannelPage({
     setActiveAdminSurface("agentJoin");
   }, []);
 
+  // #1103：live session 只读终端。所有入口都调它，打开的是同一份 state.liveSessions[name]。
+  const [liveSessionTarget, setLiveSessionTarget] = useState<string | null>(null);
+  const openLiveSession = useCallback((name: string) => setLiveSessionTarget(name), []);
+  const closeLiveSession = useCallback(() => setLiveSessionTarget(null), []);
+  const liveSessionsRef = useRef(state.liveSessions);
+  liveSessionsRef.current = state.liveSessions;
+  const hasLiveSessionFor = useCallback(
+    (name: string) => hasLiveSession(liveSessionsRef.current, name),
+    // 依赖 liveSessions 让 MessageCard 在流出现/消失时重渲染入口状态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.liveSessions],
+  );
+
   const openTeamMember = useCallback((name: string) => {
     if (!authoritativeMemberNamesRef.current.has(name)) return;
     skipPanelFocusRestoreRef.current = false;
@@ -4338,6 +4358,8 @@ export function ChannelPage({
       presence={selectedTeamMember.runtime.presence}
       messages={state.messages}
       tasks={tasks}
+      liveSession={state.liveSessions[selectedTeamMember.name] ?? null}
+      onOpenLiveSession={openLiveSession}
       onOpenTask={openFocusedTask}
       onOpenMessage={async (seq) => {
         const located = await navigateToMessage(seq);
@@ -4501,6 +4523,14 @@ export function ChannelPage({
       >
         {messageNavigationAnnouncement}
       </span>
+      {liveSessionTarget !== null && (
+        <LiveSessionModal
+          name={liveSessionTarget}
+          display={state.presence[liveSessionTarget]?.display_name ?? liveSessionTarget}
+          session={state.liveSessions[liveSessionTarget] ?? null}
+          onClose={closeLiveSession}
+        />
+      )}
       <PresenceBar
         identities={identityDisplay}
         presence={state.presence}
@@ -4519,6 +4549,8 @@ export function ChannelPage({
         onResumeAgent={resumeAgentReception}
         roles={channelRoles}
         onOpenAgentDetail={openTeamMember}
+        liveSessions={state.liveSessions}
+        onOpenLiveSession={openLiveSession}
         // 模块②（#1047）：名单里叫不到的 agent 旁的「接回」→ 一条命令的重连引导（同凭证面板的「重新接上」）。
         onReconnect={
           canMintAgent && accountKey !== null && !state.archived
@@ -4967,6 +4999,8 @@ export function ChannelPage({
                   canCreateTask={canWrite}
                   onCreateTask={createTaskFromMessage}
                   onOpenAgentDetail={openTeamMember}
+                  onOpenLiveSession={openLiveSession}
+                  hasLiveSession={hasLiveSessionFor}
                   canOpenAgentDetail={canOpenTeamMember}
                   editing={editingSeq === item.message.seq}
                   editDraft={editingSeq === item.message.seq ? editDraft : item.message.body}
@@ -5006,6 +5040,8 @@ export function ChannelPage({
                   canCreateTask={canWrite}
                   onCreateTask={createTaskFromMessage}
                   onOpenAgentDetail={openTeamMember}
+                  onOpenLiveSession={openLiveSession}
+                  hasLiveSession={hasLiveSessionFor}
                   canOpenAgentDetail={canOpenTeamMember}
                   onEditDraftChange={setEditDraft}
                   onEditCancel={cancelEdit}

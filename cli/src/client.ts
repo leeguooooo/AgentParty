@@ -130,6 +130,9 @@ const DELIVERY_CAUSES = new Set(["mention", "mention_edit", "reply", "owner_answ
 // #1052 notify_when_idle：必须逐字镜像 shared/src/protocol.ts 的 IdleNoticeReason，漏一个词就把那种
 // 空闲通知整帧静默丢掉（#622 的教训）——订阅方永远等不到「对方忙完了」。
 const IDLE_NOTICE_REASONS = new Set(["idle", "exited", "expired"]);
+// #1103：逐字镜像 shared/session-output.ts 的 SessionOutputState / SessionOutputKind。
+const SESSION_OUTPUT_STATE_SET = new Set(["running", "done", "blocked", "failed", "disconnected"]);
+const SESSION_OUTPUT_KIND_SET = new Set(["text", "tool", "stdout", "stderr", "system"]);
 const ERROR_CODES = new Set([
   "bad_request",
   "unavailable",
@@ -399,6 +402,27 @@ function parseServerFrame(value: unknown): ServerFrame | null {
         IDLE_NOTICE_REASONS.has(String(value.reason)) &&
         (value.busy_ms === undefined || (isFiniteNumber(value.busy_ms) && value.busy_ms >= 0)) &&
         isFiniteNumber(value.ts)
+        ? asServerFrame(value)
+        : null;
+    case "session_output":
+      // #1103：runner 的只读 live session 输出。必须逐字镜像 shared/session-output.ts 的
+      // SessionOutputFrame（#622 教训：漏字段=整帧静默丢）。
+      return typeof value.name === "string" &&
+        value.name.length > 0 &&
+        typeof value.session_id === "string" &&
+        value.session_id.length > 0 &&
+        (value.task_seq === null || isPositiveInteger(value.task_seq)) &&
+        SESSION_OUTPUT_STATE_SET.has(String(value.state)) &&
+        Array.isArray(value.lines) &&
+        value.lines.every(
+          (line) =>
+            isRecord(line) &&
+            SESSION_OUTPUT_KIND_SET.has(String(line.kind)) &&
+            typeof line.text === "string" &&
+            isFiniteNumber(line.ts),
+        ) &&
+        isFiniteNumber(value.ts) &&
+        (value.replay === undefined || value.replay === true)
         ? asServerFrame(value)
         : null;
     case "delivery_recovery":

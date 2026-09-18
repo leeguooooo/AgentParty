@@ -7,6 +7,8 @@ import { useRef } from "react";
 import { fmtRel } from "../lib/time";
 import { useT } from "../i18n/useT";
 import { useModalFocusTrap } from "./useModalFocusTrap";
+import { LiveSessionEntryButton, LiveSessionView } from "./LiveSessionView";
+import type { LiveSession } from "../state";
 import "../i18n/strings/AgentDetailModal";
 
 export type AgentDetailAssignmentSource = "assigned" | "self_reported" | "none";
@@ -34,6 +36,12 @@ export interface AgentDetailPanelProps {
    * as explicitly unconfirmed self-report; an assigned value replaces that fallback.
    */
   assignment?: AgentDetailAssignment;
+  /**
+   * #1103：这个 agent 的 live session（runner 输出流）。undefined = 调用方不支持 live 视图（不渲染该区）；
+   * null = 支持但当前没有可跟的运行会话（主行动禁用 + 诚实空态，不拿频道历史冒充终端）。
+   */
+  liveSession?: LiveSession | null;
+  onOpenLiveSession?: (name: string) => void;
 }
 
 export interface AgentDetailModalProps extends AgentDetailPanelProps {
@@ -98,6 +106,8 @@ function AgentDetailContent({
   onOpenTask,
   onOpenMessage,
   assignment,
+  liveSession,
+  onOpenLiveSession,
   onClose,
 }: AgentDetailPanelProps & { onClose?: () => void }) {
   const t = useT();
@@ -193,6 +203,23 @@ function AgentDetailContent({
         )}
       </header>
       <div className="channel-panel-body agent-detail-body">
+        {liveSession !== undefined && kind === "agent" && (
+          <section className="agent-detail-section agent-detail-live" aria-label={t("LiveSession.section")}>
+            <h3>
+              {t("LiveSession.section")}
+              {onOpenLiveSession !== undefined && (
+                <LiveSessionEntryButton
+                  name={name}
+                  display={display}
+                  available={liveSession !== null}
+                  onOpen={onOpenLiveSession}
+                  className="agent-detail-live-open"
+                />
+              )}
+            </h3>
+            <LiveSessionView name={name} display={display} session={liveSession} compact />
+          </section>
+        )}
         <section className={`agent-detail-section agent-detail-reception agent-detail-reception--${receptionState}`} aria-label={t("AgentDetailModal.reception")}>
           <h3>{t("AgentDetailModal.reception")}</h3>
           <dl className="agent-detail-facts">

@@ -9,6 +9,8 @@ import type {
   ReadCursor,
   Sender,
   ServerFrame,
+  SessionOutputLine,
+  SessionOutputState,
 } from "@agentparty/shared";
 import type { FatalReason, SocketStatus } from "./lib/ws";
 import { MENTION_SENDER_RETENTION_MS, mergeSenderIdentity, type SenderIdentitySnapshot } from "./lib/senderIdentity";
@@ -38,7 +40,24 @@ export interface ChannelState {
   // 被拒的 send 永不发 sent、不推进 lastSentSeq，composer 侧据此计数从待发队列摘掉对应条目，
   // 避免 FIFO 永久错位（issue #633）。只增不减，值本身无意义，只作单调触发器用。
   sendRejectedSeq: number;
+  /**
+   * #1103：每个 agent 最近一次 live session（runner 输出流）。只读观测流；没有条目 = 这个身份
+   * 当前没有可跟的运行会话（纯 watch / 从未武装 / 对端没上报）。
+   */
+  liveSessions: Record<string, LiveSession>;
 }
+
+export interface LiveSession {
+  name: string;
+  session_id: string;
+  task_seq: number | null;
+  state: SessionOutputState;
+  lines: SessionOutputLine[];
+  updated_at: number;
+}
+
+/** 客户端每个 session 最多保留的行数（服务端环形缓冲 300 行；live 追加可更多，这里再兜一道）。 */
+export const LIVE_SESSION_CLIENT_MAX_LINES = 1000;
 
 export const initialChannelState: ChannelState = {
   self: null,
@@ -59,6 +78,7 @@ export const initialChannelState: ChannelState = {
   sendError: null,
   lastSentSeq: 0,
   sendRejectedSeq: 0,
+  liveSessions: {},
 };
 
 export type ChannelAction =
@@ -293,10 +313,13 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
       }
       const presence = { ...state.presence };
       delete presence[frame.name];
+      const liveSessions = { ...state.liveSessions };
+      delete liveSessions[frame.name];
       return {
         ...state,
         participants,
         presence,
+        liveSessions,
         removedParticipants: tombstoneChanged
           ? { ...state.removedParticipants, [frame.name]: removedAt }
           : state.removedParticipants,
@@ -409,6 +432,36 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
           },
         },
       };
+    case "session_output": {
+      if (Object.hasOwn(state.removedParticipants, frame.name)) return state;
+      const prev = state.liveSessions[frame.name];
+      let lines: SessionOutputLine[];
+      if (frame.replay === true) {
+        // 回放快照是服务端环形缓冲的完整尾部：替换而非追加（重连不会重复行）。
+        // 但若本地已在跟同一 session 且更新，别让旧快照把新行抹掉。
+        if (prev !== undefined && prev.session_id === frame.session_id && prev.updated_at > frame.ts) return state;
+        lines = frame.lines;
+      } else if (prev === undefined || prev.session_id !== frame.session_id) {
+        lines = frame.lines;
+      } else {
+        lines = frame.lines.length === 0 ? prev.lines : prev.lines.concat(frame.lines);
+      }
+      if (lines.length > LIVE_SESSION_CLIENT_MAX_LINES) lines = lines.slice(-LIVE_SESSION_CLIENT_MAX_LINES);
+      return {
+        ...state,
+        liveSessions: {
+          ...state.liveSessions,
+          [frame.name]: {
+            name: frame.name,
+            session_id: frame.session_id,
+            task_seq: frame.task_seq,
+            state: frame.state,
+            lines,
+            updated_at: frame.ts,
+          },
+        },
+      };
+    }
     case "sent":
       return { ...state, lastSentSeq: frame.seq, sendError: null, loopGuard: null, loopGuardBaselineSeq: null };
     case "error": {
