@@ -76,6 +76,7 @@ function deps(logs: string[], over: Partial<RecoverDeps> = {}, behavior: SpawnBe
     cwd: CWD,
     fetchMe: (server, token) => fetchMe(server, token),
     detectHarness: () => null,
+    explicitConfig: () => null,
     probeLocalIdentities: (channel) => probeLiveAlternateIdentities(channel, null, (server, token) => fetchMe(server, token), agentpartyHome()),
     ...over,
   };
@@ -230,6 +231,33 @@ describe("party recover —— 第 1 步 找回身份", () => {
     expect(out).not.toContain("没接入过");
     expect(stepLine(logs, 2)).toBeUndefined();
     expect(readJoinBindings(joinBindingsPath(agentpartyHome()))).toHaveLength(0);
+  });
+
+  test.each([["claude", "--harness claude"], ["codex", "--harness codex"], [null, "--harness <claude|codex|other>"]] as const)(
+    "#1098 多份身份的修法按 harness 给（%s）",
+    async (harness, expected) => {
+      mock = scopedMeMock({ [`${TOKEN}-a`]: "a", [`${TOKEN}-b`]: "b" });
+      seedUnboundConfig("a");
+      seedUnboundConfig("b");
+      const logs: string[] = [];
+      await runRecover(opts(), deps(logs, { detectHarness: () => harness }));
+      const fix = fixLine(logs) ?? "";
+      expect(fix).toContain("party recover dev");
+      expect(fix.endsWith(expected)).toBe(true);
+      expect(fix).not.toContain("party claude");
+    },
+  );
+
+  test("#1098 多份身份时用 AGENTPARTY_CONFIG 挑了一份 ⇒ 按修法重跑就能恢复那一份", async () => {
+    mock = scopedMeMock({ [`${TOKEN}-a`]: "a", [`${TOKEN}-b`]: "b" });
+    seedUnboundConfig("a");
+    const pb = seedUnboundConfig("b");
+    const logs: string[] = [];
+    await runRecover(opts(), deps(logs, { detectHarness: () => "codex", explicitConfig: () => pb }));
+    const step1 = stepLine(logs, 1);
+    expect(step1).toContain("b");
+    expect(step1?.endsWith("✓")).toBe(true);
+    expect(readJoinBindings(joinBindingsPath(agentpartyHome()))[0]).toMatchObject({ harness: "codex", identity: "b", config_path: pb });
   });
 
   test("#1098 没绑定、本机那份 #dev 配置的 token 已失效 ⇒ 才说没接入过", async () => {
