@@ -170,4 +170,34 @@ describe("Composer paste button (#1102)", () => {
     expect(textOf(err[0])).toContain("Cmd/Ctrl+V");
     expect(textOf(err[0])).toContain("domain");
   });
+  test("desktop bridge: an insecure (http://IP) page still pastes through the native clipboard", async () => {
+    const drafts: string[] = [];
+    let webReads = 0;
+    let nativeReads = 0;
+    const root = render({
+      secureContext: false,
+      setDraft: (v) => drafts.push(v),
+      readClipboard: async () => { webReads += 1; return payload("web"); },
+      nativeClipboard: async () => { nativeReads += 1; return "from native"; },
+    });
+    const btn = pasteButton(root)!;
+    expect(btn.props["aria-disabled"]).toBeUndefined();
+    await clickPaste(root);
+    expect(nativeReads).toBe(1);
+    expect(webReads).toBe(0);
+    expect(drafts).toEqual(["from native"]);
+    expect(byClass(root, "composer-paste-error")).toHaveLength(0);
+  });
+
+  test("desktop bridge failure shows the denied error, draft untouched", async () => {
+    const drafts: string[] = [];
+    const root = render({
+      secureContext: false,
+      setDraft: (v) => drafts.push(v),
+      nativeClipboard: async () => { throw new Error("not allowed"); },
+    });
+    await clickPaste(root);
+    expect(drafts).toEqual([]);
+    expect(textOf(byClass(root, "composer-paste-error")[0])).toContain("denied");
+  });
 });
