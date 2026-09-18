@@ -21,7 +21,7 @@
 //  - **不交互**：recover 没有要问人的步骤；--yes 只为与 join 同形（接入包/技能表照抄不用改）。
 import { readFileSync } from "node:fs";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { agentpartyHome } from "../config";
+import { agentpartyHome, explicitConfigPath } from "../config";
 import { detectHarnessFromAncestry, joinBindingsPath, normalizeBindingServer, readJoinBindings, writeJoinBinding, type BindingHarness, type JoinBinding } from "../join-binding";
 import { probeLiveAlternateIdentities } from "./doctor";
 import { type JoinPackHarness, mcpServerName } from "@agentparty/shared/onboarding";
@@ -68,6 +68,8 @@ export interface RecoverDeps extends JoinDeps {
    * 就是 doctor 的 probeLiveAlternateIdentities（#1015），这里不重写。返回验活通过的那些。
    */
   probeLocalIdentities: (channel: string) => Promise<Array<{ name: string; path: string; server: string }>>;
+  /** 人用 AGENTPARTY_CONFIG 显式挑的那份（多份验活时的选择出口）；没挑 null。 */
+  explicitConfig: () => string | null;
 }
 
 export interface RecoverOptions {
@@ -168,7 +170,11 @@ export function recoverIdentityStep(rerun: string): Step<RecoverCtx> {
         // 绑定文件丢了——这些身份都只在 agents/*.json 里。先扫、逐个真问 /api/me，再下结论。
         const harness = opts.harnessFlag ?? detected;
         const scope = opts.harnessFlag === null ? "" : `（${opts.harnessFlag} 档）`;
-        const live = await deps.probeLocalIdentities(slug);
+        const probed = await deps.probeLocalIdentities(slug);
+        // 多份时人用 AGENTPARTY_CONFIG 挑了一份 ⇒ 只认那份（它也必须验活通过）。
+        const pickedPath = deps.explicitConfig();
+        const explicit = pickedPath === null ? [] : probed.filter((c) => c.path === pickedPath);
+        const live = explicit.length === 1 ? explicit : probed;
         if (live.length === 0) {
           return {
             ok: false,
@@ -180,12 +186,15 @@ export function recoverIdentityStep(rerun: string): Step<RecoverCtx> {
           };
         }
         if (live.length > 1) {
+          // 修法走 recover 自己：它按 harness 走对应的唤醒步骤（claude / codex / other 各不同），
+          // 比直接给某个 harness 的启动命令更不会错。harness 认不出就写成中性的占位。
+          const harnessArg = harness === null ? "--harness <claude|codex|other>" : `--harness ${harness}`;
           return {
             ok: false,
             summary: `本机有 ${live.length} 份验活通过的 #${slug} 身份配置，不替你猜用哪一份`,
-            detail: live.map((c) => `${c.name} · ${c.server} · config ${c.path}`),
+            detail: live.map((c, i) => `${i + 1}. ${c.name} · ${c.server} · config ${c.path}`),
             fix: {
-              do: `AGENTPARTY_CONFIG=<上面挑一份 config 路径> party claude ${slug}`,
+              do: `AGENTPARTY_CONFIG=<上面挑一份 config 路径> party recover ${slug} ${harnessArg}`,
               notes: ["或者把用不着的那几份 config 移走，再重跑 party recover。"],
             },
           };
@@ -391,5 +400,6 @@ export function defaultRecoverDeps(slug: string): RecoverDeps {
     fetchMe: (server, token) => fetchMe(server, token),
     detectHarness: () => detectHarnessFromAncestry(process.ppid),
     probeLocalIdentities: (channel) => probeLiveAlternateIdentities(channel, null),
+    explicitConfig: explicitConfigPath,
   };
 }
