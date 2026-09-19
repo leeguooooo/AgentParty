@@ -19,9 +19,12 @@ import {
 export const SESSION_OUTPUT_FLUSH_INTERVAL_MS = 500;
 /** 本地待发队列上限（行）；runner 喷得比限速快时丢最老的。 */
 export const SESSION_OUTPUT_PENDING_MAX = 400;
+/** 终态帧发送失败后的重试次数上限（每次间隔 flushIntervalMs×2）；覆盖一次普通重连窗口。 */
+export const SESSION_OUTPUT_TERMINAL_RETRIES = 240;
 
 export interface SessionOutputReporterOptions {
-  send: (frame: SessionOutputClientFrame) => void;
+  /** 返回 false 或抛错 = 没交给连接（连接未打开）。终态帧据此重试。 */
+  send: (frame: SessionOutputClientFrame) => boolean | void;
   now?: () => number;
   flushIntervalMs?: number;
   /** 生成 session id；测试注入确定值。 */
@@ -34,7 +37,7 @@ export interface SessionOutputReporterOptions {
 type StreamName = "stdout" | "stderr";
 
 export class SessionOutputReporter {
-  private readonly send: (frame: SessionOutputClientFrame) => void;
+  private readonly send: (frame: SessionOutputClientFrame) => boolean | void;
   private readonly now: () => number;
   private readonly flushIntervalMs: number;
   private readonly newSessionId: () => string;
@@ -47,6 +50,10 @@ export class SessionOutputReporter {
   private dropped = 0;
   private timer: unknown = null;
   private lastTool: string | null = null;
+  /** 终态帧（及其前面的尾批）没能交给连接：保留并重试，直到成功或被新一轮取代。 */
+  private terminalBacklog: SessionOutputClientFrame[] = [];
+  private retryTimer: unknown = null;
+  private retries = 0;
 
   constructor(opts: SessionOutputReporterOptions) {
     this.send = opts.send;
@@ -68,6 +75,9 @@ export class SessionOutputReporter {
   /** 新一轮开始：换新 session id，立即发一帧 running（让观看者马上看到「开始了」）。 */
   begin(taskSeq: number | null, note: string): string {
     if (this.sessionId !== null) this.end("failed", "superseded by a new run");
+    // 上一轮终态若还没送出，最后试一次；仍失败就放弃（新一轮已开始，旧终态由 DO 断线判定兜底）。
+    this.retryTerminal();
+    this.dropTerminalBacklog();
     this.sessionId = this.newSessionId();
     this.taskSeq = taskSeq;
     this.pending = [];
@@ -132,6 +142,52 @@ export class SessionOutputReporter {
     this.schedule();
   }
 
+  private trySend(frame: SessionOutputClientFrame): boolean {
+    try {
+      return this.send(frame) !== false;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 按序重发终态积压；失败就定时再试，超上限放弃。 */
+  private retryTerminal(): void {
+    while (this.terminalBacklog.length > 0) {
+      if (!this.trySend(this.terminalBacklog[0]!)) break;
+      this.terminalBacklog.shift();
+    }
+    if (this.terminalBacklog.length === 0) {
+      if (this.retryTimer !== null) {
+        this.clearTimer(this.retryTimer);
+        this.retryTimer = null;
+      }
+      return;
+    }
+    if (this.retryTimer !== null) return;
+    if (this.retries >= SESSION_OUTPUT_TERMINAL_RETRIES) {
+      this.dropTerminalBacklog();
+      return;
+    }
+    this.retries++;
+    this.retryTimer = this.setTimer(() => {
+      this.retryTimer = null;
+      this.retryTerminal();
+    }, this.flushIntervalMs * 2);
+  }
+
+  private dropTerminalBacklog(): void {
+    this.terminalBacklog = [];
+    if (this.retryTimer !== null) {
+      this.clearTimer(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  /** 测试/诊断：还有多少终态帧等待重发。 */
+  get pendingTerminalFrames(): number {
+    return this.terminalBacklog.length;
+  }
+
   private schedule(): void {
     if (this.timer !== null) return;
     this.timer = this.setTimer(() => {
@@ -148,22 +204,27 @@ export class SessionOutputReporter {
     }
     // 限速：一次定时 flush 只发一帧；剩余的留给下一拍。终态帧则把剩余全部分帧发完。
     const terminal = state !== "running";
-    do {
+    if (!terminal) {
       const batch = this.pending.splice(0, SESSION_OUTPUT_LINES_PER_FRAME);
-      const last = this.pending.length === 0;
-      try {
-        this.send({
+      // running 输出尽力而为：连接没就绪就丢，runner 不受影响。
+      this.trySend({ type: "session_output", session_id: this.sessionId, task_seq: this.taskSeq, state, lines: batch });
+    } else {
+      // 终态：全部分帧；任何一帧没交出去，从那帧起整体保留并重试——绝不让观看者停在 running。
+      const frames: SessionOutputClientFrame[] = [];
+      do {
+        const batch = this.pending.splice(0, SESSION_OUTPUT_LINES_PER_FRAME);
+        frames.push({
           type: "session_output",
           session_id: this.sessionId,
           task_seq: this.taskSeq,
-          state: terminal && !last ? "running" : state,
+          state: this.pending.length === 0 ? state : "running",
           lines: batch,
         });
-      } catch {
-        // 连接没就绪：观测流丢一帧无妨，runner 不受影响。
-      }
-      if (!terminal) break;
-    } while (this.pending.length > 0);
+      } while (this.pending.length > 0);
+      this.terminalBacklog.push(...frames);
+      this.retries = 0;
+      this.retryTerminal();
+    }
     if (terminal) {
       if (this.timer !== null) {
         this.clearTimer(this.timer);

@@ -117,6 +117,13 @@ export class SessionOutputRing {
     this.sessions.delete(name);
   }
 
+  /** 只清某条连接上报的 session（stale principal 被替换时用；同名新连接的输出保留）。 */
+  forgetConnection(name: string, connectionId: string): void {
+    const entry = this.sessions.get(name);
+    if (entry !== undefined && entry.connectionId === connectionId) this.sessions.delete(name);
+    this.buckets.delete(connectionId);
+  }
+
   private take(connectionId: string, now: number): boolean {
     const bucket = this.buckets.get(connectionId) ?? { tokens: SESSION_OUTPUT_BUCKET_CAPACITY, at: now };
     const elapsed = Math.max(0, now - bucket.at) / 1000;

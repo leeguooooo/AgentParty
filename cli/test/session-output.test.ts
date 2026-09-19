@@ -126,7 +126,7 @@ describe("SessionOutputReporter（#1103）", () => {
     const sent: SessionOutputClientFrame[] = [];
     const clock = fakeClock();
     const reporter = new SessionOutputReporter({
-      send: (f) => sent.push(f),
+      send: (f) => { sent.push(f); },
       now: clock.now,
       flushIntervalMs: 500,
       newSessionId: (() => {
@@ -202,6 +202,37 @@ describe("SessionOutputReporter（#1103）", () => {
     reporter.begin(1, "a");
     reporter.begin(2, "b");
     expect(sent.map((f) => `${f.session_id}:${f.state}`)).toEqual(["run-1:running", "run-1:failed", "run-2:running"]);
+  });
+
+  test("终态帧没交给连接时保留并重试，直到连接恢复才算结束", () => {
+    const sent: SessionOutputClientFrame[] = [];
+    const clock = fakeClock();
+    let open = true;
+    const reporter = new SessionOutputReporter({
+      send: (f) => {
+        if (!open) return false;
+        sent.push(f);
+        return true;
+      },
+      now: clock.now,
+      flushIntervalMs: 500,
+      newSessionId: () => "run-x",
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+    });
+    reporter.begin(1, "start");
+    open = false;
+    reporter.end("done", "finished");
+    expect(sent.map((f) => f.state)).toEqual(["running"]);
+    expect(reporter.pendingTerminalFrames).toBe(1);
+    clock.advance(1000);
+    expect(sent.map((f) => f.state)).toEqual(["running"]);
+    open = true;
+    clock.advance(1000);
+    expect(sent.map((f) => f.state)).toEqual(["running", "done"]);
+    expect(sent.at(-1)!.lines.map((l) => l.text)).toEqual(["finished"]);
+    expect(reporter.pendingTerminalFrames).toBe(0);
+    expect(clock.pending()).toBe(0);
   });
 
   test("send 抛错不冒泡（观测流不能让 runner 失败）", () => {

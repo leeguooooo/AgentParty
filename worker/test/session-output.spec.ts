@@ -161,4 +161,14 @@ describe("SessionOutputRing bounds (#1103)", () => {
     expect(snap!.lines).toHaveLength(SESSION_OUTPUT_RING_LINES);
     expect(snap!.state).toBe("done");
   });
+
+  it("forgetConnection only drops output reported by that exact connection", () => {
+    const ring = new SessionOutputRing();
+    const f = { type: "session_output" as const, session_id: "r", task_seq: null, state: "running" as const, lines: [{ kind: "stdout" as const, text: "x", ts: 1 }] };
+    ring.apply("a", "new-conn", f, 1);
+    ring.forgetConnection("a", "old-conn");
+    expect(ring.snapshot()).toHaveLength(1);
+    ring.forgetConnection("a", "new-conn");
+    expect(ring.snapshot()).toHaveLength(0);
+  });
 });

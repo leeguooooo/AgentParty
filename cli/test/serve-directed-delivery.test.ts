@@ -704,6 +704,7 @@ describe("serve durable directed delivery (#551)", () => {
     const work = delivery(8);
     const updates: Array<Record<string, unknown>> = [];
     const posts: Array<{ kind: string; state?: string; note?: string }> = [];
+    const liveStates: string[] = [];
     const lines: string[] = [];
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") {
@@ -713,6 +714,10 @@ describe("serve durable directed delivery (#551)", () => {
       if (frame.type === "serve_lease") {
         sock.send({ type: "serve_lease", name: "me", held: true });
         sock.send({ type: "delivery", delivery: work, message });
+        return;
+      }
+      if (frame.type === "session_output") {
+        liveStates.push(String(frame.state));
         return;
       }
       if (frame.type !== "delivery_update") return;
@@ -729,7 +734,8 @@ describe("serve durable directed delivery (#551)", () => {
         },
       });
       if (frame.state === "replied") {
-        sock.send({ type: "error", code: "archived", message: "done" });
+        // 留一拍给确认之后发出的 live session 终态帧（#1103）。
+        setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 50);
       }
     });
 
@@ -751,6 +757,9 @@ describe("serve durable directed delivery (#551)", () => {
       note: expect.stringContaining("runner exited successfully without a linked channel reply"),
     }));
     expect(lines.some((line) => line.includes("runner exited successfully without a linked channel reply"))).toBe(true);
+    // #1103：Worker 改判失败后，live session 终态必须是 blocked，而不是先发出的 done。
+    expect(liveStates.at(-1)).toBe("blocked");
+    expect(liveStates).not.toContain("done");
   });
 
   test("authoritative silent-success failure cleans continuation before a later ACK disconnect", async () => {

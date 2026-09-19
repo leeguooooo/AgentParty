@@ -3387,7 +3387,6 @@ export function ChannelPage({
 
   // #1103：live session 只读终端。所有入口都调它，打开的是同一份 state.liveSessions[name]。
   const [liveSessionTarget, setLiveSessionTarget] = useState<string | null>(null);
-  const openLiveSession = useCallback((name: string) => setLiveSessionTarget(name), []);
   const closeLiveSession = useCallback(() => setLiveSessionTarget(null), []);
   const liveSessionsRef = useRef(state.liveSessions);
   liveSessionsRef.current = state.liveSessions;
@@ -3424,6 +3423,13 @@ export function ChannelPage({
     setSelectedTaskId(null);
     setActivePanel(null);
   }, [cancelPendingMessageNavigation]);
+
+  // #1103：live session 取代而不是叠在频道面板上——任一时刻只有一个 aria-modal dialog
+  // （否则 Esc/Tab 会被两个 focus trap 同时处理）。
+  const openLiveSession = useCallback((name: string) => {
+    closeChannelPanel();
+    setLiveSessionTarget(name);
+  }, [closeChannelPanel]);
 
   const closeMemberDetail = useCallback(() => {
     setMemberDetailRoute(null);

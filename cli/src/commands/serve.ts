@@ -1254,6 +1254,8 @@ export interface SdkRunnerOptions {
   uploadAttachment?: typeof uploadAttachment;
   /** 模型 session 落盘后自报给频道 presence（issue #522）。 */
   onSession?: (session: AgentSessionInfo) => void;
+  /** #1103：live session 输出汇；缺省不上报。 */
+  sessionOutput?: RunnerSessionOutputSink;
 }
 
 export interface ProjectAgentRunContext {
@@ -3522,6 +3524,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
         threadId = slot.session?.thread_id ?? active.session?.thread_id ?? sdkThreadId(active.thread);
         if (!threadId) throw new Error("@openai/codex-sdk thread did not expose an id/thread_id after run");
         const body = finalText(result);
+        if (body.trim() !== "") opts.sessionOutput?.line("text", body);
         const now = opts.now?.() ?? Date.now();
         const baseSession = slot.session ?? active.session ?? {
           harness: "codex-sdk" as const,
@@ -5555,6 +5558,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
   const run: ServeRunner = o.runCommand ?? (o.sdkRunner
     ? createSdkRunner({
         ...o.sdkRunner,
+        sessionOutput,
         onSession: (session) => {
           o.sdkRunner?.onSession?.(session);
           reportAgentSession(session);
@@ -6217,6 +6221,11 @@ export async function runServe(o: ServeOptions): Promise<number> {
             /* WS 未就绪就漏一拍：本机 health 仍新鲜，且下一拍/清除会补 */
           }
         };
+        // #1103：按本轮最终结论发 live session 终态帧（end 幂等：已结束的 session 再调无操作）。
+        const finishSessionOutput = () => {
+          if (delivered) sessionOutput.end("done", `run finished for seq ${frame.seq}`);
+          else sessionOutput.end("blocked", lastError === "" ? `run did not complete for seq ${frame.seq}` : sanitizeBlockedError(lastError).slice(0, 300));
+        };
         // #1103：本轮 live session 开始（先于首拍心跳，保证观看者先看到 session 再看到 tool 行）。
         sessionOutput.begin(frame.seq, `runner started for seq ${frame.seq} (runner=${runnerKind})`);
         // t=0 立刻发一拍「started」：不必等第一个间隔，频道/本机马上就能看到「已开始处理 seq=X」。
@@ -6368,9 +6377,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
           }
           emitTaskBeat(false, nowFn());
           // #1103：终态帧——观看者停在最后一屏并看到结束原因，而不是空白。
-          if (delivered) sessionOutput.end("done", `run finished for seq ${frame.seq}`);
-          else if (shutdownError !== null) sessionOutput.end("failed", "runner shutting down");
-          else sessionOutput.end("blocked", lastError === "" ? `run did not complete for seq ${frame.seq}` : sanitizeBlockedError(lastError).slice(0, 300));
+          // 定向 delivery 的「成功」要等 Worker 的完成确认才算数（可能被判 silent runner 失败），
+          // 那种情况留到确认之后再发终态；其余情况此刻结论已定。
+          if (shutdownError !== null) sessionOutput.end("failed", "runner shutting down");
+          else if (!delivered || directedDelivery === null) finishSessionOutput();
           // WebSocket.send 只把帧交给本地发送队列；若服务端的终局帧已在入站队列里，下一轮会
           // 立刻 break 并 close socket。让出一拍，确保仍处于 OPEN 的连接有机会把 idle-clear
           // 刷到服务端，避免频道永久显示一条已经结束的 current_task。
@@ -6439,6 +6449,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
             code = EXIT_STREAM_ENDED;
             stopAfterFrame = true;
           }
+          // #1103：确认落地（或被 Worker 改判失败）之后才发终态，观看者不会看到错误的 done。
+          finishSessionOutput();
         }
         const clearBusyIfDrained = async (idleNote: string) => {
           const busyClear = takeBusyClearIfDrained();

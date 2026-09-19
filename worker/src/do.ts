@@ -7422,7 +7422,10 @@ export class ChannelDO extends Server<Env> {
         role: (request.headers.get("x-ap-role") ?? "host") as TokenRole,
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
       };
-      return Response.json(this.eraseIdentityData(name, actor));
+      const erased = this.eraseIdentityData(name, actor);
+      // #1103：身份擦除后不再回放它的 live 输出。
+      this.sessionOutputRing.forget(name);
+      return Response.json(erased);
     }
     if (url.pathname === "/internal/messages" && request.method === "POST") {
       this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
@@ -7842,6 +7845,7 @@ export class ChannelDO extends Server<Env> {
         this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", name);
         this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
         this.removeParticipantDeliveryAdapters(name, now);
+        this.sessionOutputRing.forget(name);
         this.insertSystemStatus(`removed ${name} from channel`, now, false, { state: "done" });
         return Response.json({ ok: true, owners: [...owners], human_owners: [...humanOwners], removed_at: now });
       }
@@ -8313,9 +8317,12 @@ export class ChannelDO extends Server<Env> {
       this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", name);
       this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
       this.removeParticipantDeliveryAdapters(name, removedAt);
+      this.sessionOutputRing.forget(name);
     }
     for (const stale of stalePrincipals) {
       this.cleanupPresenceSession(stale.name, stale.connection.id, now);
+      // #1103：只清这条旧连接自己上报的输出；同名新连接的 live session 不受影响。
+      this.sessionOutputRing.forgetConnection(stale.name, stale.connection.id);
       const deliveryPrincipalKey = JSON.stringify([mentionMatchKey(stale.name), stale.principal]);
       if (!currentAgentDeliveryPrincipals.has(deliveryPrincipalKey)) {
         this.removeStaleDeliveryPrincipal(stale.name, stale.principal, now);
