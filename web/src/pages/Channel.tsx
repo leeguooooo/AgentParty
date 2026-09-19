@@ -10,6 +10,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type MsgFrame, type ParticipantRemovedFrame, type PresenceEntry, type PublicDirectedDelivery, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailPanel } from "../components/AgentDetailModal";
 import { LiveSessionModal, hasLiveSession } from "../components/LiveSessionView";
+import { draftWithMention } from "../components/LocalOcsSessions";
 import { teamMemberOnlineNames } from "../lib/onlineNames";
 import { AgentJoin, type JoinGuideSession } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
@@ -3424,6 +3425,11 @@ export function ChannelPage({
     setActivePanel(null);
   }, [cancelPendingMessageNavigation]);
 
+  // #1113：「本机可介入」里的 @：把 @name 放进输入框开头（已有就不重复），发送仍走 Composer。
+  const mentionFromRoster = useCallback((name: string) => {
+    setDraft((current) => draftWithMention(current, name));
+  }, []);
+
   // #1103：live session 取代而不是叠在频道面板上——任一时刻只有一个 aria-modal dialog
   // （否则 Esc/Tab 会被两个 focus trap 同时处理）。
   const openLiveSession = useCallback((name: string) => {
@@ -4557,6 +4563,8 @@ export function ChannelPage({
         onOpenAgentDetail={openTeamMember}
         liveSessions={state.liveSessions}
         onOpenLiveSession={openLiveSession}
+        ocsRosters={state.ocsRosters}
+        onMentionAgent={canWrite ? mentionFromRoster : undefined}
         // 模块②（#1047）：名单里叫不到的 agent 旁的「接回」→ 一条命令的重连引导（同凭证面板的「重新接上」）。
         onReconnect={
           canMintAgent && accountKey !== null && !state.archived

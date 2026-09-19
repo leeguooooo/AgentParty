@@ -133,6 +133,9 @@ const IDLE_NOTICE_REASONS = new Set(["idle", "exited", "expired"]);
 // #1103：逐字镜像 shared/session-output.ts 的 SessionOutputState / SessionOutputKind。
 const SESSION_OUTPUT_STATE_SET = new Set(["running", "done", "blocked", "failed", "disconnected"]);
 const SESSION_OUTPUT_KIND_SET = new Set(["text", "tool", "stdout", "stderr", "system"]);
+// #1113：逐字镜像 shared/ocs-presence.ts 的 OcsHarness / OcsHostKind。
+const OCS_HARNESS_SET = new Set(["claude", "codex", "pi"]);
+const OCS_HOST_KIND_SET = new Set(["terminal", "desktop", "process", "unknown"]);
 const ERROR_CODES = new Set([
   "bad_request",
   "unavailable",
@@ -423,6 +426,31 @@ function parseServerFrame(value: unknown): ServerFrame | null {
         ) &&
         isFiniteNumber(value.ts) &&
         (value.replay === undefined || value.replay === true)
+        ? asServerFrame(value)
+        : null;
+    case "ocs_roster":
+      // #1113：本机 ocs 会话（服务端已按观看者裁剪）。必须逐字镜像 shared/ocs-presence.ts 的
+      // OcsRosterFrame / OcsSessionView（#622 教训：漏字段=整帧静默丢）。
+      return typeof value.name === "string" &&
+        value.name.length > 0 &&
+        Array.isArray(value.sessions) &&
+        value.sessions.every(
+          (s) =>
+            isRecord(s) &&
+            typeof s.addr === "string" &&
+            s.addr.length > 0 &&
+            OCS_HARNESS_SET.has(String(s.harness)) &&
+            typeof s.same_project === "boolean" &&
+            OCS_HOST_KIND_SET.has(String(s.host_kind)) &&
+            (s.self === undefined || s.self === true) &&
+            (s.party_name === undefined || typeof s.party_name === "string") &&
+            (s.cwd === undefined || s.cwd === null || typeof s.cwd === "string") &&
+            (s.label === undefined || typeof s.label === "string") &&
+            (s.status === undefined || typeof s.status === "string"),
+        ) &&
+        isFiniteNumber(value.ts) &&
+        isFiniteNumber(value.expires_at) &&
+        typeof value.full === "boolean"
         ? asServerFrame(value)
         : null;
     case "delivery_recovery":

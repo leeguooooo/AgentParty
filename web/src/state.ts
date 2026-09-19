@@ -1,5 +1,6 @@
 // 频道页状态：协议帧 → React 状态的唯一归约点。
 // 消息按 seq 去重排序；status 帧同时进时间线和 presence 快照；error 帧内联展示不做 toast。
+import { isOcsRosterFrame } from "@agentparty/shared";
 import type {
   ChannelMode,
   DirectedDelivery,
@@ -9,6 +10,7 @@ import type {
   ReadCursor,
   Sender,
   ServerFrame,
+  OcsRosterFrame,
   SessionOutputLine,
   SessionOutputState,
 } from "@agentparty/shared";
@@ -45,6 +47,11 @@ export interface ChannelState {
    * 当前没有可跟的运行会话（纯 watch / 从未武装 / 对端没上报）。
    */
   liveSessions: Record<string, LiveSession>;
+  /**
+   * #1113：每个上报身份最近一次的本机 ocs 会话（服务端已按本观看者裁剪）。没有条目 = 该身份没上报
+   * 或已清除；expires_at 过期由渲染方过滤。
+   */
+  ocsRosters: Record<string, OcsRosterFrame>;
 }
 
 export interface LiveSession {
@@ -79,6 +86,7 @@ export const initialChannelState: ChannelState = {
   lastSentSeq: 0,
   sendRejectedSeq: 0,
   liveSessions: {},
+  ocsRosters: {},
 };
 
 export type ChannelAction =
@@ -268,6 +276,8 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
       return {
         ...state,
         liveSessions,
+        // #1113：welcome 之后服务端会按本观看者的可见性重新回放全部未过期分组；旧的一律丢掉。
+        ocsRosters: {},
         self: frame.self,
         mode: frame.mode ?? state.mode,
         participants: frame.participants.filter(
@@ -327,11 +337,14 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
       delete presence[frame.name];
       const liveSessions = { ...state.liveSessions };
       delete liveSessions[frame.name];
+      const ocsRosters = { ...state.ocsRosters };
+      delete ocsRosters[frame.name];
       return {
         ...state,
         participants,
         presence,
         liveSessions,
+        ocsRosters,
         removedParticipants: tombstoneChanged
           ? { ...state.removedParticipants, [frame.name]: removedAt }
           : state.removedParticipants,
@@ -444,6 +457,17 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
           },
         },
       };
+    case "ocs_roster": {
+      // #1113：web 的 ws 层不做帧校验，这里兜一道形状检查；空 sessions = 清除（断线/过期/移除）。
+      if (!isOcsRosterFrame(frame)) return state;
+      if (frame.sessions.length === 0 || Object.hasOwn(state.removedParticipants, frame.name)) {
+        if (!Object.hasOwn(state.ocsRosters, frame.name)) return state;
+        const ocsRosters = { ...state.ocsRosters };
+        delete ocsRosters[frame.name];
+        return { ...state, ocsRosters };
+      }
+      return { ...state, ocsRosters: { ...state.ocsRosters, [frame.name]: frame } };
+    }
     case "session_output": {
       if (Object.hasOwn(state.removedParticipants, frame.name)) return state;
       const prev = state.liveSessions[frame.name];

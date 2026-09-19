@@ -5,6 +5,7 @@
 // injects a queued input into the *current* Claude session. Do not replace this
 // with ordinary MCP logging/resource notifications: those were proven not to
 // wake an idle harness in #553.
+import { OcsRosterReporter, ocsReportDisabled } from "../ocs-presence-report";
 import {
   BODY_LIMIT,
   DIRECTED_DELIVERY_LEASE_MS,
@@ -1292,6 +1293,8 @@ export interface ClaudeChannelDeliveryBridgeOptions {
    * 同身份存活 runtime 数（#963）：唤醒通知带 `siblings=N`，让被叫醒的会话知道自己是 N 个之一。
    * 省略＝不写（不臆造 1）。
    */
+  /** #1113：每次 welcome（含重连）回调；live bridge 用它触发本机 ocs 会话补报。抛错被吞。 */
+  onWelcome?: () => void;
   countSiblings?: (self: string) => number;
 }
 
@@ -2697,6 +2700,11 @@ export class ClaudeChannelDeliveryBridge {
       return;
     }
     if (incoming.type === "welcome") {
+      try {
+        this.options.onWelcome?.();
+      } catch {
+        /* observation only */
+      }
       const reconnect = this.welcomeGeneration > 0;
       this.welcomeGeneration += 1;
       this.resetJournalRecoveryBackoff(this.welcomeGeneration);
@@ -3395,10 +3403,22 @@ export async function run(argv: string[]): Promise<number> {
   const mcpInitialized = new Promise<boolean>((resolve) => {
     markMcpInitialized = resolve;
   });
+  // #1113：本机 ocs 会话经这条 live 连接周期上报给频道（网页 Presence「本机可介入」）。
+  const ocsReporter = ocsReportDisabled()
+    ? null
+    : new OcsRosterReporter({ send: (frame) => connection.send(frame), cwd: process.cwd() });
   const bridge = new ClaudeChannelDeliveryBridge({
     channel,
     connection,
     recoveryJournal,
+    ...(ocsReporter === null
+      ? {}
+      : {
+          onWelcome: () => {
+            ocsReporter.start();
+            void ocsReporter.reportNow();
+          },
+        }),
     requireHarnessClaim: true,
     // #963：唤醒通知带 siblings=N（同身份存活 runtime 数，本机注册表视角）。
     countSiblings: (self) => countIdentityRuntimes(listClaudeSessions(), { channel, server: serverUrl, identity: self }),
@@ -3732,6 +3752,7 @@ export async function run(argv: string[]): Promise<number> {
     await server.connect(new StdioServerTransport());
     return await bridge.run();
   } finally {
+    ocsReporter?.stop();
     bridge.close();
     try {
       await server.close();
