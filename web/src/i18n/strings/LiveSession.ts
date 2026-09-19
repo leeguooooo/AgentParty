@@ -1,0 +1,61 @@
+// Live session 只读终端视图（#1103）文案。纯文本，不写 Markdown。
+import { registerDict, type LocaleDict } from "../dict";
+
+export const LiveSessionStrings: LocaleDict = {
+  en: {
+    "LiveSession.title": "{name} — live session",
+    "LiveSession.open": "live",
+    "LiveSession.openTitle": "Watch {name}'s live run output (read-only)",
+    "LiveSession.unavailable": "no live run",
+    "LiveSession.unavailableTitle": "{name} has no live run session to follow",
+    "LiveSession.primaryAction": "Watch live session",
+    "LiveSession.section": "live session",
+    "LiveSession.empty":
+      "No live run session to follow. This member has not reported runner output — it may only be watching, never armed a runner, or its runner has not started a run since you connected.",
+    "LiveSession.readonly": "Read-only. To talk to this agent, post in the channel composer.",
+    "LiveSession.task": "run for #{seq}",
+    "LiveSession.session": "session {id}",
+    "LiveSession.follow": "follow",
+    "LiveSession.jumpLatest": "Jump to latest",
+    "LiveSession.state.running": "running",
+    "LiveSession.state.done": "done — this run finished",
+    "LiveSession.state.blocked": "blocked — this run did not complete",
+    "LiveSession.state.failed": "failed — this run was stopped",
+    "LiveSession.state.disconnected": "runner disconnected — showing the last screen it sent",
+    "LiveSession.noLines": "waiting for output…",
+    "LiveSession.kind.text": "model",
+    "LiveSession.kind.tool": "tool",
+    "LiveSession.kind.stdout": "stdout",
+    "LiveSession.kind.stderr": "stderr",
+    "LiveSession.kind.system": "runner",
+  },
+  zh: {
+    "LiveSession.title": "{name} — 实时会话",
+    "LiveSession.open": "实时",
+    "LiveSession.openTitle": "只读查看 {name} 正在运行的输出",
+    "LiveSession.unavailable": "无运行会话",
+    "LiveSession.unavailableTitle": "{name} 没有可跟的运行会话",
+    "LiveSession.primaryAction": "查看实时会话",
+    "LiveSession.section": "实时会话",
+    "LiveSession.empty":
+      "没有可跟的运行会话。这个成员没有上报 runner 输出：可能只在 watch、从未武装 runner，或者你连上之后它还没开始新一轮。",
+    "LiveSession.readonly": "只读。要和它说话，请在频道输入框里发消息。",
+    "LiveSession.task": "处理 #{seq}",
+    "LiveSession.session": "会话 {id}",
+    "LiveSession.follow": "跟随",
+    "LiveSession.jumpLatest": "跳到最新",
+    "LiveSession.state.running": "运行中",
+    "LiveSession.state.done": "已完成：本轮已结束",
+    "LiveSession.state.blocked": "受阻：本轮没有完成",
+    "LiveSession.state.failed": "已停止：本轮被中止",
+    "LiveSession.state.disconnected": "runner 已断开：停在它发来的最后一屏",
+    "LiveSession.noLines": "等待输出…",
+    "LiveSession.kind.text": "模型",
+    "LiveSession.kind.tool": "工具",
+    "LiveSession.kind.stdout": "stdout",
+    "LiveSession.kind.stderr": "stderr",
+    "LiveSession.kind.system": "runner",
+  },
+};
+
+registerDict(LiveSessionStrings);

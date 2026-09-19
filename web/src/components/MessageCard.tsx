@@ -1,5 +1,6 @@
 // 消息渲染：message → doodle 卡片外壳 + mono 元信息 + markdown 正文；
 // status → 时间线分隔条（spec §9 第 2 块）。
+import { LiveSessionEntryButton } from "./LiveSessionView";
 import type { AgentContext, ChannelRoleAssignment, MsgFrame, PresenceEntry, PublicDirectedDelivery, ReadCursor, Sender } from "@agentparty/shared";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
@@ -64,6 +65,9 @@ interface Props {
   recentMessagesByAgent?: ReadonlyMap<string, MsgFrame[]>;
   onOpenAgentDetail?: (name: string) => void;
   canOpenAgentDetail?: (name: string) => boolean;
+  // #1103：时间线里 agent 的 working 卡片直接打开它的 live session（同一条流）。
+  onOpenLiveSession?: (name: string) => void;
+  hasLiveSession?: (name: string) => boolean;
   // 频道决策协议（#284）：人类/moderator 是否可对本条 decision_request 拍板 + 回调。
   canRespondDecision?: boolean;
   decisionBusy?: boolean;
@@ -396,6 +400,8 @@ function MessageCardImpl({
   recentMessagesByAgent,
   onOpenAgentDetail,
   canOpenAgentDetail,
+  onOpenLiveSession,
+  hasLiveSession,
   canRespondDecision,
   decisionBusy,
   onDecisionRespond,
@@ -647,6 +653,15 @@ function MessageCardImpl({
           >
             ⋯
           </button>
+        )}
+        {msg.state === "working" && msg.sender.kind === "agent" && onOpenLiveSession !== undefined && (
+          <LiveSessionEntryButton
+            name={msg.sender.name}
+            display={senderOwnedLabel}
+            available={hasLiveSession?.(msg.sender.name) ?? false}
+            onOpen={onOpenLiveSession}
+            className="msg-status-live"
+          />
         )}
         {statusExpanded && statusFullDetail !== "" && <pre className="msg-status-detail t-mono">{statusFullDetail}</pre>}
         {contextExpanded && contextDetailBits.length > 0 && (

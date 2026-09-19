@@ -8489,6 +8489,86 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-card-accounts { border-color: var(--d-amber, #b7791f); color: var(--d-amber, #b7791f); }
 .roster-error { margin: 0 0 6px; font-size: 12.5px; color: var(--d-red, #c0392b); }
 
+/* #1103：live session 只读终端视图。所有入口打开同一份流。 */
+.live-session {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1.5px solid var(--t-border);
+  background: var(--t-panel2);
+}
+.live-session-head,
+.live-session-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  color: var(--t-dim);
+  font-size: 10.5px;
+}
+.live-session-head { border-bottom: 1px solid var(--t-border); }
+.live-session-foot { border-top: 1px solid var(--t-border); }
+.live-session-who { color: var(--t-text); font-weight: 600; }
+.live-session-id { margin-left: auto; color: var(--t-faint); }
+.live-session-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--t-faint);
+}
+.live-session-dot--running { background: var(--d-green); }
+.live-session-dot--done { background: var(--p-done); }
+.live-session-dot--blocked,
+.live-session-dot--failed { background: var(--d-red); }
+.live-session-dot--disconnected { background: var(--d-yellow); }
+.live-session-screen {
+  height: min(60vh, 520px);
+  overflow: auto;
+  padding: 6px 9px;
+  color: var(--t-text);
+  font-size: 11px;
+  line-height: 1.5;
+  overscroll-behavior: contain;
+}
+.live-session--compact .live-session-screen { height: 180px; }
+.live-session-line {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+.live-session-ts,
+.live-session-kind { color: var(--t-faint); white-space: nowrap; }
+.live-session-kind { min-width: 44px; }
+.live-session-text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.live-session-line--tool .live-session-text { color: var(--t-accent); }
+.live-session-line--stderr .live-session-text { color: var(--d-red); }
+.live-session-line--system .live-session-text { color: var(--t-dim); font-style: italic; }
+.live-session-status { color: var(--t-text); }
+.live-session-status--blocked,
+.live-session-status--failed { color: var(--d-red); }
+.live-session-status--disconnected { color: var(--d-amber); }
+.live-session-readonly { margin-left: auto; color: var(--t-faint); }
+.live-session-empty { margin: 0; padding: 10px 9px; color: var(--t-dim); }
+.live-session-card { width: min(920px, calc(100vw - 32px)); }
+.live-session-entry {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--t-border);
+  background: transparent;
+  color: var(--t-accent);
+  font-size: 9.5px;
+  cursor: pointer;
+}
+.live-session-entry--off { color: var(--t-faint); cursor: not-allowed; }
+.msg-status-live { margin-left: 6px; }
+.agent-detail-live h3 { display: flex; align-items: center; gap: 8px; }
+@media (max-width: 640px) {
+  .live-session-card { width: calc(100vw - 16px); }
+  .live-session-ts { display: none; }
+  .live-session-line { grid-template-columns: auto minmax(0, 1fr); }
+}
 /* #1102 显式粘贴：非安全上下文按钮置灰但可点（点了给原因），错误行紧贴输入框 */
 .composer-paste--insecure { opacity: 0.55; }
 .composer-paste-error { margin: 4px 0 0; font-size: 12px; color: var(--red, #c0392b); }

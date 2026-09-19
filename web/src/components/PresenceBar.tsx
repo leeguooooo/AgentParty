@@ -1,5 +1,7 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
+import { LiveSessionEntryButton, hasLiveSession } from "./LiveSessionView";
+import type { LiveSession } from "../state";
 import { autoWakeReachable, evaluateHostLease, PRESENCE_TIMEOUT_MS, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import { isOpaqueAccount } from "@agentparty/shared/identity";
@@ -36,6 +38,9 @@ interface Props {
   focus?: ReactElement | null;
   // issue #272（审计重开）：点 presence roster 里的某个人/agent，打开它的单 Agent 详情弹窗。
   onOpenAgentDetail?: (name: string) => void;
+  // #1103：成员条上的 live session 入口。有流就亮，没流禁用并说明原因。
+  liveSessions?: Record<string, LiveSession>;
+  onOpenLiveSession?: (name: string) => void;
   // #858：撞名身份的技术区分码来源；缺省即不显示区分码（老调用方行为不变）。
   identities?: IdentityDisplayMap;
   // 模块②（#1047）：名单里叫不到的 agent 旁边直接给「接回」——打开一条命令的重连引导。
@@ -421,6 +426,8 @@ export function PresenceBar({
   headerControls,
   focus,
   onOpenAgentDetail,
+  liveSessions,
+  onOpenLiveSession,
   identities,
   onReconnect,
   initialRosterOpen = false,
@@ -680,6 +687,18 @@ export function PresenceBar({
             )}
             {it.kind === "agent" && it.clientVersion !== null && (
               <span className="t-mono presence-client-version">cli v{it.clientVersion}</span>
+            )}
+            {it.kind === "agent" && onOpenLiveSession !== undefined && (
+              <LiveSessionEntryButton
+                name={it.name}
+                display={shownDisplay}
+                available={liveSessions !== undefined && hasLiveSession(liveSessions, it.name)}
+                onOpen={(name) => {
+                  closeRoster();
+                  onOpenLiveSession(name);
+                }}
+                className="roster-live"
+              />
             )}
           </div>
           <div className={`roster-status roster-status--${reach}`}>
