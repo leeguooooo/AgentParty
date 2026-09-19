@@ -1185,6 +1185,7 @@ pub fn run() {
             agent::desktop_agent_stop_instance,
             agent::desktop_agent_logs,
             agent::desktop_agent_logs_instance,
+            agent::desktop_agent_live_output,
             duty::desktop_duty_list,
             duty::desktop_duty_persist,
             duty::desktop_duty_adopt,

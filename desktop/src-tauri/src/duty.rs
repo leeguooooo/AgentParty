@@ -76,6 +76,8 @@ pub(crate) struct DutyPlistSpec<'a> {
     /// 每次 persist 生成新的安装代次。终局 marker 必须与当前 plist 代次一致，避免旧 serve
     /// 在重配竞态里晚写 marker、把刚装好的新 job 误标成终局停机。
     pub(crate) generation: Option<&'a str>,
+    /// #1103：本机只读 live 输出 tap 文件（AGENTPARTY_SESSION_OUTPUT_FILE）。
+    pub(crate) live_output_path: Option<&'a str>,
 }
 
 /// 给 launchd 常驻的 serve 用的 PATH：已解析 runner 的父目录必须排第一；已解析 Node runtime
@@ -382,6 +384,12 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
             xml_escape(generation)
         )
     });
+    let live_xml = spec.live_output_path.map_or_else(String::new, |path| {
+        format!(
+            "    <key>AGENTPARTY_SESSION_OUTPUT_FILE</key>\n    <string>{}</string>\n",
+            xml_escape(path)
+        )
+    });
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -398,7 +406,7 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
     <string>{config}</string>
     <key>PATH</key>
     <string>{path}</string>
-{runner_bin_xml}{generation_xml}    <!-- #744:让 serve 知道自己这个 launchd job 的 label,熔断/token 撤销等终局退出时自卸载,不被 KeepAlive 重启 -->
+{runner_bin_xml}{generation_xml}{live_xml}    <!-- #744:让 serve 知道自己这个 launchd job 的 label,熔断/token 撤销等终局退出时自卸载,不被 KeepAlive 重启 -->
     <key>AP_DUTY_LABEL</key>
     <string>{label}</string>
   </dict>
@@ -421,6 +429,7 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
         path = xml_escape(spec.path),
         runner_bin_xml = runner_bin_xml,
         generation_xml = generation_xml,
+        live_xml = live_xml,
         log = xml_escape(spec.log_path),
     )
 }
@@ -1008,6 +1017,8 @@ async fn duty_persist_inner(
             .as_nanos(),
         std::process::id()
     );
+    let live_output = crate::agent::live_output_path(&home, "duty", &label)
+        .map(|path| path.to_string_lossy().into_owned());
     let plist = duty_plist_content(&DutyPlistSpec {
         label: &label,
         party_bin: &party_bin.to_string_lossy(),
@@ -1020,6 +1031,7 @@ async fn duty_persist_inner(
         path: &launch_path,
         runner_bin: runner_bin_string.as_deref(),
         generation: Some(&generation),
+        live_output_path: live_output.as_deref(),
     });
     let plist_path = duty_plist_path(&home, &label);
     if let Some(parent) = plist_path.parent() {
@@ -1470,6 +1482,29 @@ mod tests {
     }
 
     #[test]
+    fn plist_carries_live_output_tap_only_when_set() {
+        let spec = |live: Option<&'static str>| DutyPlistSpec {
+            label: "com.agentparty.duty.x",
+            party_bin: "/bin/party",
+            config_path: "/c.json",
+            channel: "dev",
+            runner: "claude",
+            workdir: None,
+            repo: None,
+            log_path: "/l.log",
+            path: "/usr/bin",
+            runner_bin: None,
+            generation: None,
+            live_output_path: live,
+        };
+        let with = duty_plist_content(&spec(Some("/Users/x/.agentparty/desktop/live/duty-a&b.json")));
+        assert!(with.contains("<key>AGENTPARTY_SESSION_OUTPUT_FILE</key>"));
+        assert!(with.contains("duty-a&amp;b.json"));
+        let without = duty_plist_content(&spec(None));
+        assert!(!without.contains("AGENTPARTY_SESSION_OUTPUT_FILE"));
+    }
+
+    #[test]
     fn plist_never_contains_tokens_and_escapes_xml() {
         let plist = duty_plist_content(&DutyPlistSpec {
             label: "com.agentparty.duty.x.dev",
@@ -1483,6 +1518,7 @@ mod tests {
             path: "/Users/leo/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
             runner_bin: Some("/Users/leo/.local/bin/claude"),
             generation: Some("install-42"),
+            live_output_path: None,
         });
         assert!(plist.contains("a&amp;b"));
         assert!(plist.contains("&lt;duty&gt;"));
@@ -1518,6 +1554,7 @@ mod tests {
             path: "/x/bin:/usr/bin:/bin",
             runner_bin: Some("/x/bin/codex"),
             generation: None,
+            live_output_path: None,
         });
         assert!(plist.contains("<string>--workdir</string>"));
         assert!(plist.contains("<string>/srv/duty</string>"));
@@ -1600,6 +1637,7 @@ mod tests {
             path: "/usr/bin:/bin",
             runner_bin: None,
             generation: None,
+            live_output_path: None,
         });
         assert!(!plist.contains("AGENTPARTY_RUNNER_BIN"));
         assert_eq!(

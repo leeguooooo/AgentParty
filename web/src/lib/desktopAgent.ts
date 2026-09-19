@@ -1,3 +1,5 @@
+import { readLocalLiveOutput, type LocalLiveInvoker, type LocalLiveTarget } from "./localLiveOutput";
+import type { LiveSession } from "../state";
 export type DesktopAgentState = "stopped" | "starting" | "running" | "stopping" | "failed";
 export type DesktopAgentRunner = "codex" | "claude" | "codex-sdk";
 export type DesktopDutyDependencyState = "ready" | "missing" | "repair-required" | "not-required" | "unknown";
@@ -139,6 +141,8 @@ export interface DesktopAgentAdapter {
   stopInstance(instanceId: string): Promise<DesktopAgentStatus>;
   logs(): Promise<string[]>;
   logsInstance(instanceId: string): Promise<string[]>;
+  /** #1103：本机 runner 最近一轮的只读 live 输出（旧壳没有此命令时 reject）。 */
+  liveOutput?(target: LocalLiveTarget, name: string): Promise<LiveSession | null>;
   /** #616 phase 3：系统级常驻（launchd）。非 macOS / 旧 shell 会 reject，调用方按不可用处理。 */
   dutyList(): Promise<DesktopDutyEntry[]>;
   dutyPersist(input: DesktopAgentStartInput): Promise<DesktopDutyEntry>;
@@ -360,6 +364,9 @@ export function createDesktopAgentAdapter(invoke: DesktopAgentInvoker): DesktopA
     },
     async logsInstance(instanceId) {
       return parseLogs(await invoke<unknown>("desktop_agent_logs_instance", { instanceId }));
+    },
+    async liveOutput(target, name) {
+      return readLocalLiveOutput(invoke as LocalLiveInvoker, target, name);
     },
     async dutyList() {
       const value = await invoke<unknown>("desktop_duty_list");

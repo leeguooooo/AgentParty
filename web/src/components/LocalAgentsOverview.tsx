@@ -23,6 +23,14 @@ import {
 } from "../lib/localAgents";
 import type { DesktopAgentScheduler } from "./DesktopAgentPanel";
 import "../i18n/strings/LocalAgentsOverview";
+import { LocalLiveSessionModal } from "./LocalLiveSession";
+import type { LocalLiveTarget } from "../lib/localLiveOutput";
+
+/** #1103：本机 live 输出的定位——app 内实例按 instanceId，常驻按 launchd label。 */
+export function localLiveTarget(row: Pick<LocalAgentRow, "kind" | "instanceId" | "duty">): LocalLiveTarget | null {
+  if (row.kind === "duty") return row.duty?.label ? { kind: "duty", id: row.duty.label } : null;
+  return row.instanceId !== null ? { kind: "instance", id: row.instanceId } : null;
+}
 
 const defaultScheduler: DesktopAgentScheduler = {
   every(callback, intervalMs) {
@@ -73,6 +81,11 @@ export function LocalAgentsOverview({
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [detailKey, setDetailKey] = useState<string | null>(null);
+  const [liveView, setLiveView] = useState<{ name: string; display: string; target: LocalLiveTarget } | null>(null);
+  const liveRead = useMemo(
+    () => (target: LocalLiveTarget, name: string) => adapter.liveOutput!(target, name),
+    [adapter],
+  );
   const aliveRef = useRef(true);
   const mountedRef = useRef(true);
   const opRef = useRef(false);
@@ -275,6 +288,17 @@ export function LocalAgentsOverview({
                                 : t(`DesktopSettings.agent.state.${row.state}`)}
                             </span>
                             <span className="local-agents-actions">
+                              {adapter.liveOutput !== undefined && localLiveTarget(row) !== null && (
+                                <button
+                                  type="button"
+                                  className="d-btn local-agents-open-live"
+                                  data-local-live={row.key}
+                                  aria-label={`${t("LocalAgents.openLive")} ${displayName}`}
+                                  onClick={() => setLiveView({ name: row.key, display: displayName, target: localLiveTarget(row)! })}
+                                >
+                                  ▶ {t("LocalAgents.openLive")}
+                                </button>
+                              )}
                               {onOpenLogs !== undefined && (
                                 <button
                                   type="button"
@@ -502,6 +526,15 @@ export function LocalAgentsOverview({
             </div>
           )}
         </>
+      )}
+      {liveView !== null && adapter.liveOutput !== undefined && (
+        <LocalLiveSessionModal
+          name={liveView.name}
+          display={liveView.display}
+          target={liveView.target}
+          read={liveRead}
+          onClose={() => setLiveView(null)}
+        />
       )}
     </section>
   );

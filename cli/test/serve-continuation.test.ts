@@ -340,11 +340,11 @@ describe("builtin per-work continuations (#548)", () => {
     expect(calls[0]!.args).toEqual([
       "claude", "-p", "--disallowed-tools", "AskUserQuestion",
       "--permission-mode", "bypassPermissions", "--settings", expect.any(String),
-      "--session-id", coldSessionId, "--output-format", "json", expect.any(String),
+      "--session-id", coldSessionId, "--output-format", "stream-json", "--verbose", "--include-partial-messages", expect.any(String),
     ]);
     expect(calls[1]!.args).toEqual([
       "claude", "-p", "--disallowed-tools", "AskUserQuestion",
-      "--permission-mode", "bypassPermissions", "--settings", expect.any(String),
+      "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--settings", expect.any(String),
       "--resume", coldSessionId, expect.any(String),
     ]);
     expect(calls[1]!.env.AP_RUNNER_SESSION_ID).toBe(coldSessionId);
@@ -383,11 +383,11 @@ describe("builtin per-work continuations (#548)", () => {
     expect(calls[0]).toEqual([
       "claude", "-p", "--disallowed-tools", "AskUserQuestion",
       "--permission-mode", "plan", "--settings", expect.any(String),
-      "--session-id", coldSessionId, "--output-format", "json", expect.any(String),
+      "--session-id", coldSessionId, "--output-format", "stream-json", "--verbose", "--include-partial-messages", expect.any(String),
     ]);
     expect(calls[1]).toEqual([
       "claude", "-p", "--disallowed-tools", "AskUserQuestion",
-      "--permission-mode", "plan", "--settings", expect.any(String),
+      "--permission-mode", "plan", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--settings", expect.any(String),
       "--resume", coldSessionId, expect.any(String),
     ]);
   });

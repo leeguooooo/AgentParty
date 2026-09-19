@@ -6,9 +6,11 @@
 //  - 有界：部分行缓冲、待发队列、单帧行数、单行长度都有上限；超出丢最老的并记一条 system 行。
 //  - 限速：最多每 flushIntervalMs 一帧；终态帧（done/blocked/failed）不受限速，立即发。
 //  - 脱敏在这里做一遍（sanitizeSessionOutputText），服务端再做一遍，谁都不信任对方。
+import { atomicWriteJson } from "./atomic-json";
 import {
   SESSION_OUTPUT_LINE_MAX_CHARS,
   SESSION_OUTPUT_LINES_PER_FRAME,
+  SESSION_OUTPUT_RING_LINES,
   sanitizeSessionOutputText,
   type SessionOutputClientFrame,
   type SessionOutputKind,
@@ -32,6 +34,27 @@ export interface SessionOutputReporterOptions {
   /** 定时器注入（测试用假时钟）。 */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /**
+   * 本机只读 tap（#1103 桌面端入口）：每次 flush 后拿到本 session 最近 SESSION_OUTPUT_RING_LINES 行的
+   * 完整快照（已脱敏）。桌面端 sidecar/常驻经 AGENTPARTY_SESSION_OUTPUT_FILE 指定落盘位置，
+   * 本地面板直接读它——不经服务端、不接管键盘。回调抛错被吞。
+   */
+  tap?: (snapshot: LocalSessionOutputSnapshot) => void;
+}
+
+/** 本机 tap 快照：与 web 的 LiveSession 同形，多一个 name 以外的 updated_at。 */
+export interface LocalSessionOutputSnapshot {
+  v: 1;
+  session_id: string;
+  task_seq: number | null;
+  state: SessionOutputState;
+  lines: SessionOutputLine[];
+  updated_at: number;
+}
+
+/** 本机 tap 的默认实现：原子覆写一个 0600 JSON 文件（有界：最多 SESSION_OUTPUT_RING_LINES 行）。 */
+export function sessionOutputFileTap(path: string): (snapshot: LocalSessionOutputSnapshot) => void {
+  return (snapshot) => atomicWriteJson(path, snapshot, 0o600);
 }
 
 type StreamName = "stdout" | "stderr";
@@ -54,6 +77,9 @@ export class SessionOutputReporter {
   private terminalBacklog: SessionOutputClientFrame[] = [];
   private retryTimer: unknown = null;
   private retries = 0;
+  private readonly tap: ((snapshot: LocalSessionOutputSnapshot) => void) | null;
+  /** tap 用的本 session 保留尾部。 */
+  private localLines: SessionOutputLine[] = [];
 
   constructor(opts: SessionOutputReporterOptions) {
     this.send = opts.send;
@@ -66,6 +92,7 @@ export class SessionOutputReporter {
       return handle;
     });
     this.clearTimer = opts.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    this.tap = opts.tap ?? null;
   }
 
   get activeSessionId(): string | null {
@@ -84,6 +111,7 @@ export class SessionOutputReporter {
     this.partial = { stdout: "", stderr: "" };
     this.dropped = 0;
     this.lastTool = null;
+    this.localLines = [];
     this.enqueue("system", note);
     this.flush("running");
     return this.sessionId;
@@ -115,6 +143,16 @@ export class SessionOutputReporter {
     if (this.sessionId === null || name === null || name === this.lastTool) return;
     this.lastTool = name;
     this.enqueue("tool", `▸ ${name}`);
+  }
+
+  /**
+   * 一次真实的工具调用事件（#1103 item 3：hook 事件逐条推送，不靠心跳采样）。
+   * 与 tool() 不同：同名工具连续调用也各记一行。
+   */
+  toolCall(name: string, status: "start" | "failed" = "start"): void {
+    if (this.sessionId === null || name.trim() === "") return;
+    this.lastTool = name;
+    this.enqueue("tool", status === "failed" ? `✗ ${name} failed` : `▸ ${name}`);
   }
 
   /** 本轮结束：冲掉残行，发终态帧（不受限速），然后清空。 */
@@ -188,6 +226,26 @@ export class SessionOutputReporter {
     return this.terminalBacklog.length;
   }
 
+  private recordLocal(state: SessionOutputState, lines: SessionOutputLine[]): void {
+    if (this.tap === null || this.sessionId === null) return;
+    this.localLines.push(...lines);
+    if (this.localLines.length > SESSION_OUTPUT_RING_LINES) {
+      this.localLines.splice(0, this.localLines.length - SESSION_OUTPUT_RING_LINES);
+    }
+    try {
+      this.tap({
+        v: 1,
+        session_id: this.sessionId,
+        task_seq: this.taskSeq,
+        state,
+        lines: this.localLines.slice(),
+        updated_at: this.now(),
+      });
+    } catch {
+      // 本机 tap 只是观测：写盘失败不影响 runner 与线上流。
+    }
+  }
+
   private schedule(): void {
     if (this.timer !== null) return;
     this.timer = this.setTimer(() => {
@@ -206,6 +264,7 @@ export class SessionOutputReporter {
     const terminal = state !== "running";
     if (!terminal) {
       const batch = this.pending.splice(0, SESSION_OUTPUT_LINES_PER_FRAME);
+      this.recordLocal(state, batch);
       // running 输出尽力而为：连接没就绪就丢，runner 不受影响。
       this.trySend({ type: "session_output", session_id: this.sessionId, task_seq: this.taskSeq, state, lines: batch });
     } else {
@@ -221,6 +280,7 @@ export class SessionOutputReporter {
           lines: batch,
         });
       } while (this.pending.length > 0);
+      this.recordLocal(state, frames.flatMap((frame) => frame.lines));
       this.terminalBacklog.push(...frames);
       this.retries = 0;
       this.retryTerminal();
