@@ -254,8 +254,20 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
         const prev = readCursors[c.name];
         if (prev === undefined || c.last_seen_seq > prev.last_seen_seq) readCursors[c.name] = c;
       }
+      // #1103：welcome 是权威 roster。断线期间错过 participant_removed 的身份，其旧 live 输出一并丢掉；
+      // 仍在 roster/presence 里的（含已结束/断线的 session）由随后的 replay 快照刷新。
+      const currentNames = new Set([
+        ...frame.participants.map((participant) => participant.name),
+        ...frame.presence.map((entry) => entry.name),
+      ]);
+      const liveSessions = Object.fromEntries(
+        Object.entries(state.liveSessions).filter(
+          ([name]) => currentNames.has(name) && !Object.hasOwn(removedParticipants, name),
+        ),
+      );
       return {
         ...state,
+        liveSessions,
         self: frame.self,
         mode: frame.mode ?? state.mode,
         participants: frame.participants.filter(

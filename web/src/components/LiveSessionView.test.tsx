@@ -100,6 +100,21 @@ describe("channelReducer session_output (#1103)", () => {
   });
 });
 
+describe("channelReducer welcome prunes stale live sessions (#1103)", () => {
+  test("identities missing from the authoritative roster lose their stream; present ones keep it", () => {
+    let s = apply(initialChannelState, out({ lines: [line("a")] }), out({ name: "gone", lines: [line("b")] }));
+    s = channelReducer(s, {
+      type: "frame",
+      frame: {
+        type: "welcome", channel: "c", self: "me", participants: [{ name: "builder", kind: "agent" }],
+        last_seq: 0, presence: [],
+      } as never,
+    });
+    expect(hasLiveSession(s.liveSessions, "builder")).toBe(true);
+    expect(hasLiveSession(s.liveSessions, "gone")).toBe(false);
+  });
+});
+
 describe("isPinnedToBottom", () => {
   test("only near-bottom counts as following", () => {
     expect(isPinnedToBottom({ scrollHeight: 1000, clientHeight: 200, scrollTop: 800 })).toBe(true);
