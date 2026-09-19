@@ -200,6 +200,13 @@ fn now_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// 原始用户主目录（HOME，Windows 回退 USERPROFILE）；与 agentparty_home 同一解析口径。
+pub(crate) fn user_home() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 fn agentparty_home() -> Result<PathBuf, String> {
     if let Some(home) = env::var_os("AGENTPARTY_HOME") {
         return Ok(PathBuf::from(home));
@@ -445,6 +452,69 @@ fn config_secrets(path: &Path) -> Vec<String> {
         .map(str::to_string),
     );
     secrets
+}
+
+/// #1103：本机只读 live 输出 tap 的文件位置。serve 经 AGENTPARTY_SESSION_OUTPUT_FILE 写（已脱敏、
+/// 有界 300 行），本地面板经 desktop_agent_live_output 读。kind 只有 instance / duty 两种，
+/// id 里任何非 [A-Za-z0-9._-] 字符都换成 `_`，杜绝路径穿越。
+pub(crate) fn live_output_path(home: &Path, kind: &str, id: &str) -> Option<PathBuf> {
+    if kind != "instance" && kind != "duty" {
+        return None;
+    }
+    if id.is_empty() || id.len() > 256 {
+        return None;
+    }
+    let safe: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.chars().all(|c| c == '.') {
+        return None;
+    }
+    Some(
+        home.join(".agentparty/desktop/live")
+            .join(format!("{kind}-{safe}.json")),
+    )
+}
+
+/// tap 文件上限：300 行 × 2000 字符的 JSON 远小于此；超过视为异常，不读。
+const LIVE_OUTPUT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+pub(crate) fn read_live_output(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(None),
+    };
+    if meta.len() > LIVE_OUTPUT_MAX_BYTES {
+        return Err("live output file is too large".to_string());
+    }
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(None),
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) if value.is_object() => Ok(Some(value)),
+        _ => Ok(None),
+    }
+}
+
+/// 只读：返回本机 runner 最近一轮的 live 输出快照（没有则 null）。不提供任何写入/输入通道。
+#[cfg(desktop)]
+#[tauri::command]
+pub(crate) fn desktop_agent_live_output(
+    kind: String,
+    id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let home = user_home().ok_or_else(|| "cannot locate the home directory".to_string())?;
+    let path = live_output_path(&home, &kind, &id)
+        .ok_or_else(|| "invalid live output target".to_string())?;
+    read_live_output(&path)
 }
 
 fn push_bounded_log(logs: &mut VecDeque<String>, line: String) {
@@ -792,7 +862,12 @@ pub(crate) fn desktop_agent_start(
             args.push("--repo".to_string());
             args.push(url.to_string());
         }
-        command.args(args).env("AGENTPARTY_CONFIG", &config_path).spawn()
+        let mut command = command.args(args).env("AGENTPARTY_CONFIG", &config_path);
+        if let Some(live) = user_home().and_then(|home| live_output_path(&home, "instance", &key))
+        {
+            command = command.env("AGENTPARTY_SESSION_OUTPUT_FILE", live);
+        }
+        command.spawn()
     });
 
     let (mut events, child) = match spawn_result {
@@ -1262,6 +1337,36 @@ mod tests {
         // 最新的终止态保留，最旧的被淘汰。
         assert!(instances.contains_key("cfg:29"));
         assert!(!instances.contains_key("cfg:0"));
+    }
+
+    #[test]
+    fn live_output_path_is_confined_and_kind_checked() {
+        let home = std::path::Path::new("/Users/x");
+        let path = super::live_output_path(home, "instance", "../../etc:dev").unwrap();
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/Users/x/.agentparty/desktop/live/instance-.._.._etc_dev.json")
+        );
+        assert!(path.starts_with("/Users/x/.agentparty/desktop/live"));
+        assert!(super::live_output_path(home, "other", "a").is_none());
+        assert!(super::live_output_path(home, "duty", "").is_none());
+        assert!(super::live_output_path(home, "duty", "..").is_none());
+    }
+
+    #[test]
+    fn read_live_output_returns_object_or_none() {
+        let dir = std::env::temp_dir().join(format!("ap-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("x.json");
+        assert_eq!(super::read_live_output(&file).unwrap(), None);
+        std::fs::write(&file, "{\"session_id\":\"r\"}").unwrap();
+        assert_eq!(
+            super::read_live_output(&file).unwrap().unwrap()["session_id"],
+            "r"
+        );
+        std::fs::write(&file, "[1]").unwrap();
+        assert_eq!(super::read_live_output(&file).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -12,6 +12,7 @@ import {
   writeActivityFile,
 } from "../src/activity";
 import { activityTargetFile } from "../src/commands/hook";
+import { toolEventsFile } from "../src/tool-events";
 import { claudeHookSettingsJson } from "../src/commands/serve";
 
 const NOW = 1_700_000_000_000;
@@ -164,6 +165,22 @@ describe("party hook report end-to-end", () => {
     const written = JSON.parse(readFileSync(file, "utf8")) as { phase: string; tool: string };
     expect(written.phase).toBe("tool");
     expect(written.tool).toBe("Bash");
+  });
+
+  test("#1103：每次工具调用都追加一条工具事件（只含工具名，不含入参）", async () => {
+    const file = runnerActivityFile(tempDir());
+    for (const event of ["PreToolUse", "PreToolUse", "PostToolUseFailure"]) {
+      const r = await runHookReport(
+        JSON.stringify({ hook_event_name: event, tool_name: "Bash", tool_input: { command: "echo secret-arg" }, session_id: "s1" }),
+        file,
+      );
+      expect(r.code).toBe(0);
+      expect(r.stdout).toBe("");
+    }
+    const raw = readFileSync(toolEventsFile(file), "utf8");
+    expect(raw).not.toContain("secret-arg");
+    const events = raw.trim().split("\n").map((line) => JSON.parse(line) as { tool: string; status: string });
+    expect(events.map((e) => `${e.tool}:${e.status}`)).toEqual(["Bash:start", "Bash:start", "Bash:failed"]);
   });
 
   test("bad JSON stays silent and exits 0 (never blocks the model)", async () => {

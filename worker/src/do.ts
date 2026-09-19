@@ -130,7 +130,7 @@ import {
 } from "@agentparty/shared/mentions";
 import { anchorAttachmentUrls, parseAttachments, parseStoredAttachments } from "./attachments";
 import { sha256Hex } from "./auth";
-import { SessionOutputRing } from "./session-output-ring";
+import { SessionOutputRing, createSqlSessionOutputStore } from "./session-output-ring";
 import { OcsRosterStore, clearedOcsRosterFrame } from "./ocs-roster-store";
 import { Server, type Connection, type ConnectionContext, type WSMessage } from "partyserver";
 
@@ -1779,8 +1779,8 @@ export class ChannelDO extends Server<Env> {
   // frame is awaiting I/O. Preserve wire order explicitly: hello must finish token validation and
   // capability setup before an immediately-following serve lease / adapter / send frame runs.
   private readonly wsMessageTails = new Map<string, Promise<void>>();
-  /** #1103：每 agent 最近 live session 的有界环形缓冲（纯内存观测流）。 */
-  private readonly sessionOutputRing = new SessionOutputRing();
+  /** #1103：每 agent 最近 live session 的有界环形缓冲（落 DO SQLite，驱逐后可回放；onStart 里建）。 */
+  private sessionOutputRing = new SessionOutputRing();
   /** #1113：每身份最近一次上报的本机 ocs 会话（纯内存，带过期）。 */
   private readonly ocsRoster = new OcsRosterStore();
   /** #913：上一次 `/internal/next-mention` 查询真实读到的行数。见该处理器里的说明。 */
@@ -1792,6 +1792,7 @@ export class ChannelDO extends Server<Env> {
 
   onStart() {
     const sql = this.ctx.storage.sql;
+    this.sessionOutputRing = new SessionOutputRing(createSqlSessionOutputStore(sql));
     sql.exec(`CREATE TABLE IF NOT EXISTS messages (
       seq INTEGER PRIMARY KEY,
       sender_name TEXT NOT NULL,
@@ -3025,7 +3026,9 @@ export class ChannelDO extends Server<Env> {
       this.replayDirectedDeliveryStates(connection);
       // #1103：晚到的观看者拿到每个 agent 最近 session 的完整保留尾部（含已结束/断线的最后一屏）。
       if (this.wantsSessionOutput(st)) {
-        for (const snapshot of this.sessionOutputRing.snapshot()) {
+        const liveIds = new Set<string>();
+        for (const live of this.getConnections<ConnState>()) liveIds.add(live.id);
+        for (const snapshot of this.sessionOutputRing.snapshot(liveIds)) {
           if (!this.sendPublicFrame(connection, snapshot, true)) return;
         }
       }

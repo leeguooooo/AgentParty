@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AGENT_ACTIVITY_TTL_MS, type AgentActivity } from "@agentparty/shared";
 import { activityFromHookEvent, readActivityFile, writeActivityFile } from "../activity";
+import { appendToolEvent, toolEventFromHook, toolEventsFile } from "../tool-events";
 import {
   agentpartyHome,
   loadCursor,
@@ -1793,6 +1794,19 @@ function reportHookPayload(
   forcePush = false,
 ): void {
   const now = Date.now();
+  // #1103 item 3：serve 托管 lane 里每次工具调用追加一行事件，serve 逐条推给 live session。
+  // 放在 activity 判定之前且独立 try：事件文件写不了不影响 activity 落盘。
+  const managedActivityFile = process.env.AP_ACTIVITY_FILE;
+  if (overridePhase === undefined && typeof managedActivityFile === "string" && managedActivityFile.length > 0) {
+    const toolEvent = toolEventFromHook(record, now);
+    if (toolEvent !== null) {
+      try {
+        appendToolEvent(toolEventsFile(managedActivityFile), toolEvent);
+      } catch {
+        // hook 铁律：任何失败都静默
+      }
+    }
+  }
   const activity: AgentActivity | null = overridePhase === undefined
     ? activityFromHookEvent(record, now)
     : { phase: overridePhase, ts: now };

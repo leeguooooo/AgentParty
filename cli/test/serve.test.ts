@@ -2197,7 +2197,7 @@ describe("builtin runner", () => {
     )).toBe(true);
     expect(calls[1]).toEqual([
       "claude", "-p", "--disallowed-tools", "AskUserQuestion",
-      "--permission-mode", "bypassPermissions", "--settings", expect.any(String),
+      "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--settings", expect.any(String),
       "--resume", coldSessionId, expect.any(String),
     ]);
   });

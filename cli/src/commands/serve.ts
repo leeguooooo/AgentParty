@@ -2,7 +2,9 @@
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
 import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, isWakeVerifyFrame, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame, type SessionOutputKind } from "@agentparty/shared";
-import { SessionOutputReporter } from "../session-output";
+import { SessionOutputReporter, sessionOutputFileTap } from "../session-output";
+import { ClaudeStreamJsonParser, claudeResultBody } from "../claude-stream-json";
+import { TOOL_EVENTS_POLL_MS, ToolEventTail, clearToolEvents, toolEventsFile } from "../tool-events";
 import { OcsRosterReporter, ocsReportDisabled, type OcsAsyncExec } from "../ocs-presence-report";
 import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
@@ -1215,6 +1217,94 @@ export interface ThreadLike {
   id?: string | null;
   thread_id?: string | null;
   run(prompt: string, opts: { sandbox: string; signal?: AbortSignal; outputSchema?: Record<string, unknown> }): Promise<unknown>;
+  /** @openai/codex-sdk 的事件流接口（#1103 item 4）；有它且需要 live 输出时优先用。 */
+  runStreamed?(
+    prompt: string,
+    opts: { sandbox: string; signal?: AbortSignal; outputSchema?: Record<string, unknown> },
+  ): Promise<{ events: AsyncIterable<unknown> }>;
+}
+
+function sdkItemLines(item: Record<string, unknown>, phase: "started" | "completed"): Array<{ kind: SessionOutputKind; text: string }> {
+  const type = item.type;
+  const str = (value: unknown): string => (typeof value === "string" ? value : "");
+  if (type === "command_execution") {
+    const command = str(item.command);
+    if (phase === "started") return command === "" ? [] : [{ kind: "tool", text: `▸ shell: ${command}` }];
+    const out: Array<{ kind: SessionOutputKind; text: string }> = [];
+    for (const line of str(item.aggregated_output).split("\n").slice(-40)) {
+      if (line.trim() !== "") out.push({ kind: "stdout", text: line });
+    }
+    if (typeof item.exit_code === "number" && item.exit_code !== 0) {
+      out.push({ kind: "stderr", text: `exit ${item.exit_code}: ${command}` });
+    }
+    return out;
+  }
+  if (type === "mcp_tool_call") {
+    const name = [str(item.server), str(item.tool)].filter(Boolean).join(".");
+    if (phase === "started") return name === "" ? [] : [{ kind: "tool", text: `▸ ${name}` }];
+    return item.status === "failed" && name !== "" ? [{ kind: "tool", text: `✗ ${name} failed` }] : [];
+  }
+  if (type === "web_search" && phase === "started") {
+    const query = str(item.query);
+    return [{ kind: "tool", text: query === "" ? "▸ web_search" : `▸ web_search: ${query}` }];
+  }
+  if (type === "file_change" && phase === "completed" && Array.isArray(item.changes)) {
+    return item.changes
+      .map((change) => (change && typeof change === "object" ? change as Record<string, unknown> : {}))
+      .filter((change) => typeof change.path === "string")
+      .map((change) => ({ kind: "tool" as const, text: `▸ ${str(change.kind) || "edit"} ${String(change.path)}` }));
+  }
+  if (type === "agent_message" && phase === "completed") {
+    return str(item.text).split("\n").filter((line) => line.trim() !== "").map((line) => ({ kind: "text" as const, text: line }));
+  }
+  if (type === "error" && phase === "completed") {
+    const message = str(item.message);
+    return message === "" ? [] : [{ kind: "stderr", text: message }];
+  }
+  return [];
+}
+
+/**
+ * #1103 item 4：用 SDK 事件流跑一轮，边跑边把工具/命令输出/正文交给 live 汇；返回与 run() 同形的
+ * 结果（items / finalResponse / usage），交付路径不变。没有 runStreamed 或没有汇时退回 run()。
+ */
+export async function runSdkTurn(
+  thread: ThreadLike,
+  prompt: string,
+  turnOptions: { sandbox: string; signal?: AbortSignal; outputSchema?: Record<string, unknown> },
+  sink: RunnerSessionOutputSink | undefined,
+): Promise<unknown> {
+  if (sink === undefined || typeof thread.runStreamed !== "function") return await thread.run(prompt, turnOptions);
+  const { events } = await thread.runStreamed(prompt, turnOptions);
+  const items: unknown[] = [];
+  let finalResponse = "";
+  let usage: unknown = null;
+  const emit = (item: Record<string, unknown>, phase: "started" | "completed") => {
+    try {
+      for (const line of sdkItemLines(item, phase)) sink.line(line.kind, line.text);
+    } catch {
+      // 观测流不影响 runner
+    }
+  };
+  for await (const raw of events) {
+    if (!raw || typeof raw !== "object") continue;
+    const event = raw as Record<string, unknown>;
+    const item = event.item && typeof event.item === "object" ? event.item as Record<string, unknown> : null;
+    if (event.type === "item.started" && item !== null) emit(item, "started");
+    else if (event.type === "item.completed" && item !== null) {
+      items.push(item);
+      if (item.type === "agent_message" && typeof item.text === "string") finalResponse = item.text;
+      // 正文由调用方按最终结果统一补一行，避免重复。
+      if (item.type !== "agent_message") emit(item, "completed");
+    } else if (event.type === "turn.completed") usage = event.usage ?? null;
+    else if (event.type === "turn.failed") {
+      const error = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>).message : undefined;
+      throw new Error(typeof error === "string" ? error : "codex turn failed");
+    } else if (event.type === "error") {
+      throw new Error(typeof event.message === "string" ? event.message : "codex stream error");
+    }
+  }
+  return { items, finalResponse, usage };
 }
 
 export interface CodexThreadOptions {
@@ -1864,6 +1954,8 @@ export interface ServeOptions {
   wakeProxy?: Omit<WakeProxyDeps, "log">;
   /** 每任务心跳间隔（#228）。默认 DEFAULT_TASK_HEARTBEAT_MS；测试注入更短值。 */
   heartbeatIntervalMs?: number;
+  /** #1103：工具事件 tail 间隔；测试注入。 */
+  toolEventPollMs?: number;
   /** 时钟注入（#228）：任务开始时刻与每次心跳时刻走它，便于测试断言心跳在推进。默认 Date.now。 */
   now?: () => number;
   /** 单次 runner 的硬超时；默认 30 分钟。到点后恢复监听，不再让 task heartbeat 无限伪装健康。 */
@@ -1959,17 +2051,78 @@ export async function advertiseServeWake(
 // 默认执行器：把上下文写成 context file → sh -c <cmd>（cmd 里的 {file} 替成路径，也放进 AP_CONTEXT_FILE）。
 // 正文仍走 stdin + AP_* env 图省事；context file 是给需要稳健取全量的 runner 用。串行等它退出。
 // 非零退出：打印 exit code + context file 路径（便于排查），并保留文件；成功则清理。
+/**
+ * #1103 item 4：custom --cmd runner 的输出改为 pipe：逐块原样写回 serve 自己的 stdout/stderr
+ * （保持 inherit 时的可见行为，桌面端/launchd 日志照旧），同时交给 live 汇按行上报。不在内存里攒全文。
+ */
+export async function teeRunnerStream(
+  stream: ReadableStream<Uint8Array>,
+  name: "stdout" | "stderr",
+  write: (bytes: Uint8Array) => void,
+  sink: RunnerSessionOutputSink | undefined,
+  stop?: AbortSignal,
+): Promise<void> {
+  const decoder = new TextDecoder();
+  const reader = stream.getReader();
+  // 排空超时后切断：后台子进程继续持有管道时，旧 reader 不得把后续输出灌进下一轮 session。
+  const onStop = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  if (stop?.aborted) onStop();
+  stop?.addEventListener("abort", onStop, { once: true });
+  try {
+    await pumpTee(reader, decoder, name, write, sink, stop);
+  } finally {
+    stop?.removeEventListener("abort", onStop);
+  }
+}
+
+async function pumpTee(
+  reader: { read(): Promise<{ done: boolean; value?: Uint8Array }> },
+  decoder: TextDecoder,
+  name: "stdout" | "stderr",
+  write: (bytes: Uint8Array) => void,
+  sink: RunnerSessionOutputSink | undefined,
+  stop: AbortSignal | undefined,
+): Promise<void> {
+  for (;;) {
+    const { done, value } = await reader.read().catch(() => ({ done: true as const, value: undefined }));
+    if (done || value === undefined || stop?.aborted) break;
+    try { write(value); } catch { /* 本地回显失败不影响 runner */ }
+    if (sink !== undefined) {
+      const text = decoder.decode(value, { stream: true });
+      if (text !== "") {
+        try { sink.chunk(name, text); } catch { /* observation only */ }
+      }
+    }
+  }
+  if (sink !== undefined && !stop?.aborted) {
+    const tail = decoder.decode();
+    if (tail !== "") {
+      try { sink.chunk(name, tail); } catch { /* observation only */ }
+    }
+  }
+}
+
+/** custom runner 退出后等待输出管道冲完的上限。 */
+export const CUSTOM_RUNNER_DRAIN_MS = 1_000;
+
+function createDefaultRun(sink: RunnerSessionOutputSink | undefined): ServeRunner {
+  return (frame, ctx) => defaultRun(frame, ctx, sink);
+}
+
 async function defaultRun(
   frame: MsgFrame,
   ctx: ServeRunnerContext,
+  sink?: RunnerSessionOutputSink,
 ): Promise<void> {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
   const file = writeContextFile(ctx.contextDir, frame, ctx.channel, ctx.self, ctx.recent, ctx.charter, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null, ctx.attachments, ctx.delivery ?? null);
   const cmd = ctx.cmd.includes("{file}") ? ctx.cmd.replaceAll("{file}", file) : ctx.cmd;
   const proc = Bun.spawn(["sh", "-c", cmd], {
     stdin: new TextEncoder().encode(body),
-    stdout: "inherit",
-    stderr: "inherit",
+    stdout: "pipe",
+    stderr: "pipe",
     // #816：显式 --workdir 才改；缺省不传，保持「继承 serve 的 cwd」这个既有行为。
     ...(ctx.cwd === undefined ? {} : { cwd: ctx.cwd }),
     env: {
@@ -2008,7 +2161,21 @@ async function defaultRun(
   if (ctx.signal?.aborted) abort();
   let code: number;
   try {
+    const drainStop = new AbortController();
+    const pumps = Promise.all([
+      teeRunnerStream(proc.stdout, "stdout", (bytes) => process.stdout.write(bytes), sink, drainStop.signal),
+      teeRunnerStream(proc.stderr, "stderr", (bytes) => process.stderr.write(bytes), sink, drainStop.signal),
+    ]).catch(() => undefined);
     code = await proc.exited;
+    // 脚本可能把后台子进程留着继续持有管道（inherit 时不会卡住 serve）：退出后最多再等一会儿冲完输出，
+    // 绝不让观测流把串行 wake 循环挂住。
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      pumps,
+      new Promise<void>((resolve) => { drainTimer = setTimeout(resolve, CUSTOM_RUNNER_DRAIN_MS); }),
+    ]);
+    if (drainTimer !== undefined) clearTimeout(drainTimer);
+    drainStop.abort();
   } finally {
     ctx.signal?.removeEventListener("abort", abort);
     // Do not let leader exit cancel the group escalation.  The next wake may start only after this barrier.
@@ -2720,7 +2887,7 @@ export function runnerDiagnosticExcerpt(
 ): string {
   if (harness === "claude") {
     try {
-      const body = JSON.parse(result.stdout) as Record<string, unknown>;
+      const body = claudeResultBody(result.stdout) ?? {};
       if (body.loggedIn === false) {
         return "Claude authentication unavailable (loggedIn=false); run `claude login`";
       }
@@ -2750,12 +2917,8 @@ export function runnerDiagnosticExcerpt(
 // 这里只吃**结构化字段**：仅当 `is_error===true && terminal_reason==="api_error"` 且 `result` 命中环境错指纹
 // 才判 env failure——正常模型输出 `is_error:false`（即便正文含「unauthorized」），绝不误报，不重犯 #693。
 export function claudeJsonEnvFailure(stdout: string): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return false;
-  }
+  // #1103：stream-json 下终态在最后一行 `type:"result"`；旧单 JSON 形态照旧。
+  const parsed: unknown = claudeResultBody(stdout);
   // JSON.parse 对 "null"/数字/字符串等合法 JSON 返回非对象值——直接取属性会抛(合法 null 更会),
   // 别让失败处理自身崩(CodeRabbit #752)。只认对象体。
   if (typeof parsed !== "object" || parsed === null) return false;
@@ -2896,7 +3059,9 @@ export function finalText(result: unknown): string {
 
 function parseClaudeJson(stdout: string): { sessionId: string | null; text: string } {
   try {
-    const body = JSON.parse(stdout) as Record<string, unknown>;
+    const body = claudeResultBody(stdout);
+    // stream-json 却没有 result 行（进程半路死了）：绝不把一坨事件 JSON 当正文交付。
+    if (body === null) return { sessionId: null, text: /^\s*\{"type":/.test(stdout) ? "" : stdout };
     const sessionId = typeof body.session_id === "string" ? body.session_id : null;
     if (body.structured_output !== undefined) {
       return { sessionId, text: JSON.stringify(body.structured_output) };
@@ -3134,7 +3299,10 @@ async function runHarness(
     opts.sandbox === "read-only" ? "plan" : "bypassPermissions",
   ];
   const schemaArgs = opts.outputSchema === undefined ? [] : ["--json-schema", JSON.stringify(opts.outputSchema)];
-  const jsonOutputArgs = opts.outputSchema === undefined ? [] : ["--output-format", "json"];
+  // #1103 item 2：所有 claude 轮次都走 stream-json——正文按 text_delta 增量流出，终态仍是一行
+  // `type:"result"`（字段与旧 `--output-format json` 完全相同，claudeResultBody 统一取出）。
+  // stream-json 在 -p 下必须配 --verbose；--include-partial-messages 才会有 token 级增量。
+  const streamJsonArgs = ["--output-format", "stream-json", "--verbose", "--include-partial-messages"];
   // #581：--strict-mcp-config 只用注入的 server（隔离用户全局 MCP 配置）；
   // --allowedTools mcp__party 放行整个 party server 的工具，headless 下不弹权限。
   const mcpArgs = opts.managedMcp === undefined
@@ -3149,7 +3317,7 @@ async function runHarness(
   const hookArgs = ["--settings", claudeHookSettingsJson()];
   const runnerCommand = builtinRunnerCommand("claude", env);
   const args = sid
-    ? [runnerCommand, "-p", "--disallowed-tools", "AskUserQuestion", ...permissionArgs, ...schemaArgs, ...jsonOutputArgs, ...mcpArgs, ...hookArgs, "--resume", sid, prompt]
+    ? [runnerCommand, "-p", "--disallowed-tools", "AskUserQuestion", ...permissionArgs, ...schemaArgs, ...streamJsonArgs, ...mcpArgs, ...hookArgs, "--resume", sid, prompt]
     : [
         runnerCommand,
         "-p",
@@ -3161,30 +3329,31 @@ async function runHarness(
         ...hookArgs,
         "--session-id",
         coldSessionId!,
-        "--output-format",
-        "json",
+        ...streamJsonArgs,
         prompt,
       ];
-  // #1103：plain-text 续会的 stdout 就是模型输出，可实时流出；JSON 输出（冷启动 / schema）的 stdout
-  // 是一整块结构化结果，原样流出只会是一坨 JSON——只流 stderr，结束后把解析出的正文作为 text 行补上。
-  const plainStdout = Boolean(sid) && opts.outputSchema === undefined;
   const sink = opts.sessionOutput;
-  const result = await runProcess(args, {
-    cwd,
-    env,
-    signal,
-    ...(sink === undefined
-      ? {}
-      : {
-          onOutput: (stream: "stdout" | "stderr", chunk: string) => {
-            if (stream === "stderr") sink.chunk("stderr", chunk);
-            else if (plainStdout) sink.line("text", chunk);
-          },
-        }),
-  });
-  if (plainStdout) return { result, text: result.stdout.trimEnd(), sessionId: sid };
+  const streamParser = sink === undefined ? null : new ClaudeStreamJsonParser(sink);
+  let result: RunnerProcessResult;
+  try {
+    result = await runProcess(args, {
+      cwd,
+      env,
+      signal,
+      ...(sink === undefined
+        ? {}
+        : {
+            onOutput: (stream: "stdout" | "stderr", chunk: string) => {
+              if (stream === "stderr") sink.chunk("stderr", chunk);
+              else streamParser?.feed(chunk);
+            },
+          }),
+    });
+  } finally {
+    // 超时/关停抛错时也冲掉残余正文，blocked 的最后一屏不缺尾巴。
+    streamParser?.end();
+  }
   const parsed = parseClaudeJson(result.stdout);
-  if (parsed.text.trim() !== "") sink?.line("text", parsed.text.trimEnd());
   return { result, text: parsed.text.trimEnd(), sessionId: sid ?? coldSessionId };
 }
 
@@ -3518,11 +3687,11 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
       for (;;) {
         // Await the SDK promise itself. Racing it with AbortSignal would let an SDK implementation
         // that ignores cancellation keep running while serve starts the next wake.
-        const result = await active.thread.run(nextPrompt, {
+        const result = await runSdkTurn(active.thread, nextPrompt, {
           sandbox: opts.sandbox ?? "full_access",
           signal: ctx.signal,
           ...(opts.outputSchema === undefined ? {} : { outputSchema: opts.outputSchema }),
-        });
+        }, opts.sessionOutput);
         if (ctx.signal?.aborted) {
           throw ctx.signal.reason instanceof Error ? ctx.signal.reason : new WakeBlockedError("builtin codex-sdk runner aborted", false);
         }
@@ -5568,6 +5737,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
   const sessionOutput = new SessionOutputReporter({
     send: (frame) => conn.send(frame),
     ...(o.now === undefined ? {} : { now: o.now }),
+    // #1103 item 1：桌面端（sidecar / 常驻 duty）指定本机只读 tap 文件，本地面板直接读 runner 输出。
+    ...(process.env.AGENTPARTY_SESSION_OUTPUT_FILE
+      ? { tap: sessionOutputFileTap(process.env.AGENTPARTY_SESSION_OUTPUT_FILE) }
+      : {}),
   });
   const run: ServeRunner = o.runCommand ?? (o.sdkRunner
     ? createSdkRunner({
@@ -5587,7 +5760,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
             reportAgentSession(session);
           },
         })
-      : defaultRun);
+      : createDefaultRun(sessionOutput));
   const recentlySettledDeliveryIds = new Set<string>();
   const rememberSettledDelivery = (deliveryId: string) => {
     recentlySettledDeliveryIds.delete(deliveryId);
@@ -6217,7 +6390,6 @@ export async function runServe(o: ServeOptions): Promise<number> {
             ? { current_task: frame.seq, task_started_at: taskStartedAt, heartbeat_at: at }
             : { current_task: null, task_started_at: null, heartbeat_at: null };
           const activity = active && activityFile !== null ? readActivityFile(activityFile, at) : null;
-          if (active) sessionOutput.tool(activity?.tool ?? null);
           // runner 健康（#603）：有连败才带；恢复后缺省即清（服务端不 COALESCE）。
           const runnerHealthField = runnerHealth.consecutive_failures > 0
             ? {
@@ -6309,6 +6481,23 @@ export async function runServe(o: ServeOptions): Promise<number> {
           checkInflightSupersede();
         }, heartbeatIntervalMs);
         if (typeof taskBeat.unref === "function") taskBeat.unref();
+        // #1103 item 3：hook 每次工具调用追加一行事件；这里短间隔 tail，逐条推给 live session。
+        // 从本轮开始时的文件末尾读起（上一轮残留在 begin 前清掉）。
+        const toolEventsPath = activityFile === null ? null : toolEventsFile(activityFile);
+        if (toolEventsPath !== null) clearToolEvents(toolEventsPath);
+        const toolTail = toolEventsPath === null ? null : new ToolEventTail(toolEventsPath);
+        const drainToolEvents = () => {
+          if (toolTail === null) return;
+          try {
+            for (const event of toolTail.read()) sessionOutput.toolCall(event.tool, event.status);
+          } catch {
+            // 观测流：读失败下一拍再试
+          }
+        };
+        const toolPoll: ReturnType<typeof setInterval> | null = toolTail === null
+          ? null
+          : setInterval(drainToolEvents, o.toolEventPollMs ?? TOOL_EVENTS_POLL_MS);
+        if (toolPoll !== null && typeof toolPoll.unref === "function") toolPoll.unref();
         try {
           for (let attempt = attemptFloor + 1; attempt <= maxAttempts && retriable; attempt++) {
             attemptsUsed = attempt;
@@ -6383,6 +6572,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
           // 任务收尾：无论送达、放弃还是抛异常穿透，都停心跳并清除本机+频道的「正在处理」状态。
           // 若身后还有排队的 wake，下一条自己的 started 拍会把 current_task 覆盖成新 seq。
           clearInterval(taskBeat);
+          if (toolPoll !== null) clearInterval(toolPoll);
+          // 进程已退出：把最后一批工具事件读完再发终态帧。
+          drainToolEvents();
           // runner 健康（#603）先于清除帧结账：让这一拍就把「本条送达/放弃」的结论带给频道。
           // 关停（shutdown）不算 runner 失败——那是 supervisor 生命周期，不是执行力问题。
           if (shutdownError === null) {
