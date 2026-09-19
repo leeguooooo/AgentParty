@@ -39,7 +39,8 @@ export function parseLocalLiveOutput(value: unknown, name: string): LiveSession 
     if (text.trim() === "") continue;
     lines.push({ kind: raw.kind as SessionOutputKind, text, ts: raw.ts });
   }
-  const updatedAt = typeof value.updated_at === "number" && Number.isFinite(value.updated_at) ? value.updated_at : 0;
+  const updatedAt = value.updated_at;
+  if (typeof updatedAt !== "number" || !Number.isFinite(updatedAt) || updatedAt < 0) return null;
   return {
     name,
     session_id: sessionId,

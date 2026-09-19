@@ -115,6 +115,23 @@ describe("claude stream-json + 逐条工具事件（#1103 item 2/3）", () => {
   });
 });
 
+describe("claude 进程抛错（超时/关停）", () => {
+  test("解析器残余正文仍被冲出，终态 blocked", async () => {
+    const { frames, url } = start();
+    const runProcess: RunnerProcess = async (_args, o2) => {
+      o2.onOutput?.("stdout", streamEvent({ type: "content_block_delta", delta: { type: "text_delta", text: "half-written thought" } }));
+      throw new Error("spawn failed midway");
+    };
+    const opts = baseOptions(url, []);
+    opts.builtinRunner = {
+      server: url, token: "ap_tok", channel: "dev", harness: "claude", workdir: tmp("ap-live-"), runProcess, post: opts.post,
+    };
+    expect(await runServe(opts)).toBe(EXIT_ARCHIVED);
+    expect(kindText(frames)).toContain("text:half-written thought");
+    expect(frames.at(-1)!.state).toBe("blocked");
+  });
+});
+
 describe("codex-sdk 事件流（#1103 item 4）", () => {
   test("工具 / 命令输出 / 正文随 SDK 事件实时上报，交付正文不变", async () => {
     const { frames, url } = start();

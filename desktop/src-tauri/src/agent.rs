@@ -200,6 +200,13 @@ fn now_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// 原始用户主目录（HOME，Windows 回退 USERPROFILE）；与 agentparty_home 同一解析口径。
+pub(crate) fn user_home() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 fn agentparty_home() -> Result<PathBuf, String> {
     if let Some(home) = env::var_os("AGENTPARTY_HOME") {
         return Ok(PathBuf::from(home));
@@ -504,9 +511,7 @@ pub(crate) fn desktop_agent_live_output(
     kind: String,
     id: String,
 ) -> Result<Option<serde_json::Value>, String> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "cannot locate the home directory".to_string())?;
+    let home = user_home().ok_or_else(|| "cannot locate the home directory".to_string())?;
     let path = live_output_path(&home, &kind, &id)
         .ok_or_else(|| "invalid live output target".to_string())?;
     read_live_output(&path)
@@ -858,9 +863,7 @@ pub(crate) fn desktop_agent_start(
             args.push(url.to_string());
         }
         let mut command = command.args(args).env("AGENTPARTY_CONFIG", &config_path);
-        if let Some(live) = env::var_os("HOME")
-            .map(PathBuf::from)
-            .and_then(|home| live_output_path(&home, "instance", &key))
+        if let Some(live) = user_home().and_then(|home| live_output_path(&home, "instance", &key))
         {
             command = command.env("AGENTPARTY_SESSION_OUTPUT_FILE", live);
         }

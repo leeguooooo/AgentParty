@@ -2054,12 +2054,34 @@ export async function teeRunnerStream(
   name: "stdout" | "stderr",
   write: (bytes: Uint8Array) => void,
   sink: RunnerSessionOutputSink | undefined,
+  stop?: AbortSignal,
 ): Promise<void> {
   const decoder = new TextDecoder();
   const reader = stream.getReader();
+  // 排空超时后切断：后台子进程继续持有管道时，旧 reader 不得把后续输出灌进下一轮 session。
+  const onStop = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  if (stop?.aborted) onStop();
+  stop?.addEventListener("abort", onStop, { once: true });
+  try {
+    await pumpTee(reader, decoder, name, write, sink, stop);
+  } finally {
+    stop?.removeEventListener("abort", onStop);
+  }
+}
+
+async function pumpTee(
+  reader: { read(): Promise<{ done: boolean; value?: Uint8Array }> },
+  decoder: TextDecoder,
+  name: "stdout" | "stderr",
+  write: (bytes: Uint8Array) => void,
+  sink: RunnerSessionOutputSink | undefined,
+  stop: AbortSignal | undefined,
+): Promise<void> {
   for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
+    const { done, value } = await reader.read().catch(() => ({ done: true as const, value: undefined }));
+    if (done || value === undefined || stop?.aborted) break;
     try { write(value); } catch { /* 本地回显失败不影响 runner */ }
     if (sink !== undefined) {
       const text = decoder.decode(value, { stream: true });
@@ -2068,7 +2090,7 @@ export async function teeRunnerStream(
       }
     }
   }
-  if (sink !== undefined) {
+  if (sink !== undefined && !stop?.aborted) {
     const tail = decoder.decode();
     if (tail !== "") {
       try { sink.chunk(name, tail); } catch { /* observation only */ }
@@ -2133,9 +2155,10 @@ async function defaultRun(
   if (ctx.signal?.aborted) abort();
   let code: number;
   try {
+    const drainStop = new AbortController();
     const pumps = Promise.all([
-      teeRunnerStream(proc.stdout, "stdout", (bytes) => process.stdout.write(bytes), sink),
-      teeRunnerStream(proc.stderr, "stderr", (bytes) => process.stderr.write(bytes), sink),
+      teeRunnerStream(proc.stdout, "stdout", (bytes) => process.stdout.write(bytes), sink, drainStop.signal),
+      teeRunnerStream(proc.stderr, "stderr", (bytes) => process.stderr.write(bytes), sink, drainStop.signal),
     ]).catch(() => undefined);
     code = await proc.exited;
     // 脚本可能把后台子进程留着继续持有管道（inherit 时不会卡住 serve）：退出后最多再等一会儿冲完输出，
@@ -2146,6 +2169,7 @@ async function defaultRun(
       new Promise<void>((resolve) => { drainTimer = setTimeout(resolve, CUSTOM_RUNNER_DRAIN_MS); }),
     ]);
     if (drainTimer !== undefined) clearTimeout(drainTimer);
+    drainStop.abort();
   } finally {
     ctx.signal?.removeEventListener("abort", abort);
     // Do not let leader exit cancel the group escalation.  The next wake may start only after this barrier.
@@ -3304,20 +3328,25 @@ async function runHarness(
       ];
   const sink = opts.sessionOutput;
   const streamParser = sink === undefined ? null : new ClaudeStreamJsonParser(sink);
-  const result = await runProcess(args, {
-    cwd,
-    env,
-    signal,
-    ...(sink === undefined
-      ? {}
-      : {
-          onOutput: (stream: "stdout" | "stderr", chunk: string) => {
-            if (stream === "stderr") sink.chunk("stderr", chunk);
-            else streamParser?.feed(chunk);
-          },
-        }),
-  });
-  streamParser?.end();
+  let result: RunnerProcessResult;
+  try {
+    result = await runProcess(args, {
+      cwd,
+      env,
+      signal,
+      ...(sink === undefined
+        ? {}
+        : {
+            onOutput: (stream: "stdout" | "stderr", chunk: string) => {
+              if (stream === "stderr") sink.chunk("stderr", chunk);
+              else streamParser?.feed(chunk);
+            },
+          }),
+    });
+  } finally {
+    // 超时/关停抛错时也冲掉残余正文，blocked 的最后一屏不缺尾巴。
+    streamParser?.end();
+  }
   const parsed = parseClaudeJson(result.stdout);
   return { result, text: parsed.text.trimEnd(), sessionId: sid ?? coldSessionId };
 }

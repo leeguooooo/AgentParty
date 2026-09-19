@@ -3,6 +3,11 @@
 // 这里把模型正文按行增量交给 live session 汇，同时保留最终 result 事件供 runner 按原口径解析。
 // 只流正文（text）；工具调用由 hook 事件逐条上报（item 3），这里不重复。
 
+/** 单个事件行上限：超过的完整行不进 JSON.parse（上游没有行长限制）。 */
+export const CLAUDE_STREAM_LINE_MAX_BYTES = 4 * 1024 * 1024;
+/** 未换行正文攒到这么长就在最后一个空白处切出一行，别让单段回复在生成期间一直空白。 */
+export const CLAUDE_STREAM_SOFT_WRAP_CHARS = 120;
+
 export interface ClaudeStreamTextSink {
   line(kind: "text", text: string): void;
 }
@@ -52,9 +57,11 @@ export class ClaudeStreamJsonParser {
     this.buffer += chunk;
     const parts = this.buffer.split("\n");
     this.buffer = parts.pop() ?? "";
-    for (const part of parts) this.handleLine(part);
+    for (const part of parts) {
+      if (part.length <= CLAUDE_STREAM_LINE_MAX_BYTES) this.handleLine(part);
+    }
     // 防御：没有换行的超大残行不无限攒（单个事件不会这么大；超了就丢）。
-    if (this.buffer.length > 4 * 1024 * 1024) this.buffer = "";
+    if (this.buffer.length > CLAUDE_STREAM_LINE_MAX_BYTES) this.buffer = "";
   }
 
   end(): void {
@@ -74,8 +81,16 @@ export class ClaudeStreamJsonParser {
 
   private flushText(all: boolean): void {
     const pieces = this.text.split("\n");
-    const rest = all ? "" : pieces.pop() ?? "";
+    let rest = all ? "" : pieces.pop() ?? "";
     for (const piece of pieces) this.emit(piece);
+    // 软换行：未换行的正文过长时在最后一个空白处切出（没有空白就硬切），并以此给缓存设上界。
+    while (rest.length >= CLAUDE_STREAM_SOFT_WRAP_CHARS) {
+      const cut = rest.lastIndexOf(" ", rest.length - 1);
+      const at = cut > 0 ? cut : rest.length;
+      this.emit(rest.slice(0, at));
+      rest = rest.slice(at).replace(/^ /, "");
+      if (cut <= 0) break;
+    }
     this.text = rest;
   }
 

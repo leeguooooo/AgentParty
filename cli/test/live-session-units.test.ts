@@ -74,6 +74,26 @@ describe("ClaudeStreamJsonParser", () => {
     expect(lines).toEqual(["abc", "de"]);
   });
 
+  test("没有换行的长段正文在生成期间就按空白软换行输出，不等 content_block_stop", () => {
+    const { lines, parser } = collect();
+    const words = Array.from({ length: 60 }, (_, i) => `word${i}`).join(" ");
+    for (let i = 0; i < words.length; i += 7) {
+      parser.feed(ev({ type: "content_block_delta", delta: { type: "text_delta", text: words.slice(i, i + 7) } }));
+    }
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.every((l) => l.length <= 130)).toBe(true);
+    parser.end();
+    expect(lines.join(" ")).toBe(words);
+  });
+
+  test("超长完整事件行不进 JSON.parse", () => {
+    const { lines, parser } = collect();
+    const huge = JSON.stringify({ type: "assistant", message: { id: "h", content: [{ type: "text", text: "x".repeat(4 * 1024 * 1024) }] } });
+    parser.feed(huge + "\n");
+    parser.end();
+    expect(lines).toEqual([]);
+  });
+
   test("没有 partial 事件时回退到整条 assistant 正文；忽略 thinking/tool_use 块与脏行", () => {
     const { lines, parser } = collect();
     parser.feed("not json\n{broken\n");
@@ -171,6 +191,21 @@ describe("SessionOutputReporter.toolCall 与本机 tap", () => {
 });
 
 describe("teeRunnerStream（custom runner）", () => {
+  test("排空超时后切断：后台进程仍持有管道，后续输出不再进汇且 promise 结束", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({ start(c) { controller = c; } });
+    const chunks: string[] = [];
+    const stop = new AbortController();
+    const done = teeRunnerStream(stream, "stdout", () => undefined, { chunk: (_s, t) => chunks.push(t), line: () => undefined }, stop.signal);
+    controller.enqueue(new TextEncoder().encode("before\n"));
+    await new Promise((r) => setTimeout(r, 10));
+    stop.abort();
+    await done;
+    try { controller.enqueue(new TextEncoder().encode("after\n")); } catch { /* cancelled */ }
+    await new Promise((r) => setTimeout(r, 10));
+    expect(chunks.join("")).toBe("before\n");
+  });
+
   test("原样回显字节并按块交给汇", async () => {
     const written: string[] = [];
     const chunks: string[] = [];

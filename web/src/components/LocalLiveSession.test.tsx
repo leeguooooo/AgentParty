@@ -92,6 +92,8 @@ test("parseLocalLiveOutput 校验形状并重新脱敏/去控制字符", () => {
   expect(session?.lines).toEqual([{ kind: "stdout", text: "key [redacted] red", ts: 1 }]);
   expect(parseLocalLiveOutput({ session_id: "r", state: "weird", task_seq: null, lines: [] }, "x")).toBeNull();
   expect(parseLocalLiveOutput([], "x")).toBeNull();
+  expect(parseLocalLiveOutput({ session_id: "r", state: "done", task_seq: null, lines: [] }, "x")).toBeNull();
+  expect(parseLocalLiveOutput({ session_id: "r", state: "done", task_seq: null, lines: [], updated_at: Number.NaN }, "x")).toBeNull();
 });
 
 test("readLocalLiveOutput 调只读命令并把 null 当「还没有输出」", async () => {
