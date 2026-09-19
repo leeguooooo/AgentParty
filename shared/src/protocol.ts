@@ -8,6 +8,8 @@ import {
 export { mentionMatchKey } from "./mentions";
 export * from "./session-output";
 import type { SessionOutputClientFrame, SessionOutputFrame } from "./session-output";
+export * from "./ocs-presence";
+import type { OcsRosterClientFrame, OcsRosterFrame } from "./ocs-presence";
 
 // ---- 常量 ----
 
@@ -1688,7 +1690,8 @@ export type ClientFrame =
   | DeliveryAdapterRegisterFrame
   | DeliveryUpdateFrame
   | DeliveryRecoverFrame
-  | SessionOutputClientFrame;
+  | SessionOutputClientFrame
+  | OcsRosterClientFrame;
 
 // ---- 服务端 → 客户端帧 ----
 
@@ -2654,4 +2657,5 @@ export type ServerFrame =
   | DeliveryStateFrame
   | DeliveryRecoveryResultFrame
   | IdleNoticeFrame
-  | SessionOutputFrame;
+  | SessionOutputFrame
+  | OcsRosterFrame;

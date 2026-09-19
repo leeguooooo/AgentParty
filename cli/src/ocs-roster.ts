@@ -5,7 +5,7 @@
 // 服务端解析不了，绝不当成频道 @mention。只有当该会话在本频道 presence 里有 party 身份
 // （agent_session.session_id 对得上）时，才额外给出 `party send --mention <name>`。
 import { spawnSync } from "node:child_process";
-import type { PresenceEntry } from "@agentparty/shared";
+import { matchOcsPartyName, type OcsHostKind, type OcsSessionReport, type PresenceEntry } from "@agentparty/shared";
 import { sanitizeSingleLine } from "./format";
 
 export const OCS_INSTALL_HINT =
@@ -23,6 +23,8 @@ export interface OcsRow {
   same_project: boolean;
   /** 宿主，口径同 `ocs who`：queue pid · 应用 · tty / desktop / pid。 */
   host: string | null;
+  /** 宿主类别（#1113 网页上报用的粗粒度口径）。 */
+  host_kind: OcsHostKind;
   status?: string;
   self: boolean;
   wake: OcsWake[];
@@ -51,26 +53,65 @@ function samePath(a: string | null, b: string): boolean {
   return norm(a) === norm(b);
 }
 
-/** 在 presence 里找与该 ocs 会话同一个 harness session 的 party 身份。 */
-function partyIdentityOf(
-  harness: OcsRow["harness"],
-  sessionKey: string | null,
-  presence: PresenceEntry[],
-): string | undefined {
-  if (sessionKey === null) return undefined;
-  const key = sessionKey.toLowerCase();
-  for (const e of presence) {
-    const s = e.agent_session;
-    if (s === undefined) continue;
-    const sid = s.session_id.toLowerCase();
-    if (harness === "claude" && s.harness === "claude" && sid.startsWith(key)) return e.name;
-    if (harness === "codex" && (s.harness === "codex" || s.harness === "codex-sdk") && sid === key) return e.name;
-  }
-  return undefined;
-}
-
 function shellQuote(s: string): string {
   return /^[A-Za-z0-9._:@\/-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+interface ParsedEntry {
+  harness: OcsRow["harness"];
+  addr: string;
+  label: string | null;
+  host: string | null;
+  hostKind: OcsHostKind;
+  status: string | null;
+  sessionKey: string | null;
+  cwd: string | null;
+  self: boolean;
+}
+
+/** 单条 `ocs who --json` entry → 结构化字段；cmux 面板等无会话身份的返回 null。 */
+function parseEntry(e: RawEntry): ParsedEntry | null {
+  let harness: OcsRow["harness"];
+  let addr: string | null;
+  let label: string | null = null;
+  let host: string | null = null;
+  let hostKind: OcsHostKind = "unknown";
+  let status: string | null = null;
+  let sessionKey: string | null = null;
+  const cwd = str(e.cwd);
+  if (e.kind === "claude") {
+    harness = "claude";
+    // 与 `ocs who` 文本口径一致：ocs rename 名 > workspace 别名 > 会话名；不变短 id 做兜底。
+    addr = str(e.ocsName) ?? str(e.workspaceAlias) ?? str(e.name) ?? str(e.id);
+    label = str(e.id) !== null && str(e.id) !== addr ? str(e.id) : null;
+    const pid = num(e.pid);
+    host = pid === null ? null : `pid ${pid}`;
+    hostKind = pid === null ? "unknown" : "process";
+    status = str(e.status);
+    sessionKey = str(e.id)?.replace(/^claude-/, "") ?? null;
+  } else if (e.kind === "codex-task") {
+    harness = "codex";
+    addr = str(e.ocsName) ?? str(e.target);
+    label = str(e.summary);
+    const pid = num(e.livePid);
+    host = pid === null
+      ? "desktop"
+      : ["queue pid " + pid, str(e.hostApp), str(e.tty)].filter((x) => x !== null).join(" · ");
+    hostKind = pid === null ? "desktop" : str(e.tty) !== null ? "terminal" : "process";
+    sessionKey = str(e.threadId);
+  } else if (e.kind === "pi") {
+    harness = "pi";
+    addr = str(e.ocsName) ?? str(e.target);
+    label = str(e.name);
+    const pid = num(e.pid);
+    host = pid === null ? null : `pid ${pid}`;
+    hostKind = pid === null ? "unknown" : "process";
+    sessionKey = str(e.sessionId);
+  } else {
+    return null; // cmux 面板没有会话身份/cwd，不列
+  }
+  if (addr === null) return null;
+  return { harness, addr, label, host, hostKind, status, sessionKey, cwd, self: e.self === true };
 }
 
 /** 把 `ocs who --json` 的 entries 转成介入行。导出供单测。 */
@@ -81,43 +122,10 @@ export function buildOcsRows(
   const presence = opts.presence ?? [];
   const rows: OcsRow[] = [];
   for (const e of entries) {
-    let harness: OcsRow["harness"];
-    let addr: string | null;
-    let label: string | null = null;
-    let host: string | null = null;
-    let status: string | null = null;
-    let sessionKey: string | null = null;
-    const cwd = str(e.cwd);
-    if (e.kind === "claude") {
-      harness = "claude";
-      // 与 `ocs who` 文本口径一致：ocs rename 名 > workspace 别名 > 会话名；不变短 id 做兜底。
-      addr = str(e.ocsName) ?? str(e.workspaceAlias) ?? str(e.name) ?? str(e.id);
-      label = str(e.id) !== null && str(e.id) !== addr ? str(e.id) : null;
-      const pid = num(e.pid);
-      host = pid === null ? null : `pid ${pid}`;
-      status = str(e.status);
-      sessionKey = str(e.id)?.replace(/^claude-/, "") ?? null;
-    } else if (e.kind === "codex-task") {
-      harness = "codex";
-      addr = str(e.ocsName) ?? str(e.target);
-      label = str(e.summary);
-      const pid = num(e.livePid);
-      host = pid === null
-        ? "desktop"
-        : ["queue pid " + pid, str(e.hostApp), str(e.tty)].filter((x) => x !== null).join(" · ");
-      sessionKey = str(e.threadId);
-    } else if (e.kind === "pi") {
-      harness = "pi";
-      addr = str(e.ocsName) ?? str(e.target);
-      label = str(e.name);
-      const pid = num(e.pid);
-      host = pid === null ? null : `pid ${pid}`;
-      sessionKey = str(e.sessionId);
-    } else {
-      continue; // cmux 面板没有会话身份/cwd，不列
-    }
-    if (addr === null) continue;
-    const partyName = partyIdentityOf(harness, sessionKey, presence);
+    const p = parseEntry(e);
+    if (p === null) continue;
+    const { harness, addr, label, host, status, sessionKey, cwd } = p;
+    const partyName = matchOcsPartyName(harness, sessionKey, presence);
     const wake: OcsWake[] = ["ocs_dm"];
     if (partyName !== undefined) wake.push("party_mention");
     const intervene = `ocs dm ${shellQuote(addr)} "…"`;
@@ -129,8 +137,9 @@ export function buildOcsRows(
       cwd,
       same_project: samePath(cwd, opts.cwd),
       host,
+      host_kind: p.hostKind,
       ...(status === null ? {} : { status }),
-      self: e.self === true,
+      self: p.self,
       wake,
       ...(partyName === undefined ? {} : { party_name: partyName }),
       intervene,
@@ -145,6 +154,44 @@ export function buildOcsRows(
     .map((r, i) => ({ r, i }))
     .sort((a, b) => rank(a.r) - rank(b.r) || Number(a.r.self) - Number(b.r.self) || a.i - b.i)
     .map(({ r }) => r);
+}
+
+/**
+ * #1113：把 `ocs who --json` 的 entries 转成上报给频道的会话摘要（网页 Presence 的「本机可介入」）。
+ * 带 session_key 供服务端匹配 party 身份；服务端裁剪 cwd/label/status 的可见性，这里不做取舍。
+ */
+export function buildOcsReports(entries: RawEntry[], cwd: string): OcsSessionReport[] {
+  const out: OcsSessionReport[] = [];
+  for (const e of entries) {
+    const p = parseEntry(e);
+    if (p === null) continue;
+    out.push({
+      addr: p.addr,
+      harness: p.harness,
+      ...(p.label === null ? {} : { label: p.label }),
+      cwd: p.cwd,
+      same_project: samePath(p.cwd, cwd),
+      host_kind: p.hostKind,
+      ...(p.status === null ? {} : { status: p.status }),
+      ...(p.self ? { self: true } : {}),
+      ...(p.sessionKey === null ? {} : { session_key: p.sessionKey }),
+    });
+  }
+  // 当前项目在前（服务端按上限截断时保留最相关的）。
+  return out.map((r, i) => ({ r, i })).sort((a, b) => Number(b.r.same_project) - Number(a.r.same_project) || a.i - b.i).map(({ r }) => r);
+}
+
+/** 解析 `ocs who --json` 的 stdout；形状不对返回 null。 */
+export function parseOcsEntries(stdout: string): RawEntry[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const entries = (parsed as { entries?: unknown })?.entries;
+  if (!Array.isArray(entries)) return null;
+  return entries.filter((x): x is RawEntry => typeof x === "object" && x !== null);
 }
 
 export type OcsExec = () => { missing: boolean; status: number | null; stdout: string; timedOut?: boolean };
