@@ -2,6 +2,8 @@
 import {
   parseSessionOutputClientFrame,
   type SessionOutputFrame,
+  matchOcsPartyName,
+  parseOcsRosterClientFrame,
   applyLiveConnection,
   BODY_LIMIT,
   IDEMPOTENCY_KEY_MAX,
@@ -129,7 +131,11 @@ import {
 import { anchorAttachmentUrls, parseAttachments, parseStoredAttachments } from "./attachments";
 import { sha256Hex } from "./auth";
 import { SessionOutputRing, createSqlSessionOutputStore } from "./session-output-ring";
+import { OcsRosterStore, clearedOcsRosterFrame } from "./ocs-roster-store";
 import { Server, type Connection, type ConnectionContext, type WSMessage } from "partyserver";
+
+/** #1113：同一连接两次 ocs_roster 上报的最小间隔；更快的直接丢（CLI 正常 60s 一次）。 */
+const OCS_ROSTER_MIN_INTERVAL_MS = 5_000;
 
 interface ConnState {
   name: string;
@@ -196,6 +202,13 @@ interface ConnState {
   closing?: boolean;
   /** #1103：agent 连接显式订阅 live session 输出（hello.session_output="v1"）；人类连接恒订阅。 */
   sessionOutputV1?: boolean;
+  /**
+   * #1113：worker 层判定的「频道 owner/moderator」（x-ap-moderator，连接期间定死）。
+   * 只用于本机 ocs 会话的可见性：owner 能看到上报者的完整 cwd。
+   */
+  channelOwner?: boolean;
+  /** #1113：本连接上次 ocs_roster 上报时刻（限速用）。 */
+  ocsReportedAt?: number;
 }
 
 function runtimeTopologiesEqual(left: RuntimeTopology, right: RuntimeTopology): boolean {
@@ -1768,6 +1781,8 @@ export class ChannelDO extends Server<Env> {
   private readonly wsMessageTails = new Map<string, Promise<void>>();
   /** #1103：每 agent 最近 live session 的有界环形缓冲（落 DO SQLite，驱逐后可回放；onStart 里建）。 */
   private sessionOutputRing = new SessionOutputRing();
+  /** #1113：每身份最近一次上报的本机 ocs 会话（纯内存，带过期）。 */
+  private readonly ocsRoster = new OcsRosterStore();
   /** #913：上一次 `/internal/next-mention` 查询真实读到的行数。见该处理器里的说明。 */
   nextMentionRowsRead = 0;
   private participantAuthorityRefreshedAt = 0;
@@ -2730,6 +2745,7 @@ export class ChannelDO extends Server<Env> {
       collabRoleSource: parseRoleSource(h.get("x-ap-role-source") ?? undefined) ?? undefined,
       archived: h.get("x-ap-archived") === "1",
       canWrite: h.get("x-ap-can-write") === "1",
+      channelOwner: h.get("x-ap-moderator") === "1",
       lastSeen: connectedAt,
       helloPending: true,
       helloDeadlineAt: connectedAt + HELLO_TIMEOUT_MS,
@@ -3016,6 +3032,14 @@ export class ChannelDO extends Server<Env> {
           if (!this.sendPublicFrame(connection, snapshot, true)) return;
         }
       }
+      // #1113：晚到的观看者拿到每个上报身份当前未过期的本机 ocs 会话（按本观看者的可见性裁剪）。
+      if (this.wantsOcsRoster(st)) {
+        const now = Date.now();
+        for (const name of this.ocsRoster.names(now)) {
+          const snapshot = this.ocsRoster.frameFor(name, this.ocsRosterFullFor(st, name), now);
+          if (snapshot !== null) this.sendFrame(connection, snapshot);
+        }
+      }
       // A connection may upgrade its declaration after an earlier legacy lease claim. Re-run the
       // election only after backfill so a newly capable executor cannot receive work before history.
       if (st.kind === "agent") {
@@ -3060,6 +3084,24 @@ export class ChannelDO extends Server<Env> {
         const out = this.sessionOutputRing.apply(st.name, connection.id, parsed, Date.now());
         if (out !== null) this.broadcastSessionOutput(out);
       }
+      return;
+    }
+    if (frame.type === "ocs_roster") {
+      // #1113：本机 ocs 会话上报。只有 agent 连接能报，身份取自连接；服务端重新清洗，脏帧/过快的帧静默丢弃。
+      if (st.kind !== "agent") {
+        badRequest();
+        return;
+      }
+      // 只有频道参与者（成员）能挂本机会话；公开频道的围观 agent 报了也不收。
+      if (!st.canWrite) return;
+      const now = Date.now();
+      if (st.ocsReportedAt !== undefined && now - st.ocsReportedAt < OCS_ROSTER_MIN_INTERVAL_MS) return;
+      const parsed = parseOcsRosterClientFrame(frame);
+      if (parsed === null) return;
+      connection.setState({ ...st, ocsReportedAt: now });
+      const presence = this.presenceList();
+      this.ocsRoster.apply(st.name, connection.id, parsed.sessions, now, (s) => matchOcsPartyName(s.harness, s.session_key, presence));
+      this.broadcastOcsRoster(st.name);
       return;
     }
     if (frame.type === "delivery_adapter" && frame.adapter === "watch" && frame.op === "register") {
@@ -3241,6 +3283,8 @@ export class ChannelDO extends Server<Env> {
     for (const frame of this.sessionOutputRing.disconnect(connection.id, Date.now())) {
       this.broadcastSessionOutput(frame);
     }
+    // #1113：上报连接断开 → 它上报的本机 ocs 会话立即清除（不等过期）。
+    for (const name of this.ocsRoster.disconnect(connection.id)) this.broadcastOcsRoster(name);
     if (!st || !st.name || st.archived) return;
     // A failed removal callback must not leave a revoked sibling eligible for a
     // participants broadcast triggered by an unrelated disconnect.
@@ -7428,6 +7472,7 @@ export class ChannelDO extends Server<Env> {
       const erased = this.eraseIdentityData(name, actor);
       // #1103：身份擦除后不再回放它的 live 输出。
       this.sessionOutputRing.forget(name);
+      this.forgetOcsRoster(name);
       return Response.json(erased);
     }
     if (url.pathname === "/internal/messages" && request.method === "POST") {
@@ -7849,6 +7894,7 @@ export class ChannelDO extends Server<Env> {
         this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
         this.removeParticipantDeliveryAdapters(name, now);
         this.sessionOutputRing.forget(name);
+        this.forgetOcsRoster(name);
         this.insertSystemStatus(`removed ${name} from channel`, now, false, { state: "done" });
         return Response.json({ ok: true, owners: [...owners], human_owners: [...humanOwners], removed_at: now });
       }
@@ -7903,6 +7949,7 @@ export class ChannelDO extends Server<Env> {
       this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
       this.removeParticipantDeliveryAdapters(name, removedAt);
       this.sessionOutputRing.forget(name);
+      this.forgetOcsRoster(name);
       const frame = {
         type: "participant_removed",
         name,
@@ -8321,11 +8368,13 @@ export class ChannelDO extends Server<Env> {
       this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
       this.removeParticipantDeliveryAdapters(name, removedAt);
       this.sessionOutputRing.forget(name);
+      this.forgetOcsRoster(name);
     }
     for (const stale of stalePrincipals) {
       this.cleanupPresenceSession(stale.name, stale.connection.id, now);
       // #1103：只清这条旧连接自己上报的输出；同名新连接的 live session 不受影响。
       this.sessionOutputRing.forgetConnection(stale.name, stale.connection.id);
+      for (const name of this.ocsRoster.disconnect(stale.connection.id)) this.broadcastOcsRoster(name);
       const deliveryPrincipalKey = JSON.stringify([mentionMatchKey(stale.name), stale.principal]);
       if (!currentAgentDeliveryPrincipals.has(deliveryPrincipalKey)) {
         this.removeStaleDeliveryPrincipal(stale.name, stale.principal, now);
@@ -9971,6 +10020,35 @@ export class ChannelDO extends Server<Env> {
       bucket,
     );
     return null;
+  }
+
+  /**
+   * #1113：本机 ocs 会话只发给频道参与者（成员）的人类连接（网页观看者）；公开频道的围观者、readonly 不收。
+   * agent 连接不收——它们用自己的 `party who` 读本机。
+   */
+  private wantsOcsRoster(st: ConnState): boolean {
+    return st.kind === "human" && st.canWrite;
+  }
+
+  /** #1113 可见性：上报者本人与频道 owner 看完整视图（含 cwd），其余成员只看裁剪视图。 */
+  private ocsRosterFullFor(viewer: ConnState, reporter: string): boolean {
+    return viewer.channelOwner === true || mentionMatchKey(viewer.name) === mentionMatchKey(reporter);
+  }
+
+  /** #1113：按观看者逐连接裁剪后扇出；已过期/已清除的发空清除帧。 */
+  private broadcastOcsRoster(name: string) {
+    const now = Date.now();
+    for (const connection of this.getConnections<ConnState>()) {
+      const st = connection.state;
+      if (st === undefined || st === null) continue;
+      if (st.authorizationRevoked === true || st.helloPending === true || st.closing === true) continue;
+      if (!this.wantsOcsRoster(st)) continue;
+      this.sendFrame(connection, this.ocsRoster.frameFor(name, this.ocsRosterFullFor(st, name), now) ?? clearedOcsRosterFrame(name, now));
+    }
+  }
+
+  private forgetOcsRoster(name: string) {
+    if (this.ocsRoster.forget(name)) this.broadcastOcsRoster(name);
   }
 
   /** #1103：谁能收 live session 输出——人类连接（web 观看者）恒收；agent 连接需在 hello 里显式订阅。 */

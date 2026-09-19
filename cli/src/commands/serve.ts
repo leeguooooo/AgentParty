@@ -5,6 +5,7 @@ import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMP
 import { SessionOutputReporter, sessionOutputFileTap } from "../session-output";
 import { ClaudeStreamJsonParser, claudeResultBody } from "../claude-stream-json";
 import { TOOL_EVENTS_POLL_MS, ToolEventTail, clearToolEvents, toolEventsFile } from "../tool-events";
+import { OcsRosterReporter, ocsReportDisabled, type OcsAsyncExec } from "../ocs-presence-report";
 import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { createHash, randomUUID } from "node:crypto";
@@ -1875,6 +1876,11 @@ export type ServeRunner = ((frame: MsgFrame, ctx: ServeRunnerContext) => Promise
 };
 
 export interface ServeOptions {
+  /**
+   * #1113：周期上报本机 ocs 会话摘要给频道（网页 Presence「本机可介入」）。true = 用本机 `ocs who`；
+   * 传函数 = 注入的读取器（测试）。缺省不报——只有 `party serve` 命令入口显式打开。
+   */
+  ocsReport?: boolean | OcsAsyncExec;
   server: string;
   token: string;
   channel: string;
@@ -5720,6 +5726,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
   };
   // #1103：live session 输出流。每轮 begin/end，期间 builtin runner 的进程输出与 hook 工具活动
   // 经这条已认证的 WS 发给 DO；DO 扇出给频道观看者。发送失败即丢，不影响 runner。
+  // #1113：本机 ocs 会话上报。welcome（含重连）即补报一次，之后周期上报；读不到/没装就不报。
+  const ocsReporter = o.ocsReport === undefined || o.ocsReport === false
+    ? null
+    : new OcsRosterReporter({
+        send: (frame) => conn.send(frame),
+        cwd: runnerCwd,
+        ...(typeof o.ocsReport === "function" ? { exec: o.ocsReport } : {}),
+      });
   const sessionOutput = new SessionOutputReporter({
     send: (frame) => conn.send(frame),
     ...(o.now === undefined ? {} : { now: o.now }),
@@ -5887,6 +5901,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
       if (frame.type === "welcome") {
         scheduleUpgradeRefresh();
         self = frame.self;
+        if (ocsReporter !== null) {
+          ocsReporter.start();
+          void ocsReporter.reportNow();
+        }
         if (!welcomeReported) {
           o.onWelcome?.(frame.last_seq);
           welcomeReported = true;
@@ -6840,6 +6858,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     lock?.release?.();
     cwdClaim.release();
     if (heartbeat) clearInterval(heartbeat);
+    ocsReporter?.stop();
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
     o.signal?.removeEventListener("abort", onInheritedAbort);
@@ -7401,6 +7420,7 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
         );
       }
       const result = await runServeForCommand({
+        ...(ocsReportDisabled() ? {} : { ocsReport: true }),
         server: currentServer,
         token: currentToken,
         channel,

@@ -113,12 +113,13 @@ export class WsClient {
     slug: string,
     token: string,
     authMode: "header" | "query" | "protocol" = "header",
+    extraHeaders: Record<string, string> = {},
   ): Promise<WsClient> {
     const query = authMode === "query" ? `?t=${encodeURIComponent(token)}` : "";
     const res = await SELF.fetch(`http://ap.test/api/channels/${slug}/ws${query}`, {
       headers:
         authMode === "header"
-          ? { upgrade: "websocket", authorization: `Bearer ${token}` }
+          ? { upgrade: "websocket", authorization: `Bearer ${token}`, ...extraHeaders }
           : authMode === "protocol"
             ? { upgrade: "websocket", "sec-websocket-protocol": `agentparty, ${token}` }
           : { upgrade: "websocket" },

@@ -524,6 +524,8 @@ const AP_FORWARD_HEADERS = [
   // #381：频道可见性 + 「本连接能否参与写」都是 worker 权威值，客户端注入必须先剥离
   "x-ap-visibility",
   "x-ap-can-write",
+  // #1113：频道 owner 判定决定能否看到别人上报的本机 cwd，必须是 worker 权威值
+  "x-ap-moderator",
 ] as const;
 // 所属人标签：铸造时可选写入，须 header-safe（可打印 ASCII，含空格）以便经 x-ap-owner 转发给 do
 const OWNER_MAX = 128;
@@ -9929,6 +9931,11 @@ app.get("/api/channels/:slug/ws", async (c) => {
   // 无条件显式写 "0"，堵住客户端注入 + 未覆盖的透传（AP_FORWARD_HEADERS 已先剥离）。
   fwd.headers.set("x-ap-visibility", channel.visibility);
   fwd.headers.set("x-ap-can-write", (await canParticipateInChannel(c.env.DB, identity, channel)) ? "1" : "0");
+  // #1113：本机 ocs 会话的完整 cwd 只给上报者本人与频道 owner；无条件显式写，堵住客户端注入。
+  fwd.headers.set(
+    "x-ap-moderator",
+    isChannelModerator(identity, channel) || isHumanChannelOwner(identity, channel) ? "1" : "0",
+  );
   // 无条件写：未归档也显式置 "0"，堵住"客户端注入 1、未归档分支不覆盖"的透传
   fwd.headers.set("x-ap-archived", channel.archived_at !== null ? "1" : "0");
   for (const [key, value] of Object.entries(await handleHeader(c.env.DB, identity))) fwd.headers.set(key, value);

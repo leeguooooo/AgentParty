@@ -1,6 +1,8 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
 import { LiveSessionEntryButton, hasLiveSession } from "./LiveSessionView";
+import { LocalOcsSessions } from "./LocalOcsSessions";
+import type { OcsRosterFrame } from "@agentparty/shared";
 import type { LiveSession } from "../state";
 import { autoWakeReachable, evaluateHostLease, PRESENCE_TIMEOUT_MS, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
@@ -41,6 +43,9 @@ interface Props {
   // #1103：成员条上的 live session 入口。有流就亮，没流禁用并说明原因。
   liveSessions?: Record<string, LiveSession>;
   onOpenLiveSession?: (name: string) => void;
+  // #1113：成员机器上报的本机 ocs 会话（「本机可介入」分组）与 @ 动作。
+  ocsRosters?: Record<string, OcsRosterFrame>;
+  onMentionAgent?: (name: string) => void;
   // #858：撞名身份的技术区分码来源；缺省即不显示区分码（老调用方行为不变）。
   identities?: IdentityDisplayMap;
   // 模块②（#1047）：名单里叫不到的 agent 旁边直接给「接回」——打开一条命令的重连引导。
@@ -428,6 +433,8 @@ export function PresenceBar({
   onOpenAgentDetail,
   liveSessions,
   onOpenLiveSession,
+  ocsRosters,
+  onMentionAgent,
   identities,
   onReconnect,
   initialRosterOpen = false,
@@ -995,6 +1002,23 @@ export function PresenceBar({
                   </div>
                 )}
                 </>
+              )}
+              {ocsRosters !== undefined && (
+                <LocalOcsSessions
+                  rosters={ocsRosters}
+                  now={now}
+                  displayOf={(name) => presence[name]?.display_name ?? presence[name]?.handle ?? name}
+                  isMentionable={(name) =>
+                    Object.hasOwn(presence, name) || participants.some((p) => p.name === name)}
+                  {...(onMentionAgent === undefined
+                    ? {}
+                    : {
+                        onMention: (name: string) => {
+                          closeRoster();
+                          onMentionAgent(name);
+                        },
+                      })}
+                />
               )}
             </div>
           </section>

@@ -8489,6 +8489,26 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .team-card-accounts { border-color: var(--d-amber, #b7791f); color: var(--d-amber, #b7791f); }
 .roster-error { margin: 0 0 6px; font-size: 12.5px; color: var(--d-red, #c0392b); }
 
+/* #1113：成员面板「本机可介入」——成员机器上报的本机 ocs 会话，每台机器一组。 */
+.ocs-local { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-top: 10px; border-top: 1px dashed var(--t-border); }
+.ocs-title { margin: 0; font-size: 13px; font-weight: 600; }
+.ocs-hint { margin: 0; font-size: 12px; color: var(--t-muted); }
+.ocs-group { display: flex; flex-direction: column; gap: 2px; }
+.ocs-group-head { font-size: 12px; color: var(--t-muted); padding-top: 4px; }
+.ocs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.ocs-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 6px; border-bottom: 1px solid var(--t-faint); min-width: 0; }
+.ocs-row:last-child { border-bottom: none; }
+.ocs-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
+.ocs-harness { font-size: 11.5px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--t-border); }
+.ocs-addr { font-size: 13px; overflow-wrap: anywhere; }
+.ocs-badge, .ocs-host, .ocs-status { font-size: 11.5px; color: var(--t-muted); }
+.ocs-badge { padding: 0 6px; border-radius: 999px; border: 1px dashed var(--t-border); }
+.ocs-cwd { font-size: 12px; color: var(--t-muted); overflow-wrap: anywhere; }
+.ocs-cwd--hidden { font-style: italic; }
+.ocs-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.ocs-cmd { font-size: 12px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--t-faint); overflow-wrap: anywhere; user-select: all; min-width: 0; }
+.ocs-copy, .ocs-mention { font-size: 12px; padding: 2px 8px; }
+
 /* #1103：live session 只读终端视图。所有入口打开同一份流。 */
 .live-session {
   display: flex;
