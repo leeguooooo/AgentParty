@@ -293,8 +293,12 @@ describe("desktop release workflow", () => {
     expect(workflow).toContain("grep -Fxq 'TeamIdentifier=not set'");
     expect(workflow).toContain("spctl --assess --type execute");
     expect(workflow).toContain("xcrun stapler validate");
-    expect(workflow).not.toContain('xcrun notarytool submit "$dmg"');
-    expect(workflow).not.toContain('xcrun stapler staple "$dmg"');
+    // #207 当初假设 tauri 公证 .app 时会连 DMG 一起订票据，于是守卫禁止工作流自己订。
+    // v0.2.268（首次真配上 Apple 凭据的发版）证伪了它：.app 是 Notarized Developer ID、
+    // stapler validate 通过，同一次构建的 DMG 却报 "does not have a ticket stapled to it"。
+    // 所以方向反过来：DMG 必须自己提交公证并 staple，否则用户离线首次打开会被 Gatekeeper 拦。
+    expect(workflow).toContain('xcrun notarytool submit "$dmg"');
+    expect(workflow).toContain('xcrun stapler staple "$dmg"');
     expect(workflow).toContain('xcrun stapler validate "$dmg"');
     expect(workflow).toContain('spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"');
     expect(workflow).toContain("agentparty-desktop-${ASSET}.signing-status.json");

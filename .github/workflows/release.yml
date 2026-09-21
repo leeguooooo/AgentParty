@@ -742,6 +742,26 @@ jobs:
           TAURI_CONFIG: '{"plugins":{"updater":{"endpoints":["https://github.com/leeguooooo/agentparty/releases/download/desktop-preview/latest-v2.json"]}}}'
         run: bun run desktop:build:prod
 
+      - name: notarize and staple DMG
+        # tauri 只公证 .app；DMG 是之后打的，自己没有票据——不订票据，离线首次打开仍会被 Gatekeeper 拦。
+        if: steps.apple-signing.outputs.enabled == 'true'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          dmg="$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)"
+          if [ -z "$dmg" ]; then
+            echo "::error::macOS DMG is missing"
+            exit 1
+          fi
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$dmg"
+
       - name: verify Developer ID signature and notarization ticket
         if: steps.apple-signing.outputs.enabled == 'true'
         run: |
