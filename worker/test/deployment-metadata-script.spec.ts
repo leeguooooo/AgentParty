@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   deploymentDefineArgs,
-  verifyDualDeployment,
   verifyDeploymentIdentity,
   verifyDeploymentMetadata,
 } from "../scripts/deployment-metadata.mjs";
@@ -127,25 +126,4 @@ describe("deployment metadata script", () => {
       sleep: async () => {},
     })).rejects.toThrow("deployment timestamp is invalid");
   });
-
-  it("verifies prod and xdream against one expected build", async () => {
-    const fetcher = async (input: string | URL | Request) => {
-      const url = String(input);
-      const body = url.startsWith("https://prod.test")
-        ? { ok: true, ...metadata }
-        : { ok: true, ...metadata, commit: "f".repeat(40) };
-      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
-    };
-
-    await expect(verifyDualDeployment({ prod: "https://prod.test" }, metadata, fetcher))
-      .resolves.toEqual({ prod: metadata });
-    await expect(verifyDualDeployment(
-      { prod: "https://prod.test", xdream: "https://xdream.test" },
-      metadata,
-      fetcher,
-      { attempts: 1, consecutive: 1, delayMs: 0, sleep: async () => {} },
-    ))
-      .rejects.toThrow("xdream: commit mismatch");
-  });
-
 });

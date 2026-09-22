@@ -34,9 +34,3 @@ export function verifyDeploymentIdentity(
   fetcher?: DeploymentFetch,
   options?: DeploymentVerificationOptions,
 ): Promise<DeploymentMetadata>;
-export function verifyDualDeployment(
-  targets: Record<string, string>,
-  expected: DeploymentMetadata,
-  fetcher?: DeploymentFetch,
-  options?: DeploymentVerificationOptions,
-): Promise<Record<string, DeploymentMetadata>>;

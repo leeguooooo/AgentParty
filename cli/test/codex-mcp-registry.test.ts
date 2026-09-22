@@ -26,7 +26,7 @@ import { runMcpIdentities } from "../src/commands/mcp-identities";
 import { planMcpPrune, runMcpPrune } from "../src/commands/mcp-prune";
 import type { Config } from "../src/config";
 
-const SERVER = "https://agentparty.pwtk-dev.work";
+const SERVER = "https://party.example.net";
 const CHANNEL = "agentparty";
 const OWNER = "lark:on_owner";
 

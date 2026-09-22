@@ -10,7 +10,7 @@
 // a `^` range. Either way, two files sharing a number is a latent hazard.
 //
 // We CANNOT simply renumber the existing collisions: they are already applied to
-// production (prod + xdream). wrangler records applied migrations by exact
+// production. wrangler records applied migrations by exact
 // filename in the `d1_migrations` table; renaming an applied file makes wrangler
 // treat it as new and re-run it. So the existing pairs are grandfathered (frozen),
 // and this guard blocks any NEW collision — including a third file on a known

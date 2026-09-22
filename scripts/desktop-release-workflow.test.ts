@@ -98,7 +98,7 @@ describe("desktop release workflow", () => {
     expect(desktopPackage.scripts["prepare:sidecar"]).toBe(
       "bun ../scripts/prepare-desktop-sidecar.ts",
     );
-    for (const name of ["dev", "build", "build:prod", "build:xdream"]) {
+    for (const name of ["dev", "build", "build:prod"]) {
       const command = desktopPackage.scripts[name] as string;
       expect(command).toContain("bun run prepare:sidecar");
       expect(command.indexOf("bun run prepare:sidecar")).toBeLessThan(command.indexOf("tauri "));

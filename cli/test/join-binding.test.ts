@@ -23,7 +23,7 @@ import {
 
 const BASE: JoinBinding = {
   harness: "codex",
-  server: "https://agentparty.pwtk-dev.work",
+  server: "https://party.example.net",
   channel: "agentparty",
   owner: "lark:on_owner",
   identity: "codex-a",

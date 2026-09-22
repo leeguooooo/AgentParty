@@ -11,7 +11,7 @@ import { joinBindingsPath, writeJoinBinding } from "../src/join-binding";
 import { codexStopHookStatus, diagnoseCodexWake, formatCodexWakeDiagnosis, shouldSurfaceCodexWakeDiagnosis } from "../src/wake-diagnosis";
 
 const CHANNEL = "agentparty";
-const SERVER = "https://agentparty.pwtk-dev.work";
+const SERVER = "https://party.example.net";
 
 let home: string;
 let cwd: string;

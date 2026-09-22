@@ -3,7 +3,7 @@
 // 本文件的**钉子**是 `pins #917` 那一组：cwd 解析出的身份 ≠ 会话真实身份、且两者在不同
 // 服务器上时，查询必须用会话真实身份。真机故障形态逐字照抄：
 //   cwd → leeguooooo-codex2-agentparty @ https://agentparty.leeguoo.com
-//   会话 → lark-ad72b3f9749e-agentparty-codex1 @ https://agentparty.pwtk-dev.work
+//   会话 → lark-ad72b3f9749e-agentparty-codex1 @ https://party.example.net
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,7 +35,7 @@ import { defaultCodexStopWakeDeps, handleCodexStopRecord } from "../src/commands
 const CHANNEL = "agentparty";
 const CWD_SERVER = "https://agentparty.leeguoo.com";
 const CWD_NAME = "leeguooooo-codex2-agentparty";
-const SESSION_SERVER = "https://agentparty.pwtk-dev.work";
+const SESSION_SERVER = "https://party.example.net";
 const SESSION_NAME = "lark-ad72b3f9749e-agentparty-codex1";
 const SESSION_ID = "01a021f5-aed7-7802-bea3-6165e5dba553";
 
@@ -99,7 +99,7 @@ afterEach(() => {
 });
 
 describe("pins #917：cwd 猜出的身份 ≠ 会话真实身份（且跨实例）", () => {
-  /** 真机故障现场：同一 cwd 上绑着 codex2@leeguoo，真实会话身份是 codex1@pwtk-dev。 */
+  /** 真机故障现场：同一 cwd 上绑着 codex2@leeguoo，真实会话身份是 codex1@party.example.net。 */
   function stageRealWorldCollision(): { codex1: string; codex2: string } {
     const codex2 = agentConfig(CWD_NAME, CWD_SERVER, "token-codex2");
     const codex1 = agentConfig(SESSION_NAME, SESSION_SERVER, "token-codex1");

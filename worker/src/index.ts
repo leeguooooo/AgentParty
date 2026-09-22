@@ -4164,7 +4164,7 @@ app.get("/api/channels/:slug/management-audit", async (c) => {
 app.use("/api/join/*", requireBearer);
 
 // #595：Lark DM 通知自动入册。此前唯一开关是 CLI `party lark notify on`——web 没有任何入口、
-// 登录也不自动订阅，Lark 用户被 @ 后收不到任何 DM（xdream 实锤：全库仅 owner 手动开过一条）。
+// 登录也不自动订阅，Lark 用户被 @ 后收不到任何 DM（生产实锤：全库仅 owner 手动开过一条）。
 // 成员的 @ 通知应当默认在场：Lark 登录与被拉进频道时自动 ensure。幂等；显式退订（DELETE）落
 // lark_notify_optouts，自动入册永不压过用户手选；任何失败静默——登录/加成员绝不因通知挂掉。
 async function ensureLarkNotifySubscription(

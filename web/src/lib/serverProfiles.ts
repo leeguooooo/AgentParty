@@ -29,19 +29,12 @@ export interface ServerProbeResult {
 }
 
 export const LEEGUOOOOO_SERVER_ORIGIN = "https://agentparty.leeguoo.com";
-export const XDREAMSTART_SERVER_ORIGIN = "https://agentparty.pwtk-dev.work";
 
 export const OFFICIAL_SERVER_PROFILES: readonly ServerProfile[] = [
   {
     id: "official:prod",
     label: "leeguooooo",
     origin: LEEGUOOOOO_SERVER_ORIGIN,
-    kind: "official",
-  },
-  {
-    id: "official:test",
-    label: "xdreamstart",
-    origin: XDREAMSTART_SERVER_ORIGIN,
     kind: "official",
   },
 ];

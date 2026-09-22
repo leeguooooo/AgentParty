@@ -67,7 +67,7 @@ function parseArgs(argv) {
 async function main() {
   const { positionals, options } = parseArgs(process.argv.slice(2));
   if (positionals.length !== 1) {
-    throw new Error("usage: rollback-ci.mjs <prod|xdream> [--deployment-id <id>] [--message <msg>]");
+    throw new Error("usage: rollback-ci.mjs <prod> [--deployment-id <id>] [--message <msg>]");
   }
   const name = positionals[0];
   const target = DEPLOY_TARGETS[name];

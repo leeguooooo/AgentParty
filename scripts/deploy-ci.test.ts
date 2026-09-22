@@ -68,16 +68,6 @@ describe("buildDeployPlan", () => {
     expect(deploy.args).toContain(`__AGENTPARTY_DEPLOYED_AT__:${JSON.stringify(metadata.deployed_at)}`);
   });
 
-  test("xdream: uses the xdream config + database", () => {
-    const plan = buildDeployPlan("xdream", metadata, ["wrangler"]);
-    const [migrate, verify, deploy] = plan;
-    expect(migrate.args).toContain("agentparty-xdream");
-    expect(migrate.args).toContain("wrangler.xdream.jsonc");
-    expect(verify.env?.AGENTPARTY_D1_DATABASE).toBe("agentparty-xdream");
-    expect(verify.env?.AGENTPARTY_WRANGLER_CONFIG).toBe("wrangler.xdream.jsonc");
-    expect(deploy.args).toContain("wrangler.xdream.jsonc");
-  });
-
   test("single-word launcher has no prefix args", () => {
     const [migrate] = buildDeployPlan("prod", metadata, ["wrangler"]);
     expect(migrate.cmd).toBe("wrangler");
@@ -96,9 +86,6 @@ describe("buildDeployPlan", () => {
     expect(() => buildDeployPlan("prod", metadata, [])).toThrow(/non-empty/);
   });
 
-  test("both targets map to distinct public bases", () => {
-    expect(DEPLOY_TARGETS.prod.smokeBase).not.toBe(DEPLOY_TARGETS.xdream.smokeBase);
-  });
 });
 
 describe("buildPostDeploySmokePlan", () => {
@@ -151,14 +138,14 @@ describe("buildPostDeploySmokePlan", () => {
       new URL("../worker/scripts/deploy-ci.mjs", import.meta.url),
       "utf8",
     );
-    const dualSource = readFileSync(
-      new URL("../worker/scripts/deploy-dual.mjs", import.meta.url),
+    const localSource = readFileSync(
+      new URL("../worker/scripts/deploy-local.mjs", import.meta.url),
       "utf8",
     );
     expect(ciSource).toContain("verifyDeploymentIdentity(smokeBase, metadata)");
     expect(ciSource).not.toContain("verifyDeploymentMetadata(smokeBase, metadata)");
-    expect(dualSource).toContain("verifyDeploymentIdentity(target.smokeBase, deploymentMetadata)");
-    expect(dualSource).not.toContain("verifyDeploymentMetadata(target.smokeBase, deploymentMetadata)");
+    expect(localSource).toContain("verifyDeploymentIdentity(target.smokeBase, deploymentMetadata)");
+    expect(localSource).not.toContain("verifyDeploymentMetadata(target.smokeBase, deploymentMetadata)");
     expect(ciSource.indexOf("verifyDeploymentIdentity(smokeBase, metadata)")).toBeLessThan(
       ciSource.indexOf("for (const step of smokePlan)"),
     );
@@ -181,18 +168,18 @@ describe("buildPostDeploySmokePlan", () => {
   });
 
   test("supports a dedicated target-scoped agent token and channel without requiring a write token", () => {
-    const plan = buildPostDeploySmokePlan("xdream", "https://xdream.example", {
+    const plan = buildPostDeploySmokePlan("prod", "https://party.example", {
       AGENTPARTY_RUNTIME_SMOKE_TOKEN: "global-runtime-token",
-      AGENTPARTY_XDREAM_RUNTIME_SMOKE_TOKEN: "xdream-runtime-token",
-      AGENTPARTY_XDREAM_RUNTIME_SMOKE_CHANNEL: "release-smoke",
+      AGENTPARTY_PROD_RUNTIME_SMOKE_TOKEN: "prod-runtime-token",
+      AGENTPARTY_PROD_RUNTIME_SMOKE_CHANNEL: "release-smoke",
     });
     expect(plan.map((step) => step.label)).toEqual([
       "desktop-pairing-smoke",
       "runtime-peers-smoke",
     ]);
     expect(plan[1]?.env).toEqual({
-      AGENTPARTY_SMOKE_BASE: "https://xdream.example",
-      AGENTPARTY_RUNTIME_SMOKE_TOKEN: "xdream-runtime-token",
+      AGENTPARTY_SMOKE_BASE: "https://party.example",
+      AGENTPARTY_RUNTIME_SMOKE_TOKEN: "prod-runtime-token",
       AGENTPARTY_RUNTIME_SMOKE_CHANNEL: "release-smoke",
     });
   });
@@ -202,9 +189,9 @@ describe("buildPostDeploySmokePlan", () => {
       .toThrow("requires RUNTIME_SMOKE_TOKEN or an agent-valued SMOKE_TOKEN before migration/deploy");
   });
 
-  test("keeps the local dual deploy on the same runtime-before-write smoke order", () => {
+  test("keeps the local deploy on the same runtime-before-write smoke order", () => {
     const source = readFileSync(
-      new URL("../worker/scripts/deploy-dual.mjs", import.meta.url),
+      new URL("../worker/scripts/deploy-local.mjs", import.meta.url),
       "utf8",
     );
     expect(source.indexOf("scripts/smoke-runtime-peers.mjs")).toBeGreaterThan(0);
@@ -212,9 +199,9 @@ describe("buildPostDeploySmokePlan", () => {
       .toBeLessThan(source.indexOf("scripts/smoke-prod.mjs"));
     expect(source).toContain("deploymentSourceStatusArgs()");
     expect(source).toContain("assertDeploymentSourceClean(deploymentSourceChanges)");
-    const preflightAll = source.indexOf("for (const name of names) preflightTarget(name);");
+    const preflightAll = source.indexOf("\npreflightTarget();");
     const buildWeb = source.indexOf('run("bun", ["run", "build:web"]);');
-    const deployAll = source.indexOf("for (const name of names) await deployTarget(name);");
+    const deployAll = source.indexOf("\nawait deployTarget();");
     expect(preflightAll).toBeGreaterThan(0);
     expect(preflightAll).toBeLessThan(buildWeb);
     expect(buildWeb).toBeLessThan(deployAll);
@@ -238,7 +225,7 @@ describe("buildPostDeploySmokePlan", () => {
       new URL("../worker/package.json", import.meta.url),
       "utf8",
     )) as { scripts: Record<string, string> };
-    expect(pkg.scripts.deploy).toBe("node scripts/deploy-dual.mjs prod");
+    expect(pkg.scripts.deploy).toBe("node scripts/deploy-local.mjs");
     expect(pkg.scripts["smoke:runtime-peers"]).toBe("node scripts/smoke-runtime-peers.mjs");
   });
 

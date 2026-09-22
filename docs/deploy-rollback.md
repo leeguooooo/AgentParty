@@ -7,10 +7,10 @@ worker 上线与 D1 迁移由 CI 自动化（issue #420）。本文档说明触�
 
 **触发**
 
-- 推 `v*` tag：随发布自动部署 prod + xdream 两个实例。
-- 手动 `workflow_dispatch`：可选 `both` / `prod` / `xdream` 只部署一个实例。
+- 推 `v*` tag：随发布自动部署 prod。
+- 手动 `workflow_dispatch`：重新部署 prod。
 
-**每个实例的顺序（迁移 ↔ 代码守卫）** —— 见 `worker/scripts/deploy-ci.mjs`：
+**部署顺序（迁移 ↔ 代码守卫）** —— 见 `worker/scripts/deploy-ci.mjs`：
 
 1. `wrangler d1 migrations apply <db> --remote` —— 先把 schema 迁到位。
 2. `verify-remote-schema.mjs` —— 校验「迁移全部已应用」且「必需列 / 索引存在」。
@@ -19,12 +19,8 @@ worker 上线与 D1 迁移由 CI 自动化（issue #420）。本文档说明触�
 4. 拉线上 `/api/health?deployment_metadata=1` 确认 version + commit + 时间戳一致后才算成功。
 5. smoke（token 齐全时跑写路径冒烟）。
 
-prod 与 xdream **串行**（`max-parallel: 1`），任一失败即停，避免两个实例同时半上线。
-两个都部署时，最后 `verify-dual-deployment.mjs` 确认两实例对外提供**同一 build**。
-
 **凭据**：CI 用原生 Cloudflare 凭据（`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`），
-不用本机 `wrangler-accounts` profile。prod / xdream 是两个独立 Cloudflare 账号，各自的
-一套凭据放在同名 GitHub Environment（`worker-prod` / `worker-xdream`）里。
+不用本机 `wrangler-accounts` profile，放在 GitHub Environment `worker-prod` 里。
 
 ## 兼容性迁移的写法（避免半上线）
 
@@ -48,7 +44,7 @@ prod 与 xdream **串行**（`max-parallel: 1`），任一失败即停，避免�
 2. `wrangler rollback [<id>]` —— 不带 id 回退到**上一个** deployment；带 id 回退到指定版本。
 3. 读回线上 `/api/health` 打印回滚后实际的 version + commit。
 
-选 `both` 时不能指定 `deployment_id`（各实例的 id 不通用）。单实例回滚可带 id。
+可带 `deployment_id` 回退到指定版本。
 
 ### D1 schema 回退（人工，破坏性，不自动化）
 
@@ -65,23 +61,18 @@ wrangler-accounts d1 time-travel restore agentparty --timestamp "2026-07-13T00:0
 wrangler-accounts d1 time-travel restore agentparty --bookmark "<bookmark>"
 ```
 
-xdream 实例把上面的 `agentparty` 换成 `agentparty-xdream`，并切到 xdream 账号。
-
 **降级策略**：破坏性迁移不可逆时，优先「代码回滚 + 保留新 schema」（新 schema 对旧代码
 向前兼容时可行）；只有在旧代码无法在新 schema 上运行、且新数据可接受丢失时，才动 time-travel。
 D1 time-travel 默认保留 30 天窗口。
 
 ## owner 需在 GitHub 配置的 secret / environment
 
-在 repo Settings → Environments 建两个 environment，各自配一套 secret：
+在 repo Settings → Environments 建 `worker-prod` environment，配置以下 secret：
 
 | Environment | secret | 说明 |
 | --- | --- | --- |
 | `worker-prod` | `CLOUDFLARE_API_TOKEN` | leeguooooo 账号、含 Workers Scripts + D1 编辑权限的 API token |
 | `worker-prod` | `CLOUDFLARE_ACCOUNT_ID` | leeguooooo 账号 id |
 | `worker-prod` | `AGENTPARTY_SMOKE_TOKEN` / `AGENTPARTY_SMOKE_WRITE_TOKEN` | 可选，一次性冒烟 token；不配则跳过写冒烟 |
-| `worker-xdream` | `CLOUDFLARE_API_TOKEN` | Xdreamstar2025 账号的 API token |
-| `worker-xdream` | `CLOUDFLARE_ACCOUNT_ID` | Xdreamstar2025 账号 id |
-| `worker-xdream` | `AGENTPARTY_SMOKE_TOKEN` / `AGENTPARTY_SMOKE_WRITE_TOKEN` | 可选 |
 
 API token 建议用 Cloudflare「Edit Cloudflare Workers」模板 + D1 编辑权限。

@@ -765,13 +765,13 @@ describe("who pull-based reachability（#905：既不是在线，也不是不可
         join(home, "agents", file),
         JSON.stringify({ server, token: "ap_x", identity: { name, kind: "agent", channel_scope: "agentparty" } }),
       );
-    put("here.json", "codex-002", "https://agentparty.pwtk-dev.work");
+    put("here.json", "codex-002", "https://party.example.net");
     put("there.json", "codex-002-elsewhere", "https://agentparty.leeguoo.com");
-    put("other-channel.json", "unrelated", "https://agentparty.pwtk-dev.work");
+    put("other-channel.json", "unrelated", "https://party.example.net");
     writeFileSync(
       join(home, "agents", "other-channel.json"),
       JSON.stringify({
-        server: "https://agentparty.pwtk-dev.work",
+        server: "https://party.example.net",
         token: "ap_x",
         identity: { name: "unrelated", kind: "agent", channel_scope: "pwtk" },
       }),
@@ -779,7 +779,7 @@ describe("who pull-based reachability（#905：既不是在线，也不是不可
     const prev = process.env.AGENTPARTY_HOME;
     process.env.AGENTPARTY_HOME = home;
     try {
-      const names = locallyConfiguredNames("agentparty", "https://agentparty.pwtk-dev.work");
+      const names = locallyConfiguredNames("agentparty", "https://party.example.net");
       expect(names.has("codex-002")).toBe(true);
       expect(names.has("codex-002-elsewhere")).toBe(false); // 隔壁实例
       expect(names.has("unrelated")).toBe(false); // 隔壁频道

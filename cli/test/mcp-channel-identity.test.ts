@@ -152,9 +152,9 @@ describe("解析顺序：显式 > 登记的默认 > 唯一 > 失败关闭", () =
   // 一台机器可能同时连 prod 和自建实例，两边可以有同名频道——那是两个不同的地方。
   test("同名频道分属两个 server ⇒ 不给 server 时算歧义，给了就解得出", () => {
     const p = cfg({ path: "/p/p.json", server: "https://prod", channel: "shared", name: "prod-bot" });
-    const x = cfg({ path: "/p/x.json", server: "https://xdream", channel: "shared", name: "x-bot" });
+    const x = cfg({ path: "/p/x.json", server: "https://other.example", channel: "shared", name: "x-bot" });
     expect(resolveChannelIdentity({ channel: "shared", configs: [p, x], defaults: {} }).ok).toBe(false);
-    const r = resolveChannelIdentity({ channel: "shared", server: "https://xdream", configs: [p, x], defaults: {} });
+    const r = resolveChannelIdentity({ channel: "shared", server: "https://other.example", configs: [p, x], defaults: {} });
     expect(r.ok && r.config.name).toBe("x-bot");
   });
 });
@@ -237,10 +237,10 @@ describe("聚合档必须显式开启（--all-channels）", () => {
 // 排序选身份，正是「绝不猜」要防的。收齐所有命中，恰一个才用。
 describe("多实例各登记了默认身份 ⇒ 歧义，不按顺序挑", () => {
   const prod = cfg({ path: "/p/prod.json", server: "https://prod", channel: "shared", name: "prod-bot" });
-  const x = cfg({ path: "/p/x.json", server: "https://xdream", channel: "shared", name: "x-bot" });
+  const x = cfg({ path: "/p/x.json", server: "https://other.example", channel: "shared", name: "x-bot" });
   const defaults = {
     [JSON.stringify(["https://prod", "shared"])]: "/p/prod.json",
-    [JSON.stringify(["https://xdream", "shared"])]: "/p/x.json",
+    [JSON.stringify(["https://other.example", "shared"])]: "/p/x.json",
   };
 
   test("不给 server ⇒ 拒绝并列出两个实例", () => {
@@ -248,11 +248,11 @@ describe("多实例各登记了默认身份 ⇒ 歧义，不按顺序挑", () =>
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("unreachable");
     expect(r.message).toContain("https://prod");
-    expect(r.message).toContain("https://xdream");
+    expect(r.message).toContain("https://other.example");
   });
 
   test("给了 server ⇒ 解到那台的默认", () => {
-    const r = resolveChannelIdentity({ channel: "shared", server: "https://xdream", configs: [prod, x], defaults });
+    const r = resolveChannelIdentity({ channel: "shared", server: "https://other.example", configs: [prod, x], defaults });
     expect(r.ok && r.via).toBe("default");
     expect(r.ok && r.config.name).toBe("x-bot");
   });

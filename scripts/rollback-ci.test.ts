@@ -22,7 +22,7 @@ describe("buildRollbackPlan", () => {
 
   test("with a deployment id: rollback targets that id", () => {
     const [, rollback] = buildRollbackPlan(
-      "xdream",
+      "prod",
       { deploymentId: "dep-123", message: "revert bad deploy" },
       ["wrangler"],
     );
@@ -30,7 +30,7 @@ describe("buildRollbackPlan", () => {
       "rollback",
       "dep-123",
       "--config",
-      "wrangler.xdream.jsonc",
+      "wrangler.jsonc",
       "--message",
       "revert bad deploy",
     ]);

@@ -6,6 +6,7 @@ import { LocaleProvider } from "../i18n/locale";
 import { ServerProfileStrings } from "../i18n/strings/ServerProfiles";
 import {
   OFFICIAL_SERVER_PROFILES,
+  type ServerProfile,
   type ServerProfileStorage,
 } from "../lib/serverProfiles";
 import { DesktopServerAuthorizationRequiredError } from "../lib/serverSwitch";
@@ -15,6 +16,14 @@ import {
   ServerSwitcher,
   ServerSwitcherView,
 } from "./ServerProfiles";
+
+const CUSTOM_PROFILE: ServerProfile = {
+  id: "custom:https://party.example.com",
+  label: "Team Party",
+  origin: "https://party.example.com",
+  kind: "custom",
+};
+const PROFILES: ServerProfile[] = [...OFFICIAL_SERVER_PROFILES, CUSTOM_PROFILE];
 
 describe("server profile controls", () => {
   test("registers complete English and Chinese labels", () => {
@@ -42,7 +51,7 @@ describe("server profile controls", () => {
     const html = renderToStaticMarkup(
       <LocaleProvider>
         <ServerProfilePicker
-          profiles={[...OFFICIAL_SERVER_PROFILES]}
+          profiles={PROFILES}
           selectedOrigin={OFFICIAL_SERVER_PROFILES[0]!.origin}
           onSelect={() => {}}
           onProfilesChanged={() => {}}
@@ -50,7 +59,7 @@ describe("server profile controls", () => {
       </LocaleProvider>,
     );
     expect(html).toContain("leeguooooo");
-    expect(html).toContain("xdreamstart");
+    expect(html).toContain("Team Party");
     expect(html).toContain('type="url"');
     expect(html).toContain("Check and add server");
     expect(html).not.toContain("emoji");
@@ -60,7 +69,7 @@ describe("server profile controls", () => {
     const pending = renderToStaticMarkup(
       <LocaleProvider>
         <ServerSwitcherView
-          profiles={[...OFFICIAL_SERVER_PROFILES]}
+          profiles={PROFILES}
           activeOrigin={OFFICIAL_SERVER_PROFILES[0]!.origin}
           pending={true}
           error={null}
@@ -81,11 +90,11 @@ describe("server profile controls", () => {
     const failed = renderToStaticMarkup(
       <LocaleProvider>
         <ServerSwitcherView
-          profiles={[...OFFICIAL_SERVER_PROFILES]}
+          profiles={PROFILES}
           activeOrigin={OFFICIAL_SERVER_PROFILES[0]!.origin}
           pending={false}
           error="Could not switch"
-          pairTarget="https://agentparty.pwtk-dev.work"
+          pairTarget="https://party.example.com"
           authorizationTarget={null}
           retryTarget={null}
           onSelect={() => {}}
@@ -104,7 +113,7 @@ describe("server profile controls", () => {
 
   test("authorizes the failed target interactively before retrying the switch", async () => {
     const current = OFFICIAL_SERVER_PROFILES[0]!.origin;
-    const target = OFFICIAL_SERVER_PROFILES[1]!.origin;
+    const target = CUSTOM_PROFILE.origin;
     const calls: string[] = [];
     let switches = 0;
     const onSwitch = async (origin: string, restoredAccessToken?: string) => {
@@ -122,7 +131,7 @@ describe("server profile controls", () => {
       renderer = create(
         <LocaleProvider>
           <ServerSwitcher
-            profiles={[...OFFICIAL_SERVER_PROFILES]}
+            profiles={PROFILES}
             activeOrigin={current}
             onSwitch={onSwitch}
             onAddPair={() => {}}
@@ -151,7 +160,7 @@ describe("server profile controls", () => {
 
   test("retries generic failures without invoking interactive Keychain access", async () => {
     const current = OFFICIAL_SERVER_PROFILES[0]!.origin;
-    const target = OFFICIAL_SERVER_PROFILES[1]!.origin;
+    const target = CUSTOM_PROFILE.origin;
     let switches = 0;
     let authorizations = 0;
     let renderer: ReturnType<typeof create>;
@@ -160,7 +169,7 @@ describe("server profile controls", () => {
       renderer = create(
         <LocaleProvider>
           <ServerSwitcher
-            profiles={[...OFFICIAL_SERVER_PROFILES]}
+            profiles={PROFILES}
             activeOrigin={current}
             onSwitch={async () => {
               switches += 1;
