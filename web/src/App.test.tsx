@@ -42,7 +42,7 @@ function memoryStorage(): Storage {
 }
 
 const activeOrigin = "https://agentparty.leeguoo.com";
-const unpairedOrigin = "https://agentparty.pwtk-dev.work";
+const unpairedOrigin = "https://party.example.net";
 let renderer: ReactTestRenderer | null = null;
 let credentialDeletes = 0;
 let storedCredential: string | null = null;
@@ -116,6 +116,7 @@ beforeEach(() => {
   });
 
   addCustomServerProfile(localStorage, { label: "Private", origin: "https://private.example.com" });
+  addCustomServerProfile(localStorage, { label: "Unpaired", origin: unpairedOrigin });
   saveActiveServerOrigin(localStorage, activeOrigin);
   credentialDeletes = 0;
   notificationActionHandler = null;

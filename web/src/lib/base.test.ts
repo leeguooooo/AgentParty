@@ -35,11 +35,11 @@ describe("api base", () => {
   });
 
   test("normalizes and applies a runtime API base", () => {
-    setApiBase("https://agentparty.pwtk-dev.work///");
+    setApiBase("https://party.example.net///");
 
-    expect(apiBase()).toBe("https://agentparty.pwtk-dev.work");
-    expect(apiOrigin("tauri://localhost")).toBe("https://agentparty.pwtk-dev.work");
-    expect(apiUrl("/api/channels")).toBe("https://agentparty.pwtk-dev.work/api/channels");
+    expect(apiBase()).toBe("https://party.example.net");
+    expect(apiOrigin("tauri://localhost")).toBe("https://party.example.net");
+    expect(apiUrl("/api/channels")).toBe("https://party.example.net/api/channels");
   });
 
   test("falls back to the supplied browser origin for same-origin web deployments", () => {

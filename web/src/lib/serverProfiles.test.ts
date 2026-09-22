@@ -69,17 +69,16 @@ describe("server origin validation", () => {
 });
 
 describe("server profiles", () => {
-  test("names the shared deployments by owner and recognizes membership billing scope", () => {
+  test("names the official deployment by owner and recognizes membership billing scope", () => {
     expect(OFFICIAL_SERVER_PROFILES.map((profile) => profile.label)).toEqual([
       "leeguooooo",
-      "xdreamstart",
     ]);
     expect(isLeeguoooooDeployment("https://agentparty.leeguoo.com")).toBe(true);
-    expect(isLeeguoooooDeployment("https://agentparty.pwtk-dev.work")).toBe(false);
+    expect(isLeeguoooooDeployment("https://party.example.net")).toBe(false);
     expect(isLeeguoooooDeployment("https://private.example.com")).toBe(false);
   });
 
-  test("always includes official prod/test and stores only custom label/origin", () => {
+  test("always includes the official profile and stores only custom label/origin", () => {
     const storage = memoryStorage();
     const snapshots: string[] = [];
     const profiles = addCustomServerProfile(storage, {
@@ -89,7 +88,7 @@ describe("server profiles", () => {
       snapshots.push(mutatedStorage.getItem("ap_server_profiles_v1") ?? "missing");
     });
 
-    expect(profiles.slice(0, 2)).toEqual(OFFICIAL_SERVER_PROFILES);
+    expect(profiles.slice(0, 1)).toEqual(OFFICIAL_SERVER_PROFILES);
     expect(profiles.at(-1)).toEqual({
       id: "custom:https://party.example.com",
       label: "Team Party",

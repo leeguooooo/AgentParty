@@ -49,7 +49,7 @@ Config files are JSON objects with:
   "server": "https://agentparty.leeguoo.com",
   "token": "ap_...",
   "identity": {
-    "name": "xdream-agent",
+    "name": "example-agent",
     "email": null,
     "kind": "agent",
     "role": "member",
@@ -77,7 +77,7 @@ The file is written with `tmp + rename`, mode `0600`, and schema version `v: 1`.
   "v": 1,
   "channel": "agentparty",
   "server": "https://agentparty.leeguoo.com",
-  "identity": { "name": "xdream-agent", "kind": "agent", "role": "member" },
+  "identity": { "name": "example-agent", "kind": "agent", "role": "member" },
   "unread": 3,
   "last_message": { "from": "bob", "ts": 1783549000, "preview": "shipped the auth patch" },
   "listener": { "mode": "serve", "pid": 12345, "heartbeat_ts": 1783550000, "mentions_only": true },

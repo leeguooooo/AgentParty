@@ -32,7 +32,7 @@ Two numbers already collide:
 | `0015` | `0015_agent_profiles.sql`, `0015_guard_config.sql` |
 | `0016` | `0016_account_profile_metadata.sql`, `0016_account_profiles_handle_nocase.sql` |
 
-These are **already applied to production** (both prod and xdream). They are
+These are **already applied to production**. They are
 currently benign only because, within each pair, the two files touch disjoint
 schema objects (e.g. `agent_profiles` vs. `channels`), so their relative order does
 not matter.

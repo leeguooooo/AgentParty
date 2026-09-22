@@ -47,7 +47,7 @@ describe("#926 自检判定：谁该被上报", () => {
   // #865：本机两台生产实例都有 #agentparty。只按频道名匹配会把隔壁实例的同名身份认成本机的。
   // fixture 只差 server 一个字段，别的全同——所以只有 server 那道比对能决定结果。
   test("server 维度：隔壁实例的同名身份不算数（#865）", () => {
-    const elsewhere = binding({ server: "https://agentparty.pwtk-dev.work" });
+    const elsewhere = binding({ server: "https://party.example.net" });
     expect(isLocalCodexIdentity({ ...base, harness: () => null, bindings: [elsewhere] })).toBe(false);
     expect(isLocalCodexIdentity({ ...base, harness: () => null, bindings: [binding()] })).toBe(true);
   });

@@ -1,9 +1,8 @@
 // CI worker 部署（#420）。
 //
-// 与本地 deploy-dual.mjs 的区别：CI 用 Cloudflare 原生凭据（CLOUDFLARE_API_TOKEN /
-// CLOUDFLARE_ACCOUNT_ID，由 job 环境注入），而非本机 wrangler-accounts profile。
-// prod 与 xdream 是两个独立 Cloudflare 账号，各自在自己的 GitHub Environment 里
-// 提供一套 token/account，一个 job 只部署一个 target。
+// 与本地 deploy-local.mjs 的区别：CI 用 Cloudflare 原生凭据（CLOUDFLARE_API_TOKEN /
+// CLOUDFLARE_ACCOUNT_ID，由 worker-prod GitHub Environment 注入），而非本机
+// wrangler-accounts profile。
 //
 // 每个 target 的顺序（迁移 ↔ 代码守卫）：
 //   1. runtime credentials preflight  —— 先确认 agent 身份和目标频道访问，不探测新协议
@@ -12,7 +11,7 @@
 //                                        失败即中断，绝不进入 deploy（半上线守卫）
 //   4. wrangler deploy                —— 带 build 元数据 --define，供 /api/health 回读
 //   5. verifyDeploymentIdentity       —— 拉取线上 health 确认精确 version+commit；deployed_at 仅观测
-//   6. runtime-peers smoke            —— 双活 socket 验证 v3 live binding 与同安装关系
+//   6. runtime-peers smoke            —— 两条 socket 验证 v3 live binding 与同安装关系
 //   7. write smoke（token 齐全时）    —— 端到端写路径冒烟
 //
 // wrangler 启动器由 AGENTPARTY_WRANGLER_BIN 决定（空格分词），CI 传 "bunx wrangler"
@@ -28,11 +27,6 @@ export const DEPLOY_TARGETS = {
     config: "wrangler.jsonc",
     database: "agentparty",
     smokeBase: "https://agentparty.leeguoo.com",
-  },
-  xdream: {
-    config: "wrangler.xdream.jsonc",
-    database: "agentparty-xdream",
-    smokeBase: "https://agentparty.pwtk-dev.work",
   },
 };
 
@@ -182,7 +176,7 @@ async function deployTarget(name, metadata, launcher) {
 
 async function main() {
   const requested = process.argv.slice(2).filter((arg) => !arg.startsWith("-"));
-  const names = requested.length > 0 ? requested : ["prod", "xdream"];
+  const names = requested.length > 0 ? requested : ["prod"];
   for (const name of names) {
     if (!DEPLOY_TARGETS[name]) throw new Error(`unknown deploy target: ${name}`);
   }

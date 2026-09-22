@@ -4,8 +4,7 @@ import { resolve } from "node:path";
 // @ts-expect-error The deployment smoke is intentionally plain Node ESM.
 import { desktopPairingSmokePayload, smokeDesktopPairing } from "../worker/scripts/smoke-desktop-pairing.mjs";
 
-const dualDeploy = readFileSync(resolve(import.meta.dir, "../worker/scripts/deploy-dual.mjs"), "utf8");
-const dualVerify = readFileSync(resolve(import.meta.dir, "../worker/scripts/verify-dual-deployment.mjs"), "utf8");
+const localDeploy = readFileSync(resolve(import.meta.dir, "../worker/scripts/deploy-local.mjs"), "utf8");
 
 describe("desktop pairing deploy smoke", () => {
   test("sends an S256 Device Flow probe and validates the target origin", async () => {
@@ -48,20 +47,15 @@ describe("desktop pairing deploy smoke", () => {
   });
 
   test("runs the Device Flow smoke unconditionally after every target deploy", () => {
-    const deploy = dualDeploy.indexOf('"deploy", "--config", target.config');
-    const pairingSmoke = dualDeploy.indexOf('run("node", ["scripts/smoke-desktop-pairing.mjs"]');
-    const optionalAuthenticatedSmoke = dualDeploy.indexOf("if (target.smokeToken && target.smokeWriteToken)");
+    const deploy = localDeploy.indexOf('"deploy", "--config", target.config');
+    const pairingSmoke = localDeploy.indexOf('run("node", ["scripts/smoke-desktop-pairing.mjs"]');
+    const optionalAuthenticatedSmoke = localDeploy.indexOf("if (target.smokeToken && target.smokeWriteToken)");
     expect(deploy).toBeGreaterThan(-1);
     expect(pairingSmoke).toBeGreaterThan(deploy);
     expect(optionalAuthenticatedSmoke).toBeGreaterThan(pairingSmoke);
   });
 
-  test("runs Wrangler noninteractively so unattended dual deploys cannot pause for setup prompts", () => {
-    expect(dualDeploy).toContain('CI: "1"');
-  });
-
-  test("uses the bounded consecutive metadata verifier for independent dual-deployment checks", () => {
-    expect(dualVerify).toContain('verifyDeploymentIdentity');
-    expect(dualVerify).not.toContain('readDeploymentMetadata');
+  test("runs Wrangler noninteractively so unattended deploys cannot pause for setup prompts", () => {
+    expect(localDeploy).toContain('CI: "1"');
   });
 });

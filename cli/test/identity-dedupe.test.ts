@@ -20,7 +20,7 @@ import { runMcpIdentities, registrationsForIdentity } from "../src/commands/mcp-
 import type { McpRegistration } from "../src/mcp-registry";
 import type { RemoveFn } from "../src/commands/mcp-prune";
 
-const SERVER = "https://agentparty.pwtk-dev.work";
+const SERVER = "https://party.example.net";
 const OTHER_SERVER = "https://agentparty.leeguoo.com";
 
 function rec(over: Partial<IdentityRecord> = {}): IdentityRecord {

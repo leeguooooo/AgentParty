@@ -19,32 +19,21 @@ function smokeBaseFromConfig(config) {
   return `https://${match[1].replace(/^https?:\/\//, "").replace(/\/+$/, "")}`;
 }
 
-const targets = {
-  prod: {
-    profile: process.env.AGENTPARTY_PROD_PROFILE ?? "leeguooooo",
-    config: "wrangler.jsonc",
-    database: "agentparty",
-    smokeBase: process.env.AGENTPARTY_PROD_SMOKE_BASE ?? smokeBaseFromConfig("wrangler.jsonc"),
-    smokeToken: process.env.AGENTPARTY_SMOKE_TOKEN,
-    smokeWriteToken: process.env.AGENTPARTY_SMOKE_WRITE_TOKEN,
-    runtimeSmokeToken:
-      process.env.AGENTPARTY_PROD_RUNTIME_SMOKE_TOKEN ??
-      process.env.AGENTPARTY_RUNTIME_SMOKE_TOKEN ??
-      process.env.AGENTPARTY_SMOKE_TOKEN,
-    runtimeSmokeChannel:
-      process.env.AGENTPARTY_PROD_RUNTIME_SMOKE_CHANNEL ?? process.env.AGENTPARTY_RUNTIME_SMOKE_CHANNEL,
-  },
-  xdream: {
-    profile: process.env.AGENTPARTY_XDREAM_PROFILE ?? "Xdreamstar2025",
-    config: "wrangler.xdream.jsonc",
-    database: "agentparty-xdream",
-    smokeBase: process.env.AGENTPARTY_XDREAM_SMOKE_BASE ?? smokeBaseFromConfig("wrangler.xdream.jsonc"),
-    smokeToken: process.env.AGENTPARTY_XDREAM_SMOKE_TOKEN,
-    smokeWriteToken: process.env.AGENTPARTY_XDREAM_SMOKE_WRITE_TOKEN,
-    runtimeSmokeToken:
-      process.env.AGENTPARTY_XDREAM_RUNTIME_SMOKE_TOKEN ?? process.env.AGENTPARTY_XDREAM_SMOKE_TOKEN,
-    runtimeSmokeChannel: process.env.AGENTPARTY_XDREAM_RUNTIME_SMOKE_CHANNEL,
-  },
+// 本地 prod 部署：走本机 wrangler-accounts profile（CI 走 deploy-ci.mjs）。
+const target = {
+  name: "prod",
+  profile: process.env.AGENTPARTY_PROD_PROFILE ?? "leeguooooo",
+  config: "wrangler.jsonc",
+  database: "agentparty",
+  smokeBase: process.env.AGENTPARTY_PROD_SMOKE_BASE ?? smokeBaseFromConfig("wrangler.jsonc"),
+  smokeToken: process.env.AGENTPARTY_SMOKE_TOKEN,
+  smokeWriteToken: process.env.AGENTPARTY_SMOKE_WRITE_TOKEN,
+  runtimeSmokeToken:
+    process.env.AGENTPARTY_PROD_RUNTIME_SMOKE_TOKEN ??
+    process.env.AGENTPARTY_RUNTIME_SMOKE_TOKEN ??
+    process.env.AGENTPARTY_SMOKE_TOKEN,
+  runtimeSmokeChannel:
+    process.env.AGENTPARTY_PROD_RUNTIME_SMOKE_CHANNEL ?? process.env.AGENTPARTY_RUNTIME_SMOKE_CHANNEL,
 };
 
 function run(cmd, args, options = {}) {
@@ -55,6 +44,13 @@ function run(cmd, args, options = {}) {
   if (res.status !== 0) {
     throw new Error(`${cmd} ${args.join(" ")} failed with exit ${res.status}`);
   }
+}
+
+// 只有 prod 一个目标；任何其它参数（比如已下线的旧目标名）直接拒绝，绝不静默落到 prod。
+const extraArgs = process.argv.slice(2).filter((arg) => arg !== "prod");
+if (extraArgs.length > 0) {
+  console.error(`unknown deploy target: ${extraArgs.join(" ")} (only "prod" is supported)`);
+  process.exit(1);
 }
 
 const deploymentSourceChanges = execFileSync("git", deploymentSourceStatusArgs(), {
@@ -69,9 +65,8 @@ const deploymentMetadata = {
   deployed_at: new Date().toISOString(),
 };
 
-async function deployTarget(name) {
-  const target = targets[name];
-  if (!target) throw new Error(`unknown deploy target: ${name}`);
+async function deployTarget() {
+  const { name } = target;
 
   console.error(`\n==> Deploying ${name} with ${target.profile} (${target.config})`);
   const env = { WRANGLER_PROFILE: target.profile, CI: "1" };
@@ -124,9 +119,8 @@ async function deployTarget(name) {
   }
 }
 
-function preflightTarget(name) {
-  const target = targets[name];
-  if (!target) throw new Error(`unknown deploy target: ${name}`);
+function preflightTarget() {
+  const { name } = target;
   if (!target.runtimeSmokeToken) {
     throw new Error(`${name} deploy requires a runtime smoke agent token before migration/deploy`);
   }
@@ -143,9 +137,6 @@ function preflightTarget(name) {
   });
 }
 
-const requested = process.argv.slice(2);
-const names = requested.length > 0 ? requested : ["prod", "xdream"];
-
-for (const name of names) preflightTarget(name);
+preflightTarget();
 run("bun", ["run", "build:web"]);
-for (const name of names) await deployTarget(name);
+await deployTarget();

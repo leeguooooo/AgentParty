@@ -396,7 +396,7 @@ describe("desktop window", () => {
       loadDeepLink: async () => ({
         // 冷启动：混着一条 channel 链接和一条配对链接——只有 channel 那条应被投递。
         getCurrent: async () => [
-          "agentparty://channel/guessadmin?server=https%3A%2F%2Fagentparty.pwtk-dev.work",
+          "agentparty://channel/guessadmin?server=https%3A%2F%2Fparty.example.net",
           "agentparty://pair/AB12C-DE34F",
         ],
         onOpenUrl: async (handler) => {
@@ -417,7 +417,7 @@ describe("desktop window", () => {
     unlisten();
 
     expect(links).toEqual([
-      "guessadmin:https://agentparty.pwtk-dev.work",
+      "guessadmin:https://party.example.net",
       "general:null",
     ]);
     expect(unlistened).toBe(true);

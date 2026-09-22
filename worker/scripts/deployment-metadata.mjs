@@ -92,15 +92,3 @@ async function verifyStableDeploymentMetadata(base, fetcher, options, assertExpe
   }
   throw lastError;
 }
-
-export async function verifyDualDeployment(targets, expected, fetcher = fetch, options = {}) {
-  const verified = {};
-  for (const [name, base] of Object.entries(targets)) {
-    try {
-      verified[name] = await verifyDeploymentMetadata(base, expected, fetcher, options);
-    } catch (error) {
-      throw new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return verified;
-}

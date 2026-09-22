@@ -13,7 +13,6 @@
     "desktop:dev": "cd desktop && bun run dev",
     "desktop:build": "cd desktop && bun run build",
     "desktop:build:prod": "cd desktop && bun run build:prod",
-    "desktop:build:xdream": "cd desktop && bun run build:xdream",
     "release:verify": "bun run check && cd worker && bun run verify:remote-schema",
     "release:deploy": "bun run check && cd worker && bun run deploy && bun run verify:remote-schema"
   },

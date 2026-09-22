@@ -13,7 +13,7 @@ export interface DeployStep {
   env?: Record<string, string>;
 }
 
-export const DEPLOY_TARGETS: Record<"prod" | "xdream", DeployTarget>;
+export const DEPLOY_TARGETS: Record<"prod", DeployTarget>;
 
 export function parseWranglerLauncher(env?: Record<string, string | undefined>): string[];
 

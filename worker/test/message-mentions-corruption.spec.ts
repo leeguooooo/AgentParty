@@ -15,7 +15,7 @@ interface MsgLike {
 
 // 回归：一行 mentions_json='' 曾让整条频道的 messages 历史 / hello 回填全部 500——
 // rowToFrame 里裸 JSON.parse('') 抛未捕获异常，DO 对该频道所有读请求返回 Cloudflare
-// "internal error"（xdream 上 kyc/seamail 实测）。修法是像其余存储解析一样兜底空/坏值。
+// "internal error"（生产上 kyc/seamail 实测）。修法是像其余存储解析一样兜底空/坏值。
 describe("mentions_json corruption is tolerated on read (#do-mentions-parse)", () => {
   async function seedCorruptRow(slug: string, seq: number, rawMentions: string): Promise<void> {
     const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));

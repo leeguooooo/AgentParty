@@ -5,7 +5,7 @@ import { parseChannelDeepLink } from "./channelLink";
 // 桌面版「从外部工具直达频道」的 deep link（agentparty://channel/<slug>?server=<origin>）纯解析层。
 // 来源是 claude-statusbar 的 `cs hud`——点某个 channel 会 open 这条链接，桌面壳收到后跳频道页。
 // 它与配对邀请（agentparty://pair/...）、网页邀请链接（http(s)）靠 scheme + hostname 分流、互不干扰。
-const SERVER = "https://agentparty.pwtk-dev.work";
+const SERVER = "https://party.example.net";
 
 describe("parseChannelDeepLink", () => {
   test("channel link with server → slug + normalized server origin", () => {

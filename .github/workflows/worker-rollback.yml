@@ -6,16 +6,8 @@ name: worker-rollback
 on:
   workflow_dispatch:
     inputs:
-      environment:
-        description: 回滚哪个实例
-        type: choice
-        options:
-          - prod
-          - xdream
-          - both
-        default: prod
       deployment_id:
-        description: 目标 deployment id（留空=回退到上一个）。选 both 时必须留空。
+        description: 目标 deployment id（留空=回退到上一个）
         type: string
         default: ""
       confirm:
@@ -33,50 +25,25 @@ concurrency:
 jobs:
   guard:
     runs-on: ubuntu-latest
-    outputs:
-      targets: ${{ steps.pick.outputs.targets }}
     steps:
       - name: validate inputs
         env:
           CONFIRM: ${{ github.event.inputs.confirm }}
-          SEL: ${{ github.event.inputs.environment }}
-          DEP: ${{ github.event.inputs.deployment_id }}
         run: |
           set -euo pipefail
           if [ "$CONFIRM" != "rollback" ]; then
             echo "::error::confirm 必须等于 'rollback' 才会执行回滚"
             exit 1
           fi
-          # deployment_id 只属于单个实例；both 时禁止指定，避免把 prod 的 id 用到 xdream。
-          if [ "$SEL" = "both" ] && [ -n "$DEP" ]; then
-            echo "::error::选择 both 时不能指定 deployment_id（各实例 id 不通用）"
-            exit 1
-          fi
-      - id: pick
-        env:
-          SEL: ${{ github.event.inputs.environment }}
-        run: |
-          set -euo pipefail
-          case "$SEL" in
-            prod)   echo 'targets=["prod"]' >> "$GITHUB_OUTPUT" ;;
-            xdream) echo 'targets=["xdream"]' >> "$GITHUB_OUTPUT" ;;
-            both)   echo 'targets=["prod","xdream"]' >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::invalid environment selection: $SEL"; exit 1 ;;
-          esac
 
   rollback:
     needs: guard
     runs-on: ubuntu-latest
-    environment: worker-${{ matrix.target }}
-    strategy:
-      max-parallel: 1
-      fail-fast: true
-      matrix:
-        target: ${{ fromJSON(needs.guard.outputs.targets) }}
+    environment: worker-prod
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/bun-install
-      - name: rollback ${{ matrix.target }}
+      - name: rollback prod
         working-directory: worker
         env:
           CI: "1"
@@ -87,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "$DEP" ]; then
-            node scripts/rollback-ci.mjs ${{ matrix.target }} --deployment-id "$DEP"
+            node scripts/rollback-ci.mjs prod --deployment-id "$DEP"
           else
-            node scripts/rollback-ci.mjs ${{ matrix.target }}
+            node scripts/rollback-ci.mjs prod
           fi
