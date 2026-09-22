@@ -46,6 +46,13 @@ function run(cmd, args, options = {}) {
   }
 }
 
+// 只有 prod 一个目标；任何其它参数（比如已下线的旧目标名）直接拒绝，绝不静默落到 prod。
+const extraArgs = process.argv.slice(2).filter((arg) => arg !== "prod");
+if (extraArgs.length > 0) {
+  console.error(`unknown deploy target: ${extraArgs.join(" ")} (only "prod" is supported)`);
+  process.exit(1);
+}
+
 const deploymentSourceChanges = execFileSync("git", deploymentSourceStatusArgs(), {
   cwd: repositoryRoot,
   encoding: "utf8",

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
-  DEPLOY_TARGETS,
   buildDeployPlan,
   buildPreDeploySmokePlan,
   buildPostDeploySmokePlan,
@@ -85,7 +84,6 @@ describe("buildDeployPlan", () => {
   test("rejects an empty launcher", () => {
     expect(() => buildDeployPlan("prod", metadata, [])).toThrow(/non-empty/);
   });
-
 });
 
 describe("buildPostDeploySmokePlan", () => {
@@ -205,6 +203,15 @@ describe("buildPostDeploySmokePlan", () => {
     expect(preflightAll).toBeGreaterThan(0);
     expect(preflightAll).toBeLessThan(buildWeb);
     expect(buildWeb).toBeLessThan(deployAll);
+  });
+
+  test("local deploy rejects any target other than prod before touching anything", () => {
+    const res = Bun.spawnSync(["node", "scripts/deploy-local.mjs", "staging"], {
+      cwd: new URL("../worker", import.meta.url).pathname,
+      env: { ...process.env, AGENTPARTY_PROD_SMOKE_BASE: "https://party.example" },
+    });
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr.toString()).toContain("unknown deploy target: staging");
   });
 
   test("runs every CI credential preflight before building or mutating a target", () => {
