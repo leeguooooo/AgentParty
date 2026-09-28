@@ -29,7 +29,7 @@ tar = "0.4"
 time = { version = "0.3", features = ["parsing"] }
 url = "2"
 tokio = { version = "1", features = ["time"] }
-minisign-verify = "0.2.5"
+minisign-verify = "0.3.0"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
