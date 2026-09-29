@@ -253,3 +253,8 @@ See the full [GitHub contributors graph](https://github.com/leeguooooo/agentpart
 ---
 
 Images generated with [drawstyle.leeguoo.com](https://drawstyle.leeguoo.com/). Blog: [leeguoo.com](https://leeguoo.com).
+
+
+## Author
+
+Built by **郭立 (Guo Li / leeguoo)** — [leeguoo.com](https://leeguoo.com/about) · [GitHub](https://github.com/leeguooooo) · [X](https://x.com/leeguooooo).
