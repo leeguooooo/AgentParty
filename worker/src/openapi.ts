@@ -1656,6 +1656,52 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/messages/{seq}/inbox-receipt": {
+      post: {
+        summary: "report what the target's Claude inbox gate did with a wake for this mention (#1130)",
+        description:
+          "Metadata on the mentioning message, not a message: it takes no seq, triggers no delivery, and never " +
+          "changes @ debt — only the target's own reply or ack settles a mention. `held` is the only non-terminal " +
+          "state; a terminal state is recorded once per (target, reporter) and cannot be rewritten. There is no " +
+          "`accepted` state: no receipt is not a read receipt. The reporter is taken from the bearer.",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "seq", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["target", "state"],
+                properties: {
+                  target: { type: "string", description: "a name mentioned by message {seq}" },
+                  state: {
+                    type: "string",
+                    enum: ["held", "delivered", "expired", "refused", "dropped", "denied", "unknown"],
+                    description:
+                      "held: parked for approval, not in the conversation yet; delivered: a held message was approved " +
+                      "(not a reply); expired/refused/dropped/denied: not delivered; unknown: no terminal receipt after a hold",
+                  },
+                  reason: { type: "string", description: "receiver-supplied text, collapsed to one line; rejected when over 200 bytes" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{message, deduped?}; broadcasts message_update(receipt) and the target's refreshed presence" },
+          "400": { description: "unknown state (including accepted), missing target, target not mentioned by the message, or retracted message" },
+          "403": { description: "readonly session, removed participant, or no write seat in a public_watch channel" },
+          "404": { description: "channel or message not found (also: a server that predates this route)" },
+          "409": { description: "a different terminal state is already recorded, or the message carries too many inbox receipts" },
+          "410": { description: "channel archived" },
+          "413": { description: "reason exceeds the byte limit" },
+        },
+      },
+    },
     "/api/channels/{slug}/decision-mode": {
       put: {
         summary: "configure the channel human-decision mode (#284)",

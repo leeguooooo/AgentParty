@@ -171,3 +171,119 @@ describe("MessageStatus delivery diagnostics (#806)", () => {
     expect(r.root.findAllByProps({ className: "msg-status-agent-action" })).toHaveLength(0);
   });
 });
+
+describe("Claude inbox receipts on the sender's message (#1130)", () => {
+  const inbox = (state: string, extra: Record<string, unknown> = {}) => ({
+    target: "alpha",
+    state,
+    reported_by: { name: "alpha", kind: "agent" },
+    ts: 1_700_000_200_000,
+    ...extra,
+  });
+
+  function renderInbox(inboxReceipts: unknown, deliveries: PublicDirectedDelivery[] = []) {
+    act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <MessageStatus
+            receipts={[]}
+            readers={[]}
+            unread={[]}
+            deliveries={deliveries}
+            inboxReceipts={inboxReceipts}
+            display={(name) => `owner · ${name}`}
+          />
+        </LocaleProvider>,
+      );
+    });
+    return renderer as ReactTestRenderer;
+  }
+  const expand = (r: ReactTestRenderer) => {
+    const toggle = r.root.findByProps({ "aria-label": "展开消息送达详情" });
+    act(() => toggle.props.onClick());
+    return JSON.stringify(r.toJSON());
+  };
+
+  test("held: the collapsed line says so, even while the durable delivery is still queued", () => {
+    const r = renderInbox([inbox("held")], [delivery("d1", "alpha", "queued")]);
+    const collapsed = JSON.stringify(r.toJSON());
+    expect(collapsed).toContain("1 位被扣留待审");
+    // 没有回执时这里会写「1 位处理中」——那句会让发信人以为消息已经在对方手里。
+    expect(collapsed).not.toContain("处理中");
+    const text = expand(r);
+    expect(text).toContain("被扣留待审 · 尚未送达");
+    expect(text).toContain("5 分钟内无人批准即丢弃");
+    // 可靠投递那一行照旧：回执不改它的状态。
+    expect(text).toContain("已排队");
+  });
+
+  for (const [state, label] of [
+    ["expired", "未送达 · 已过期"],
+    ["refused", "未送达 · 被拒绝"],
+    ["dropped", "未送达 · 被丢弃"],
+    ["denied", "未送达 · 策略拒绝"],
+  ] as const) {
+    test(`${state}: shown as not delivered, with the do-not-resend hint`, () => {
+      const r = renderInbox([inbox(state, { held_at: 1 })], [delivery("d1", "alpha", "queued")]);
+      expect(JSON.stringify(r.toJSON())).toContain("1 位未送达");
+      const text = expand(r);
+      expect(text).toContain(label);
+      expect(text).toContain("请勿重发");
+      const row = r.root.find((node) => node.props["data-inbox-state"] === state);
+      expect(String(row.props.className)).toContain("msg-inbox--not_delivered");
+    });
+  }
+
+  test("delivered is never rendered as read, replied or a success state", () => {
+    const r = renderInbox([inbox("delivered")], [delivery("d1", "alpha", "queued")]);
+    const collapsed = JSON.stringify(r.toJSON());
+    expect(collapsed).toContain("1 位处理中");
+    const text = expand(r);
+    expect(text).toContain("已获批准 · 进入对话（尚未回复）");
+    expect(text).toContain("这不是回复");
+    const row = r.root.find((node) => node.props["data-inbox-state"] === "delivered");
+    expect(String(row.props.className)).toContain("msg-inbox--delivered");
+    expect(row.findAll((node) => String(node.props.className ?? "").includes("ap-sprite--success"))).toHaveLength(0);
+  });
+
+  test("unknown after a hold is shown as unknown, not as delivered or failed", () => {
+    const r = renderInbox([inbox("unknown")]);
+    const text = expand(r);
+    expect(text).toContain("被扣留 · 结局未知");
+    expect(text).toContain("不会自动重发");
+  });
+
+  test("a reply settles the summary; the receipt stays as history", () => {
+    const r = renderInbox([inbox("expired")], [delivery("d1", "alpha", "replied", { reply_seq: 51 })]);
+    const collapsed = JSON.stringify(r.toJSON());
+    expect(collapsed).not.toContain("未送达");
+    expect(collapsed).toContain("1 位已回复");
+    expect(expand(r)).toContain("未送达 · 已过期");
+  });
+
+  test("the receiver-controlled reason and a third-party reporter are shown as plain text", () => {
+    const r = renderInbox([
+      inbox("held", { reason: "<img src=x onerror=alert(1)>", reported_by: { name: "relay", kind: "agent" } }),
+    ]);
+    expand(r);
+    const texts = r.root.findAll((node) => node.type === "span").flatMap((node) => node.children).filter((c) => typeof c === "string");
+    expect(texts).toContain("接收方说明：<img src=x onerror=alert(1)>");
+    expect(texts).toContain("由 owner · relay 上报");
+    expect(r.root.findAll((node) => node.type === "img")).toHaveLength(0);
+  });
+
+  test("no receipts, `accepted`, an unknown future state, or a malformed field ⇒ nothing new is rendered", () => {
+    for (const value of [undefined, [], "held", [inbox("accepted")], [inbox("future_state")], [{ state: "held" }]]) {
+      const r = renderInbox(value, [delivery("d1", "alpha", "queued")]);
+      expect(JSON.stringify(r.toJSON())).toContain("1 位处理中");
+      const text = expand(r);
+      expect(text).not.toContain("Claude 收件箱");
+      expect(r.root.findAll((node) => node.props["data-inbox-receipts"] !== undefined)).toHaveLength(0);
+      act(() => renderer?.unmount());
+      renderer = null;
+    }
+    // 只有 accepted 时连状态条都不出现。
+    const r = renderInbox([inbox("accepted")]);
+    expect(r.toJSON()).toBeNull();
+  });
+});

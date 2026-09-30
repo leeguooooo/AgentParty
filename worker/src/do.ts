@@ -100,6 +100,16 @@ import {
   type ReceiptReason,
   RECEIPT_NOTE_LIMIT,
   RECEIPT_MAX_PER_MESSAGE,
+  type InboxPendingMention,
+  type InboxReceipt,
+  INBOX_RECEIPT_MAX_PER_MESSAGE,
+  INBOX_RECEIPT_REASON_LIMIT,
+  INBOX_RECEIPT_STATES,
+  inboxReceiptFor,
+  inboxReceiptReasonLine,
+  inboxReceiptTransition,
+  isInboxReceiptState,
+  normalizeInboxReceipts,
   type Residency,
   type SendHostDecision,
   type SendFrame,
@@ -1318,6 +1328,20 @@ function parseStoredResponseSource(input: unknown): ResponseSource | undefined {
 
 const RECEIPT_REASONS: readonly string[] = ["not_in_turn", "queued", "seen"];
 
+/**
+ * 收件箱回执的落库解析（#1130）。与 parseStoredReceipts 同一条纪律：整列坏掉按「没有」处理，
+ * 绝不让附加元数据的损坏挡住一条真实消息。
+ */
+function parseStoredInboxReceipts(input: unknown): InboxReceipt[] | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    const receipts = normalizeInboxReceipts(JSON.parse(input) as unknown);
+    return receipts.length > 0 ? receipts : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 身份级回执游标（#828）。按 name 存，跨会话存活——episodic agent 每轮换一个会话。 */
 interface ReceiptMark {
   lastSeq: number;
@@ -1912,6 +1936,9 @@ export class ChannelDO extends Server<Env> {
       // 回执（#828）：存 Receipt[] 的 JSON，挂在被回执的消息上。它是元数据不是消息——不占 seq、
       // 不进正文流、不触发 delivery、不需要 ack。缺省 NULL = 无回执。
       "ALTER TABLE messages ADD COLUMN receipts_json TEXT",
+      // Claude 收件箱回执（#1130）：存 InboxReceipt[] 的 JSON，挂在被 @ 的那条消息上。同为元数据：
+      // 不占 seq、不触发 delivery、不进任何 @ 欠账记账。缺省 NULL = 没有回执（含策略 accept 的常态）。
+      "ALTER TABLE messages ADD COLUMN inbox_receipts_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -1922,6 +1949,11 @@ export class ChannelDO extends Server<Env> {
     // 幂等去重查询走 (sender_name, idempotency_key)；NULL 键（老客户端/非幂等发送）不进有效查询路径。
     sql.exec("CREATE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(sender_name, idempotency_key)");
     sql.exec("CREATE INDEX IF NOT EXISTS idx_messages_pending_decisions ON messages(decision_state, seq)");
+    // #1130：presence 序列化要查「哪些消息带收件箱回执」。部分索引只收录带回执的行（稀有），
+    // 查询条件与索引条件逐字相同（inbox_receipts_json IS NOT NULL）才会被选中。
+    sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_messages_inbox_receipts ON messages(seq) WHERE inbox_receipts_json IS NOT NULL",
+    );
     // 回执游标（#828）：按**身份**而非会话记「这个 name 最近回执到哪条」。
     // 必须独立于 presence 表——presence 主键含 session_id，而 episodic agent 的会话每轮就死一次，
     // 把回执挂在会话上等于每轮清零，恰好丢掉「对方知道这事、只是还没轮到」这个唯一有用的信号。
@@ -6922,6 +6954,127 @@ export class ChannelDO extends Server<Env> {
       this.broadcastPresenceFor(identity.name);
       return Response.json({ message: publicMsgFrame(message) });
     }
+    const inboxReceiptMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/inbox-receipt$/);
+    if (inboxReceiptMatch && request.method === "POST") {
+      // Claude 收件箱回执（#1130）。它只回答「这条唤醒注入被接收端的闸门扣了 / 拒了 / 放行了吗」，
+      // **不进任何记账**：下面只改 messages.inbox_receipts_json 这一列，绝不碰 directed_deliveries /
+      // wake_delivery_ledger / presence.wake_verified_at——@ 欠账只认对方的回复或 ack。
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
+      const seq = Number(inboxReceiptMatch[1]);
+      const identity: Identity = {
+        name: request.headers.get("x-ap-name") ?? "",
+        kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
+        role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
+        owner: request.headers.get("x-ap-owner") ?? undefined,
+        handle: decodedHeaderText(request.headers, "x-ap-handle"),
+        ...profileFromHeaders(request.headers),
+        lineage: lineageFromHeaders(request.headers),
+        tokenHash: request.headers.get("x-ap-token-hash") ?? "",
+        canWrite: request.headers.get("x-ap-can-write") === "1",
+        clientVersion: parseClientVersion(request.headers.get("x-ap-client-version")) ?? undefined,
+      };
+      if (identity.name === "") {
+        return Response.json({ error: { code: "forbidden", message: "inbox receipt requires an identified reporter" } }, { status: 403 });
+      }
+      // 写进频道持久状态的动作，参与门与回执（#828）/ handleSend 同口径。
+      if (await this.isParticipantRemoved(identity.name, identity.owner)) {
+        return Response.json({ error: { code: "unauthorized", message: "participant was removed from this channel" } }, { status: 403 });
+      }
+      if (this.getMeta("visibility") === "public_watch" && identity.canWrite !== true) {
+        return Response.json(
+          { error: { code: "unauthorized", message: "this channel is watch-only for non-members; inbox receipts require membership or an invite" } },
+          { status: 403 },
+        );
+      }
+      const body = (await request.json().catch(() => null)) as { target?: unknown; state?: unknown; reason?: unknown } | null;
+      // `accepted`（没有回执）不是一个可上报的状态：它不是已读回执，落库就会被读成「送达了」。
+      if (!isInboxReceiptState(body?.state)) {
+        return Response.json(
+          { error: { code: "bad_request", message: `state must be one of: ${INBOX_RECEIPT_STATES.join(", ")}` } },
+          { status: 400 },
+        );
+      }
+      const state = body.state;
+      const target = typeof body?.target === "string" ? body.target.trim() : "";
+      if (target === "") {
+        return Response.json({ error: { code: "bad_request", message: "target is required" } }, { status: 400 });
+      }
+      const reason = typeof body?.reason === "string" ? inboxReceiptReasonLine(body.reason) : "";
+      if (byteLength(reason) > INBOX_RECEIPT_REASON_LIMIT) {
+        return Response.json(
+          { error: { code: "too_large", message: `reason exceeds ${INBOX_RECEIPT_REASON_LIMIT} bytes` } },
+          { status: 413 },
+        );
+      }
+      const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).toArray()[0];
+      if (!row) {
+        return Response.json({ error: { code: "not_found", message: `message seq ${seq} not found` } }, { status: 404 });
+      }
+      if (row.retracted_at !== null && row.retracted_at !== undefined) {
+        return Response.json({ error: { code: "bad_request", message: "retracted message cannot carry an inbox receipt" } }, { status: 400 });
+      }
+      // 只有这条消息真的 @ 了 target，才谈得上「给 target 的唤醒」。否则任何成员都能在任意消息上
+      // 给任意名字挂一条「没送达」。落库用消息里 mentions 的原样拼写，别让上报方的大小写进库。
+      const targetKey = mentionMatchKey(target);
+      const mentioned = parseStoredMentions(row.mentions_json).find((name) => mentionMatchKey(name) === targetKey);
+      if (mentioned === undefined) {
+        return Response.json(
+          { error: { code: "bad_request", message: "target is not mentioned by this message" } },
+          { status: 400 },
+        );
+      }
+      const now = Date.now();
+      const existing = parseStoredInboxReceipts(row.inbox_receipts_json) ?? [];
+      const previous = existing.find(
+        (receipt) => receipt.target === mentioned && receipt.reported_by.name === identity.name,
+      );
+      const transition = inboxReceiptTransition(previous?.state ?? null, state);
+      if (transition === "reject") {
+        // 终态只记一次：不回退、不改写。迟到的 / 乱序的 / 伪造的第二个终态一律拒。
+        return Response.json(
+          { error: { code: "conflict", message: `inbox receipt is already terminal (${previous!.state})` } },
+          { status: 409 },
+        );
+      }
+      if (transition === "noop") {
+        return Response.json({ message: publicMsgFrame(this.rowToFrame(row)), deduped: true });
+      }
+      if (previous === undefined && existing.length >= INBOX_RECEIPT_MAX_PER_MESSAGE) {
+        return Response.json(
+          { error: { code: "conflict", message: `this message already carries ${INBOX_RECEIPT_MAX_PER_MESSAGE} inbox receipts` } },
+          { status: 409 },
+        );
+      }
+      const heldAt = state === "held" ? now : previous?.held_at;
+      const next: InboxReceipt = {
+        target: mentioned,
+        state,
+        // 只存展示用得到的身份字段：owner（邮箱）/ 头像 / 血缘不进这条元数据。
+        reported_by: {
+          name: identity.name,
+          kind: identity.kind,
+          ...(identity.handle === undefined ? {} : { handle: identity.handle }),
+          ...(identity.displayName === undefined ? {} : { display_name: identity.displayName }),
+        },
+        ...(reason === "" ? {} : { reason }),
+        ...(heldAt === undefined ? {} : { held_at: heldAt }),
+        ts: now,
+      };
+      const receipts = [...existing.filter((receipt) => receipt !== previous), next].sort((left, right) => left.ts - right.ts);
+      this.ctx.storage.sql.exec(
+        "UPDATE messages SET inbox_receipts_json = ?, rev_seq = ? WHERE seq = ?",
+        JSON.stringify(receipts),
+        this.nextRevSeq(),
+        seq,
+      );
+      const message = this.rowToFrame(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one());
+      // 复用既有的 "receipt" 动作词：message_update 的 action 联合在 CLI 里是手抄镜像（#622），
+      // 新增一个词会让所有未升级客户端把整帧静默丢掉。语义上这就是「消息的回执元数据变了」。
+      this.broadcastFrame(this.messageUpdate("receipt", identity, message, now));
+      // who 上「欠着的 @ 被扣 / 没送达」的标注跟着变。
+      this.broadcastPresenceFor(mentioned);
+      return Response.json({ message: publicMsgFrame(message) });
+    }
     const reviewMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/review$/);
     if (reviewMatch && request.method === "POST") {
       this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
@@ -10494,6 +10647,7 @@ export class ChannelDO extends Server<Env> {
                 sender_owner = NULL, sender_lineage_json = NULL, sender_role = NULL, sender_role_source = NULL,
                 sender_handle = NULL, sender_display_name = NULL, sender_avatar_url = NULL, sender_avatar_thumb = NULL,
                 attachments_json = NULL, edited_by = NULL, retracted_by = NULL, idempotency_key = NULL,
+                inbox_receipts_json = NULL,
                 rev_seq = ?
           WHERE seq = ?`,
         revSeq,
@@ -10501,6 +10655,20 @@ export class ChannelDO extends Server<Env> {
       );
         // #913：擦除同撤回，mentions 已清空，索引行一并清掉。
         this.dropMentionIndex(seq);
+      }
+      // #1130：别人消息上的收件箱回执里，凡是以该身份为目标或由它上报的条目一并摘掉。
+      for (const row of sql
+        .exec("SELECT seq, inbox_receipts_json FROM messages WHERE inbox_receipts_json IS NOT NULL")
+        .toArray()) {
+        const receipts = parseStoredInboxReceipts(row.inbox_receipts_json) ?? [];
+        const kept = receipts.filter((receipt) => receipt.target !== name && receipt.reported_by.name !== name);
+        if (kept.length === receipts.length) continue;
+        sql.exec(
+          "UPDATE messages SET inbox_receipts_json = ?, rev_seq = ? WHERE seq = ?",
+          kept.length === 0 ? null : JSON.stringify(kept),
+          this.nextRevSeq(),
+          Number(row.seq),
+        );
       }
       audit_deleted = countOne(
         `SELECT COUNT(*) AS n FROM message_audit
@@ -12686,6 +12854,7 @@ export class ChannelDO extends Server<Env> {
     const serveCounts = this.serveCandidateCounts();
     const waitingOwnerCounts = this.waitingOwnerCounts();
     const unhandledMentionDebt = this.unhandledMentionDebt();
+    const inboxPending = this.inboxPendingByTarget(unhandledMentionDebt);
     const receiptMarks = this.receiptMarks();
     const liveSessions = this.livePresenceSessions();
     const rows = this.ctx.storage.sql
@@ -12711,6 +12880,7 @@ export class ChannelDO extends Server<Env> {
             listeningStreaks,
             unhandledMentionDebt,
             receiptMarks,
+            inboxPending,
           ),
           idleWatches,
         ),
@@ -12725,6 +12895,7 @@ export class ChannelDO extends Server<Env> {
     const serveCounts = this.serveCandidateCounts();
     const waitingOwnerCounts = this.waitingOwnerCounts();
     const unhandledMentionDebt = this.unhandledMentionDebt();
+    const inboxPending = this.inboxPendingByTarget(unhandledMentionDebt);
     const receiptMarks = this.receiptMarks();
     const liveSessions = this.livePresenceSessions();
     const rows = this.ctx.storage.sql
@@ -12740,6 +12911,7 @@ export class ChannelDO extends Server<Env> {
           this.listeningStreaks(),
           unhandledMentionDebt,
           receiptMarks,
+          inboxPending,
         ),
         this.idleWatchesBySubscriber(),
       );
@@ -12977,6 +13149,7 @@ export class ChannelDO extends Server<Env> {
     listeningStreaks?: Map<string, number>,
     unhandledMentionDebt?: Map<string, { count: number; oldestSeq: number; seqs: number[] }>,
     receiptMarks?: Map<string, ReceiptMark>,
+    inboxPending?: Map<string, InboxPendingMention[]>,
   ): PresenceEntry {
     const count = liveCounts.get(entry.name) ?? 0;
     const live = applyLiveConnection(entry, count > 0);
@@ -13002,7 +13175,12 @@ export class ChannelDO extends Server<Env> {
     // 不是 deaf。streak 1 次 = suspect，连续 ≥2 次 = deaf。缺省 = 无恙。
     const streak = count > 0 ? (listeningStreaks?.get(entry.name) ?? 0) : 0;
     const listening: ListeningVerdict | null = streak >= 2 ? "deaf" : streak === 1 ? "suspect" : null;
-    const withListening = listening === null ? withMentionDebt : { ...withMentionDebt, listening };
+    // #1130：欠着的 @ 里，被收件箱闸门扣留 / 证明没送达 / 结局不明的那几条。只是给欠账加注解——
+    // 欠账本身（上面的 pending_mention_seqs）完全不因回执增减。
+    const inboxNotes = inboxPending?.get(entry.name);
+    const withInbox =
+      inboxNotes === undefined || inboxNotes.length === 0 ? withMentionDebt : { ...withMentionDebt, inbox_pending: inboxNotes };
+    const withListening = listening === null ? withInbox : { ...withInbox, listening };
     // 回执游标（#828）：**不受 live/offline 影响**——「对方知道这事、只是还没轮到」恰恰是在对方没有活
     // 连接时最该被看到的信号。episodic agent 回执完那一轮就结束了，若跟着 live 一起消失就白记了。
     const mark = receiptMarks?.get(entry.name);
@@ -13106,6 +13284,39 @@ export class ChannelDO extends Server<Env> {
       });
     }
     return entries;
+  }
+
+  // #1130：把收件箱回执叠到欠账上。只看**仍欠着**的 seq（pending_mention_seqs，已封顶）——对方一回复，
+  // seq 离开欠账，这条注解自然消失；回执本身从不让一条 @ 离开欠账。`delivered` 不列：消息已进对话，
+  // 只是还没回，那正是 pending_mention_seqs 已经在说的事。
+  private inboxPendingByTarget(
+    debt: Map<string, { count: number; oldestSeq: number; seqs: number[] }>,
+  ): Map<string, InboxPendingMention[]> {
+    const out = new Map<string, InboxPendingMention[]>();
+    const wanted = new Set<number>();
+    for (const entry of debt.values()) for (const seq of entry.seqs) wanted.add(seq);
+    if (wanted.size === 0) return out;
+    const bySeq = new Map<number, InboxReceipt[]>();
+    // 回执是稀有事件：走 idx_messages_inbox_receipts 这个部分索引只读带回执的行，再按欠账 seq 过滤
+    // （不把几百个 seq 拼进 IN 列表，也不为每次 presence 序列化扫整张 messages）。
+    for (const row of this.ctx.storage.sql
+      .exec("SELECT seq, inbox_receipts_json FROM messages WHERE inbox_receipts_json IS NOT NULL")
+      .toArray()) {
+      const seq = Number(row.seq);
+      if (!wanted.has(seq)) continue;
+      const receipts = parseStoredInboxReceipts(row.inbox_receipts_json);
+      if (receipts !== undefined) bySeq.set(seq, receipts);
+    }
+    if (bySeq.size === 0) return out;
+    for (const [name, entry] of debt) {
+      const notes: InboxPendingMention[] = [];
+      for (const seq of entry.seqs) {
+        const receipt = inboxReceiptFor(bySeq.get(seq), name);
+        if (receipt !== null && receipt.state !== "delivered") notes.push({ seq, state: receipt.state });
+      }
+      if (notes.length > 0) out.set(name, notes);
+    }
+    return out;
   }
 
   private unhandledMentionDebt(): Map<string, { count: number; oldestSeq: number; seqs: number[] }> {
@@ -13317,6 +13528,8 @@ export class ChannelDO extends Server<Env> {
       if (responseSource !== undefined) frame.response_source = responseSource;
       const receipts = parseStoredReceipts(r.receipts_json);
       if (receipts !== undefined) frame.receipts = receipts;
+      const inboxReceipts = parseStoredInboxReceipts(r.inbox_receipts_json);
+      if (inboxReceipts !== undefined) frame.inbox_receipts = inboxReceipts;
     }
     if (r.edited_at !== null && r.edited_at !== undefined) {
       frame.edited = true;

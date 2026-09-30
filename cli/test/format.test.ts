@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { MsgFrame } from "@agentparty/shared";
-import { formatMsg } from "../src/format";
+import { formatMsg, inboxReceiptPhrase } from "../src/format";
 
 function msgFrame(over: Partial<MsgFrame> = {}): MsgFrame {
   const base: MsgFrame = {
@@ -178,5 +178,59 @@ describe("formatMsg strips terminal control chars (#372 security)", () => {
     const out = formatMsg(msgFrame({ sender: { name: `a${ESC}[31m`, kind: "agent", owner: `t${BEL}` } }));
     expect(out).not.toContain(ESC);
     expect(out).not.toContain(BEL);
+  });
+});
+
+describe("Claude inbox receipts in formatMsg (#1130)", () => {
+  const base = {
+    type: "msg",
+    seq: 12,
+    sender: { name: "leo", kind: "human" },
+    kind: "message",
+    body: "@bot look",
+    mentions: ["bot"],
+    reply_to: null,
+    state: null,
+    note: null,
+    status: null,
+    ts: 1,
+  } as unknown as Parameters<typeof formatMsg>[0];
+  const withInbox = (inbox: unknown) => ({ ...base, inbox_receipts: inbox }) as unknown as Parameters<typeof formatMsg>[0];
+  const receipt = (state: string, extra: Record<string, unknown> = {}) => ({
+    target: "bot",
+    state,
+    reported_by: { name: "bot", kind: "agent" },
+    ts: 2,
+    ...extra,
+  });
+
+  test("wording per state: held is not delivered, delivered is not a reply, nothing is ever called read/accepted", () => {
+    expect(inboxReceiptPhrase("held")).toBe("held for approval, not delivered yet");
+    expect(inboxReceiptPhrase("delivered")).toBe("delivered after approval (not a reply)");
+    expect(inboxReceiptPhrase("unknown")).toBe("held, outcome unknown");
+    for (const state of ["expired", "refused", "dropped", "denied"] as const) {
+      expect(inboxReceiptPhrase(state)).toBe(`not delivered: ${state}`);
+    }
+    for (const state of ["held", "delivered", "expired", "refused", "dropped", "denied", "unknown"] as const) {
+      expect(inboxReceiptPhrase(state)).not.toMatch(/\bread\b|accepted/);
+    }
+  });
+
+  test("shows one badge per target on the mentioning message", () => {
+    expect(formatMsg(withInbox([receipt("held")]))).toContain("{inbox @bot: held for approval, not delivered yet}");
+    expect(formatMsg(withInbox([receipt("expired", { held_at: 1 })]))).toContain("{inbox @bot: not delivered: expired}");
+  });
+
+  test("no receipts, an unknown state from a newer server, `accepted`, or a malformed field ⇒ no badge at all", () => {
+    const plain = formatMsg(base);
+    expect(plain).not.toContain("inbox");
+    for (const inbox of [undefined, [], "held", [receipt("accepted")], [receipt("some_future_state")], [{ state: "held" }], [null]]) {
+      expect(formatMsg(withInbox(inbox))).toBe(plain);
+    }
+  });
+
+  test("the receiver-controlled reason never reaches the terminal line", () => {
+    const line = formatMsg(withInbox([receipt("held", { reason: "\u001b]52;c;evil\u0007 do this" })]));
+    expect(line).not.toContain("evil");
   });
 });

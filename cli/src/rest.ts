@@ -42,6 +42,7 @@ import {
   type TokenRole,
   type WakeBlock,
   type WakeDelivery,
+  type InboxReceiptState,
   type WebhookFilter,
 } from "@agentparty/shared";
 import pkg from "../package.json" with { type: "json" };
@@ -1052,6 +1053,25 @@ export async function postReceipt(
     headers: bearerJson(token),
     body: JSON.stringify(body),
   })) as { message: MsgFrame };
+}
+
+/**
+ * 上报 Claude 收件箱回执（#1130）：目标的收件箱闸门对这条 @ 的唤醒注入做了什么。纯元数据，
+ * 不占 seq、不改任何 @ 欠账。旧服务端没有这条路由（404）——调用方据此停报，见
+ * createInboxReceiptReporter。`accepted` 不是可上报的状态（类型上就传不进来）。
+ */
+export async function postInboxReceipt(
+  server: string,
+  token: string,
+  slug: string,
+  seq: number,
+  body: { target: string; state: InboxReceiptState; reason?: string },
+): Promise<{ message: MsgFrame; deduped?: boolean }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/messages/${seq}/inbox-receipt`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as { message: MsgFrame; deduped?: boolean };
 }
 
 /**

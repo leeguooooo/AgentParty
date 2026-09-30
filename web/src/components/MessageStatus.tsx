@@ -11,6 +11,16 @@ import "../i18n/strings/WakeReceipt";
 import type { ReadEntry } from "../lib/readList";
 import { fmtTime } from "../lib/time";
 import type { MentionReceipt, ReceiptState } from "../lib/wakeReceipt";
+import { inboxReceiptCounts, inboxReceiptRows, type InboxReceiptTone } from "../lib/inboxReceipt";
+
+// #1130：收件箱回执没有「成功」图标——held / unknown 是等待，没送达是失败，delivered 也只是
+// 「进了对话、还没回」，仍用等待图标。绿色的 success 只留给真正的回复。
+const INBOX_ICON: Record<InboxReceiptTone, string> = {
+  held: "waiting",
+  delivered: "waiting",
+  unknown: "waiting",
+  not_delivered: "failed",
+};
 
 const RECEIPT_ICON: Record<ReceiptState, string> = {
   replied: "success",
@@ -37,6 +47,8 @@ interface Props {
   unread: ReadEntry[];
   display: (name: string) => string;
   deliveries?: PublicDirectedDelivery[];
+  /** 帧上的 inbox_receipts 原始字段（#1130）；宽容解析，缺省/旧服务端 = 不渲染任何新内容。 */
+  inboxReceipts?: unknown;
   onOpenAgentDetail?: (name: string) => void;
   canOpenAgentDetail?: (name: string) => boolean;
 }
@@ -51,6 +63,7 @@ export function MessageStatus({
   unread,
   display,
   deliveries = [],
+  inboxReceipts,
   onOpenAgentDetail,
   canOpenAgentDetail,
 }: Props) {
@@ -60,7 +73,15 @@ export function MessageStatus({
   const deliveryTargets = useMemo(() => new Set(deliveries.map((delivery) => delivery.target_name)), [deliveries]);
   // v1 directed delivery is authoritative. Keep legacy wake receipts only for targets without a durable delivery row.
   const visibleReceipts = receipts.filter((receipt) => !deliveryTargets.has(receipt.name));
-  const hasDetails = hasRead || visibleReceipts.length > 0 || deliveries.length > 0;
+  // #1130：目标已回复（可靠投递 replied / 旧回执 replied）⇒ 它的收件箱回执只剩历史意义。
+  const inboxRows = useMemo(() => {
+    const replied = new Set<string>();
+    for (const delivery of deliveries) if (delivery.state === "replied") replied.add(delivery.target_name);
+    for (const receipt of receipts) if (receipt.state === "replied") replied.add(receipt.name);
+    return inboxReceiptRows(inboxReceipts, replied);
+  }, [inboxReceipts, deliveries, receipts]);
+  const inboxCounts = inboxReceiptCounts(inboxRows);
+  const hasDetails = hasRead || visibleReceipts.length > 0 || deliveries.length > 0 || inboxRows.length > 0;
   if (!hasDetails) return null;
 
   // pending_wake 的 detail 是唤醒方式（serve/watch…），给用户看要过一遍人话；其余状态的 detail 是 #seq / HTTP 码，原样。
@@ -100,6 +121,14 @@ export function MessageStatus({
       deliveries.filter((delivery) => delivery.state === "failed").length +
       visibleReceipts.filter((receipt) => receipt.state === "wake_failed").length;
     if (failed > 0) return { text: t("WakeReceipt.delivery.summary.failed", { n: failed }), tone: "attention" };
+    // #1130：收件箱证明「没送达」/「还扣着」时，摘要行直接说出来——发信人不展开也看得见。
+    // 排在「处理中 / 待送达」之前：那两句会让人以为消息已经在对方手里。
+    if (inboxCounts.notDelivered > 0) {
+      return { text: t("WakeReceipt.inbox.summary.notDelivered", { n: inboxCounts.notDelivered }), tone: "attention" };
+    }
+    if (inboxCounts.held > 0) {
+      return { text: t("WakeReceipt.inbox.summary.held", { n: inboxCounts.held }), tone: "attention" };
+    }
     const active =
       deliveries.filter((delivery) =>
         delivery.state === "queued" ||
@@ -231,6 +260,46 @@ export function MessageStatus({
                         {t("WakeReceipt.delivery.openAgent")}
                       </button>
                     )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {inboxRows.length > 0 && (
+            <section className="msg-status-group" data-inbox-receipts="">
+              <h4 className="msg-status-group-head">{t("WakeReceipt.inbox.section")}</h4>
+              <p className="msg-status-note">{t("WakeReceipt.inbox.note")}</p>
+              <ul className="msg-status-names">
+                {inboxRows.map((row) => (
+                  <li
+                    key={row.target}
+                    className={`msg-status-name msg-status-delivery-row msg-inbox--${row.tone}`}
+                    title={t("WakeReceipt.inbox.title", {
+                      name: display(row.target),
+                      state: t(`WakeReceipt.inbox.state.${row.state}`),
+                    })}
+                    data-inbox-state={row.state}
+                  >
+                    <span className={`msg-receipt-icon ap-sprite ap-sprite--${INBOX_ICON[row.tone]}`} aria-hidden="true" />
+                    <span className="msg-status-delivery-copy">
+                      <span className="msg-status-delivery-head">
+                        <span className="t-mono">{display(row.target)}</span>
+                        <span className="msg-status-name-state">{t(`WakeReceipt.inbox.state.${row.state}`)}</span>
+                      </span>
+                      <span className="msg-status-delivery-reason">{t(`WakeReceipt.inbox.hint.${row.tone}`)}</span>
+                      {/* 接收端给的原因是对方可控文本：只作为 React 文本节点渲染，绝不进 HTML。 */}
+                      {row.reason !== null && (
+                        <span className="msg-status-delivery-reason">{t("WakeReceipt.inbox.reason", { reason: row.reason })}</span>
+                      )}
+                      {row.reportedBy !== null && (
+                        <span className="msg-status-delivery-reason">
+                          {t("WakeReceipt.inbox.reportedBy", { name: display(row.reportedBy) })}
+                        </span>
+                      )}
+                      <time className="msg-status-delivery-time" dateTime={new Date(row.at).toISOString()}>
+                        {t("WakeReceipt.delivery.updated", { time: new Date(row.at).toLocaleString() })}
+                      </time>
+                    </span>
                   </li>
                 ))}
               </ul>

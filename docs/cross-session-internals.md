@@ -443,18 +443,86 @@ Two receiver-side checks shape the implementation:
   until the terminal receipt. open-cross-session's CLI is short-lived, so it hands the wake to a detached
   helper; `party serve` is long-lived and listens in-process.
 
-Where AgentParty uses receipts today: the `party serve` wake proxy (`cli/src/serve-wake-proxy.ts`,
-`cli/src/claude-inbox-receipt.ts`). The receipt never blocks the forward — the frame is written and the
-proxy returns as before — and the outcome is reported on the serve log: one line for `held`, one for the
-terminal state, one for an immediate `refused`/`dropped`/`denied`/`expired`; `accepted` logs nothing.
-After `held` the proxy waits up to 5 minutes + 60 seconds for the terminal receipt, ends early when the
+Two legs subscribe to receipts (`cli/src/claude-inbox-receipt.ts`), and both are long-lived processes that
+write the frame and listen in the same process:
+
+- the `party serve` wake proxy (`cli/src/serve-wake-proxy.ts`), which forwards an `@` to another Claude
+  session registered on the same machine;
+- the dormant announce leg (`party claude-channel`, `runDormantClaudeSessionAnnounce`), the MCP child of
+  the Claude session it wakes. Idle notices on this leg are injected without `from` and never subscribe:
+  notices produce no receipts.
+
+The receipt never blocks the inject — the frame is written and the caller continues as before. After
+`held` the listener waits up to 5 minutes + 60 seconds for the terminal receipt, ends early when the
 receiving session disappears, and records `unknown` otherwise.
 
-Receipts are not available, and the inject is byte-for-byte what it was before (no `from`, no listener),
-on Windows (the reply address would have to be a named pipe carrying authentication material),
-when `AGENTPARTY_NO_CLAUDE_RECEIPTS=1`, when the listener cannot be created, and on the dormant
-announce leg, which does not subscribe yet.
+#### Where the outcome is shown
 
-Receipts do not change any accounting. A `held` or `expired` receipt is shown to the operator; it does
-not clear, retry, or re-route the mention, and `accepted` is never treated as a reply. Wake, ack and
-stuck accounting still follow the receiver's own reply on the channel.
+Each receipt other than `accepted` is posted to the channel as metadata on **the message that carried the
+mention** (`POST /api/channels/:slug/messages/:seq/inbox-receipt`, body `{target, state, reason?}`). Like
+`party receipt`, it takes no seq, triggers no delivery and needs no ack. The sender sees it:
+
+| Surface | What it shows |
+|---|---|
+| Web, on the sender's own message | Collapsed status line: `N held for approval` / `N not delivered`. Expanded: a "Claude inbox" group with one row per target |
+| `party history` | A badge on the message: `{inbox @bot: held for approval, not delivered yet}`, `{inbox @bot: not delivered: expired}`, `{inbox @bot: delivered after approval (not a reply)}`, `{inbox @bot: held, outcome unknown}` |
+| `party who` | Next to the target's `⚠ N unhandled @` note: `✉ inbox: #12 held for approval, not delivered yet; #15 not delivered: expired` (JSON field `inbox_pending`) |
+| Local log (serve output / MCP stderr) | One line per receipt, as before |
+
+`accepted` is never posted, stored or shown. No receipt is not a read receipt, and nothing in any surface
+renders it — or `delivered` — as "read" or "replied".
+
+Server rules: the reporter is taken from the bearer token and stored as `reported_by`; the target must be
+one of the message's mentions; `reason` is receiver-controlled text, collapsed to one line and rejected
+above 200 bytes; at most 16 entries per message, one per (target, reporter). When the target itself and a
+relay both report, the target's own report is the one shown.
+
+Reporting is one-shot: at most one `held` and one terminal report per (message, target), no retry, and the
+report itself never subscribes to anything. A lost `held` report does not block the terminal one.
+
+#### State machine
+
+Recorded state per (message, target, reporter), enforced by the server
+(`inboxReceiptTransition` in `shared/src/protocol.ts`):
+
+| Recorded | Reported | Result |
+|---|---|---|
+| nothing | any state | recorded |
+| `held` | `held` | no change |
+| `held` | `delivered` / `expired` / `refused` / `dropped` / `denied` / `unknown` | recorded; `held_at` is kept |
+| terminal `X` | `X` | no change (idempotent) |
+| terminal `X` | anything else | refused with 409 — a terminal state is recorded once |
+
+What each state does to accounting. The rule is unchanged: **only the target's own reply or ack settles a
+mention.**
+
+| State | Server `@` debt (`pending_mention_seqs`, directed delivery, wake ledger, wake-verified) | Dormant announce leg: wake claim + in-process seq dedupe | `party serve` wake proxy |
+|---|---|---|---|
+| `accepted` (no receipt) | unchanged | kept — identical to a build without receipts | unchanged |
+| `held` | unchanged — the mention stays owed | kept. The message is parked, not consumed; it is not sent a second time while held, and a sibling runtime cannot claim it | unchanged |
+| `delivered` | unchanged — entering the conversation is not an ack | kept | unchanged |
+| `expired` / `refused` / `dropped` / `denied` | unchanged — this proves non-delivery, so the debt stays | the claim is released and the seq un-marked, **exactly once**. The leg does not re-inject on its own | unchanged |
+| `unknown` | unchanged | kept. An unknown outcome is never replayed | unchanged |
+
+After a release the mention is picked up by the paths that already exist: the server still lists it in the
+target's `pending_mention_seqs`, so a Stop-hook pull, `party watch`, a live bridge or `party serve` for
+that identity handles it like any other owed mention, and a sibling dormant runtime can claim it if the
+frame reaches it again. Nothing new retries.
+
+The serve wake proxy stays purely additive: its result is still discarded by `serve`, whose own
+wake / ack / stuck accounting covers only mentions of its own identity.
+
+#### When receipts are unavailable
+
+The inject is byte-for-byte what it was before (no `from`, no listener), nothing is posted and no new
+state is shown:
+
+- on Windows (the reply address would have to be a named pipe carrying authentication material);
+- when `AGENTPARTY_NO_CLAUDE_RECEIPTS=1`;
+- when the listener cannot be created;
+- when 16 listeners are already pending in the process.
+
+Compatibility: a server without the route answers 404, and the CLI stops reporting for the rest of that
+process (receipts stay in the local log). An older CLI or web client ignores the `inbox_receipts` and
+`inbox_pending` fields; the live update reuses the existing `message_update` action `receipt`, so older
+clients keep the frame. Readers skip states they do not know.

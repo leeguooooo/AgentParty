@@ -11,6 +11,7 @@ import {
   taskNote,
   terminalIdentityText,
   unhandledMentionNote,
+  inboxPendingNote,
   buildRows,
   renderRow,
   waitingOwnerNote,
@@ -387,6 +388,50 @@ describe("who busy + queue depth (#103)", () => {
     );
     expect(row).toMatchObject({ pending_mention_seqs: [416, 417, 421] });
     expect(unhandledMentionNote(row!)).toBe(" · ⚠ 3 unhandled @ #416 #417 #421");
+  });
+
+  // #1130：欠着的 @ 里，被目标的 Claude 收件箱扣留 / 没送达的那几条——解释欠账，不改欠账。
+  test("inbox_pending 紧跟欠账标注，措辞区分「扣留未送达」与「没送达」；欠账本身原样", () => {
+    const row = classify(
+      p({
+        name: "bot",
+        state: "offline",
+        unhandled_mention_count: 2,
+        pending_mention_seqs: [416, 417],
+        inbox_pending: [
+          { seq: 416, state: "held" },
+          { seq: 417, state: "expired" },
+        ],
+      } as Parameters<typeof p>[0]),
+      NOW,
+    );
+    expect(unhandledMentionNote(row!)).toBe(" · ⚠ 2 unhandled @ #416 #417");
+    expect(inboxPendingNote(row!)).toBe(
+      " · ✉ inbox: #416 held for approval, not delivered yet; #417 not delivered: expired",
+    );
+  });
+
+  test("inbox_pending 宽容解析：未知状态 / accepted / 坏项跳过；没有欠账或旧服务端（无字段）⇒ 不标注", () => {
+    const row = classify(
+      p({
+        name: "bot",
+        state: "offline",
+        unhandled_mention_count: 1,
+        pending_mention_seqs: [416],
+        inbox_pending: [{ seq: 416, state: "accepted" }, { seq: 416, state: "future" }, { seq: -1, state: "held" }, null, "x"],
+      } as unknown as Parameters<typeof p>[0]),
+      NOW,
+    );
+    expect(row!.inbox_pending).toBeUndefined();
+    expect(inboxPendingNote(row!)).toBe("");
+    const old = classify(p({ name: "bot", state: "offline", unhandled_mention_count: 1, pending_mention_seqs: [416] }), NOW);
+    expect(inboxPendingNote(old!)).toBe("");
+    // 没有欠账时即使带了字段也不展示（服务端只给仍欠着的 seq 下发）。
+    const settled = classify(
+      p({ name: "bot", state: "offline", inbox_pending: [{ seq: 416, state: "held" }] } as Parameters<typeof p>[0]),
+      NOW,
+    );
+    expect(inboxPendingNote(settled!)).toBe("");
   });
 
   test("列表被服务端上限截断时如实说还有多少条没列出来", () => {

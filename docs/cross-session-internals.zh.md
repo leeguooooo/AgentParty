@@ -347,13 +347,75 @@ Claude Code 用原生回执（`peer_message_status`，2.1.285 实测，未文档
   是监听者，并且活到终态回执到来。open-cross-session 的 CLI 是一次性进程，只能把唤醒交给脱离终端的 helper；
   `party serve` 本身常驻，直接在本进程监听。
 
-AgentParty 目前用到回执的地方：`party serve` 的唤醒代理（`cli/src/serve-wake-proxy.ts`、
-`cli/src/claude-inbox-receipt.ts`）。回执不阻塞转投——帧照旧写完即返回——结果打在 serve 日志里：`held` 一行，
-终态一行，第一时间的 `refused` / `dropped` / `denied` / `expired` 一行；`accepted` 不打。`held` 之后最多等
-5 分钟 + 60 秒的终态，接收端会话消失时提前结束，到点仍无终态记为 `unknown`。
+订阅回执的有两条腿（`cli/src/claude-inbox-receipt.ts`），都是常驻进程，写帧和监听在同一个进程里：
 
-以下情况没有回执，注入与之前逐字节相同（不带 `from`、不建监听）：Windows（回执地址得是命名管道，还要带认证材料）、
-`AGENTPARTY_NO_CLAUDE_RECEIPTS=1`、监听建不起来，以及蛰伏 announce 腿（尚未订阅）。
+- `party serve` 的唤醒代理（`cli/src/serve-wake-proxy.ts`）：把 `@` 转投给本机入册的另一个 Claude 会话；
+- 蛰伏 announce 腿（`party claude-channel`，`runDormantClaudeSessionAnnounce`）：它是被唤醒的那个 Claude 会话的
+  MCP 子进程。这条腿上的空闲通知注入不带 `from`，永远不订阅——通知不产生回执。
 
-回执不改变任何记账。`held` / `expired` 只是给运维看的；它不会清掉、重试或改投这条 @，`accepted` 也绝不当作
-对方已回复。wake / ack / stuck 记账仍然只认接收端在频道里的回话。
+回执不阻塞注入：帧照旧写完即返回。`held` 之后最多等 5 分钟 + 60 秒的终态，接收端会话消失时提前结束，
+到点仍无终态记为 `unknown`。
+
+#### 结果显示在哪
+
+除 `accepted` 外的每条回执都上报到频道，作为**带 @ 的那条消息**的元数据
+（`POST /api/channels/:slug/messages/:seq/inbox-receipt`，请求体 `{target, state, reason?}`）。和 `party receipt`
+一样，它不占 seq、不触发 delivery、不需要 ack。发信人在这些地方看得到：
+
+| 位置 | 显示内容 |
+|---|---|
+| 网页，发信人自己的那条消息 | 折叠状态行：`N 位被扣留待审` / `N 位未送达`。展开后有「Claude 收件箱」一组，每个目标一行 |
+| `party history` | 消息上的徽标：`{inbox @bot: held for approval, not delivered yet}`、`{inbox @bot: not delivered: expired}`、`{inbox @bot: delivered after approval (not a reply)}`、`{inbox @bot: held, outcome unknown}` |
+| `party who` | 紧跟目标的 `⚠ N unhandled @`：`✉ inbox: #12 held for approval, not delivered yet; #15 not delivered: expired`（JSON 字段 `inbox_pending`） |
+| 本机日志（serve 输出 / MCP stderr） | 每条回执一行，同以前 |
+
+`accepted` 不上报、不落库、不显示。没有回执不是已读回执；任何位置都不会把它或 `delivered` 显示成「已读」「已回复」。
+
+服务端规则：上报者取自 bearer token，存为 `reported_by`；目标必须是这条消息 mentions 里的名字；`reason` 是接收端
+可控文本，压成一行，超过 200 字节拒收；每条消息最多 16 条，每个（目标，上报者）一条。目标自己和中转方都上报时，
+显示目标自己报的那条。
+
+上报是一次性的：每个（消息，目标）至多一次 `held`、一次终态，不重试，上报本身不订阅任何东西。`held` 的上报丢了
+不妨碍终态落库。
+
+#### 状态机
+
+每个（消息，目标，上报者）记录一个状态，由服务端裁决（`shared/src/protocol.ts` 的 `inboxReceiptTransition`）：
+
+| 已记录 | 新上报 | 结果 |
+|---|---|---|
+| 无 | 任意状态 | 记录 |
+| `held` | `held` | 不变 |
+| `held` | `delivered` / `expired` / `refused` / `dropped` / `denied` / `unknown` | 记录；`held_at` 保留 |
+| 终态 `X` | `X` | 不变（幂等） |
+| 终态 `X` | 其它 | 409 拒绝——终态只记一次 |
+
+各状态对记账的影响。铁律不变：**只有目标自己的回复或 ack 才了结一条 @。**
+
+| 状态 | 服务端 `@` 欠账（`pending_mention_seqs`、directed delivery、wake 台账、wake-verified） | 蛰伏 announce 腿：唤醒认领 + 进程内 seq 去重 | `party serve` 唤醒代理 |
+|---|---|---|---|
+| `accepted`（没有回执） | 不变 | 保留——与没有回执功能时完全相同 | 不变 |
+| `held` | 不变——这条 @ 仍欠着 | 保留。消息被扣着，不算已消费；扣留期间不会再投一次，同身份的别的 runtime 也抢不到 | 不变 |
+| `delivered` | 不变——进了对话不等于 ack | 保留 | 不变 |
+| `expired` / `refused` / `dropped` / `denied` | 不变——这证明没送达，欠账留着 | 让出认领、撤掉 seq 标记，**恰好一次**。这条腿自己不重新注入 | 不变 |
+| `unknown` | 不变 | 保留。结局不明的唤醒绝不重放 | 不变 |
+
+让出之后由已有的路径接手：服务端仍把它列在目标的 `pending_mention_seqs` 里，所以该身份的 Stop hook 拉取、
+`party watch`、live bridge 或 `party serve` 会像处理任何一条欠着的 @ 那样处理它；这一帧再次到达时，同身份的
+别的蛰伏 runtime 也可以认领。没有新增任何重试。
+
+serve 的唤醒代理仍是纯增量：它的返回值照旧被 `serve` 丢弃，`serve` 自己的 wake / ack / stuck 记账只管 @ 它自己
+身份的消息。
+
+#### 没有回执的情况
+
+注入与之前逐字节相同（不带 `from`、不建监听），不上报，也不显示任何新状态：
+
+- Windows（回执地址得是命名管道，还要带认证材料）；
+- `AGENTPARTY_NO_CLAUDE_RECEIPTS=1`；
+- 监听建不起来；
+- 本进程里已经挂着 16 个监听。
+
+兼容性：没有这条路由的服务端回 404，CLI 在本进程余下的时间里停止上报（回执仍在本机日志里）。旧版 CLI / 网页忽略
+`inbox_receipts` 和 `inbox_pending` 字段；实时更新复用已有的 `message_update` 动作 `receipt`，旧客户端不会丢帧。
+读取方跳过不认识的状态。

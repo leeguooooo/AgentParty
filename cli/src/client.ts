@@ -284,6 +284,9 @@ function isMessageFrame(value: unknown): boolean {
     (value.replay === undefined || value.replay === true) &&
     // #881「这条内容已过期」。与 replay 正交，可同时为真：replay=补拉的历史帧，superseded=内容已被取代。
     (value.superseded === undefined || isSupersededMark(value.superseded));
+  // #1130：`inbox_receipts` 与 `receipts` 一样是结构化元数据，这里**刻意不校验**——形状留给使用点的
+  // normalizeInboxReceipts 宽容解析（坏项 / 未知状态逐条跳过）。在这里校验，服务端哪天新增一个状态，
+  // 老 CLI 就会把整条消息帧静默丢掉（replay-frame-allowlist.test.ts 钉着）。
 }
 
 function isDirectedDelivery(value: unknown): boolean {

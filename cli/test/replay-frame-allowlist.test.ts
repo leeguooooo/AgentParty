@@ -47,6 +47,25 @@ describe("#861 replay 字段 wire 兼容", () => {
     expect(msgs[1]!.replay).toBeUndefined();
   });
 
+  test("#1130 inbox_receipts：任何形状都不让消息帧被丢——未知状态、坏项、甚至不是数组", async () => {
+    const shapes: unknown[] = [
+      [{ target: "bot", state: "held", reported_by: { name: "bot", kind: "agent" }, ts: 1 }],
+      [{ target: "bot", state: "state_from_a_newer_server", reported_by: { name: "bot" }, ts: 1 }],
+      [null, 3, { nope: true }],
+      "not-an-array",
+      { also: "not an array" },
+    ];
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(shapes.length));
+      shapes.forEach((inbox_receipts, index) => sock.send({ ...msgFrame(index + 1, "@bot hi"), inbox_receipts }));
+    });
+    conn = connect(server.url, "ap_tok", "dev", 0, { backoffBaseMs: 20 });
+    const frames = await collect(conn, shapes.length + 1);
+    const msgs = frames.filter((f) => f.type === "msg") as Array<{ seq: number }>;
+    expect(msgs.map((m) => m.seq)).toEqual(shapes.map((_, index) => index + 1));
+  });
+
   test("replay 只接受 true —— 任意其它取值判为非法帧", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type !== "hello") return;
@@ -84,7 +103,7 @@ describe("#622 allow-list 逐字镜像守卫", () => {
     const structured = new Set([
       "workflow_ref", "role", "role_source", "completion_artifact", "completion_review",
       "decision_request", "decision_resolution", "decision_response", "attachments",
-      "response_source", "receipts", "revision",
+      "response_source", "receipts", "inbox_receipts", "revision",
     ]);
     // 必须按标识符边界匹配，不能用 includes：`value.superseded_by` 的存在会让 `superseded`
     // 这个字段名「看起来已镜像」，守卫就对整类前缀重叠的新字段失效（实测：删掉 superseded 的
