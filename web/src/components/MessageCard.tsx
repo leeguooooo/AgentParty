@@ -887,6 +887,7 @@ function MessageCardImpl({
       <MessageStatus
         receipts={receipts ?? []}
         deliveries={deliveries ?? []}
+        inboxReceipts={msg.inbox_receipts}
         readers={read.readers}
         unread={read.unread}
         display={(name) => identityLabel(name)}

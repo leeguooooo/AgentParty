@@ -5939,6 +5939,20 @@ button.org-person-name {
 .msg-receipt--wake_failed .msg-receipt-label {
   color: #b3261e;
 }
+/* #1130 Claude 收件箱回执：没送达＝失败色；扣留 / 结局未知 / 已获批（未回复）＝等待色。
+   刻意没有绿色——绿色只留给真正的回复。 */
+.msg-inbox--not_delivered .msg-receipt-icon,
+.msg-inbox--not_delivered .msg-status-name-state {
+  color: #b3261e;
+}
+.msg-inbox--held .msg-receipt-icon,
+.msg-inbox--held .msg-status-name-state,
+.msg-inbox--unknown .msg-receipt-icon,
+.msg-inbox--unknown .msg-status-name-state,
+.msg-inbox--delivered .msg-receipt-icon,
+.msg-inbox--delivered .msg-status-name-state {
+  color: var(--t-accent, #b4552d);
+}
 .msg-delivery--queued .msg-receipt-icon,
 .msg-delivery--queued .msg-receipt-label,
 .msg-delivery--claimed .msg-receipt-icon,

@@ -8,6 +8,8 @@ import { CLAUDE_NATIVE_SESSIONS_DIR_ENV, CROSS_SESSION_TAG } from "../src/claude
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
 import { wakeProxyNoteFromId } from "../src/serve-wake-proxy";
 import { resetWakeLangCache } from "../src/wake-note-i18n";
+import type { InboxReceiptEvent, InboxReceiptStatus } from "../src/claude-inbox-receipt";
+import { claimMentionWake } from "../src/mention-wake-claim";
 import {
   IDLE_NOTICE_FROM_NAME,
   dormantAnnounceDisplayName,
@@ -1104,7 +1106,9 @@ describe("注入正文的内容与语言（#1003）", () => {
     process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV] = dir;
     try {
       resetWakeLangCache();
-      const { deps, connections } = makeDeps({ now: () => NOW, fetchReceiverBodies: async () => ["on it"] });
+      // receipts:false：这条用例钉的是「不带回执时的帧」逐字形状；带回执时包装标签多一个 from 属性，
+      // 那一面由 claude-inbox-receipt.test.ts 与下方 #1130 的用例覆盖。
+      const { deps, connections } = makeDeps({ now: () => NOW, fetchReceiverBodies: async () => ["on it"], receipts: false });
       const head = "please run the acceptance:\n  1. `bun test`\n  2. paste the \"injected\" frame\n\n";
       const body = head + "x".repeat(300 - Buffer.byteLength(head, "utf8"));
       expect(Buffer.byteLength(body, "utf8")).toBe(300);
@@ -1168,5 +1172,323 @@ describe("注入正文的内容与语言（#1003）", () => {
     expect(calls).toHaveLength(2);
     expect(fetches).toBe(1);
     expect(calls.every((call) => call.body.startsWith("[AgentParty 唤醒]"))).toBe(true);
+  });
+});
+
+describe("蛰伏腿订阅 Claude 收件箱回执（#1130）", () => {
+  type Emit = (event: InboxReceiptEvent) => void;
+
+  /** 一条开了回执的蛰伏腿：假的 injectWithReceipt 把 onReceipt 交给测试手动触发。 */
+  function receiptLeg(overrides: Partial<DormantAnnounceDeps> = {}) {
+    const emits = new Map<number, Emit>();
+    const injects: { seq: number; input: Record<string, unknown> }[] = [];
+    const reports: { channel: string; seq: number; target: string; status: InboxReceiptStatus }[] = [];
+    const releases: number[] = [];
+    const wakeClaimDir = mkdtempSync(join(tmpdir(), "announce-receipt-claims-"));
+    const made = makeDeps({
+      receipts: true,
+      wakeClaimDir,
+      runtimeId: "runtime-a",
+      receiptRegistryDir: mkdtempSync(join(tmpdir(), "announce-receipt-reg-")),
+      injectWithReceipt: (async (input: { body: string }, options: { onReceipt?: Emit }) => {
+        const seq = Number(/seq (\d+)/.exec(input.body)?.[1]);
+        injects.push({ seq, input: input as unknown as Record<string, unknown> });
+        emits.set(seq, options.onReceipt!);
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x", receipts: true };
+      }) as never,
+      inboxReceiptReporter: () => async (ref, event) => {
+        reports.push({ ...ref, status: event.status });
+      },
+      releaseWake: (claim) => {
+        releases.push(claim.holder.seq);
+        rmSync(claim.path, { force: true });
+        return true;
+      },
+      ...overrides,
+    });
+    /** 同身份的另一个 runtime 现在抢不抢得到这条 seq。 */
+    const siblingCanClaim = (seq: number) => {
+      const claim = claimMentionWake(
+        { server: SERVER, identity: SELF, channel: "dev", seq },
+        { dir: wakeClaimDir, runtimeId: "runtime-b" },
+      );
+      if (claim.state === "acquired") rmSync(claim.path, { force: true });
+      return claim.state === "acquired";
+    };
+    return { ...made, emits, injects, reports, releases, siblingCanClaim };
+  }
+
+  async function started(leg: ReturnType<typeof receiptLeg>) {
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, leg.deps);
+    await tick();
+    return {
+      push: async (frame: ServerFrame) => {
+        leg.connections[0]!.push(frame);
+        await tick();
+      },
+      stop: async () => {
+        abort.abort();
+        await done;
+      },
+    };
+  }
+
+  test("accepted：什么都不上报，认领与去重照旧（今天的行为）", async () => {
+    const leg = receiptLeg();
+    const run = await started(leg);
+    await run.push(msg(50, [SELF]));
+    leg.emits.get(50)!({ phase: "first", status: "accepted" });
+    await tick();
+    expect(leg.reports).toEqual([]);
+    expect(leg.releases).toEqual([]);
+    expect(leg.siblingCanClaim(50)).toBe(false);
+    await run.push(msg(50, [SELF]));
+    expect(leg.injects).toHaveLength(1);
+    await run.stop();
+  });
+
+  test("held：上报 held；认领保留（兄弟抢不到）、同一帧再来也不重投", async () => {
+    const leg = receiptLeg();
+    const run = await started(leg);
+    await run.push(msg(51, [SELF]));
+    leg.emits.get(51)!({ phase: "first", status: "held" });
+    await tick();
+    expect(leg.reports).toEqual([{ channel: "dev", seq: 51, target: SELF, status: "held" }]);
+    expect(leg.releases).toEqual([]);
+    expect(leg.siblingCanClaim(51)).toBe(false);
+    await run.push(msg(51, [SELF]));
+    expect(leg.injects).toHaveLength(1);
+    await run.stop();
+  });
+
+  for (const status of ["expired", "refused", "dropped", "denied"] as const) {
+    test(`held → ${status}：认领恰好让出一次、去重标记撤掉，本腿自己不重投`, async () => {
+      const leg = receiptLeg();
+      const run = await started(leg);
+      await run.push(msg(52, [SELF]));
+      leg.emits.get(52)!({ phase: "first", status: "held" });
+      leg.emits.get(52)!({ phase: "terminal", status });
+      // 重复 / 迟到的终态不许再让出一次。
+      leg.emits.get(52)!({ phase: "terminal", status });
+      await tick();
+      expect(leg.reports.map((report) => report.status)).toEqual(["held", status, status]);
+      expect(leg.releases).toEqual([52]);
+      expect(leg.siblingCanClaim(52)).toBe(true);
+      // 没有新的帧进来 ⇒ 没有第二次注入：让出不等于重放。
+      expect(leg.injects).toHaveLength(1);
+      // 去重标记已撤：同一条 @ 经既有路径（非重放帧）再来时可以重新认领并注入。
+      await run.push(msg(52, [SELF]));
+      expect(leg.injects).toHaveLength(2);
+      await run.stop();
+    });
+
+    test(`${status}（没经过 held 的即时结果）同样让出一次`, async () => {
+      const leg = receiptLeg();
+      const run = await started(leg);
+      await run.push(msg(53, [SELF]));
+      leg.emits.get(53)!({ phase: "first", status });
+      await tick();
+      expect(leg.releases).toEqual([53]);
+      expect(leg.siblingCanClaim(53)).toBe(true);
+      await run.stop();
+    });
+  }
+
+  test("没送达的回执先于注入成功的续体被处理：让出必须赢——标记不被写回、认领只让出一次", async () => {
+    // injectWithReceipt 在写帧之前就建好监听，终态回执可能在 inject 的 promise 续体之前就已处理完。
+    // 这里强制这个顺序：onReceipt 在返回 ok 之前同步触发。
+    const leg = receiptLeg({
+      injectWithReceipt: (async (input: { body: string }, options: { onReceipt?: Emit }) => {
+        const seq = Number(/seq (\d+)/.exec(input.body)?.[1]);
+        leg.injects.push({ seq, input: input as unknown as Record<string, unknown> });
+        options.onReceipt!({ phase: "first", status: "expired" });
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x", receipts: true };
+      }) as never,
+    });
+    const run = await started(leg);
+    await run.push(msg(58, [SELF]));
+    expect(leg.injects).toHaveLength(1);
+    expect(leg.releases).toEqual([58]);
+    expect(leg.siblingCanClaim(58)).toBe(true);
+    // 标记没有被成功分支写回：同一条 @ 再来时不被当成「已注入」跳过。
+    await run.push(msg(58, [SELF]));
+    expect(leg.injects).toHaveLength(2);
+    // 第二次同样是「没送达」：又是一次独立的认领与让出，各一次。
+    expect(leg.releases).toEqual([58, 58]);
+    await run.stop();
+  });
+
+  for (const status of ["delivered", "unknown"] as const) {
+    test(`held → ${status}：上报，认领与去重标记都保留（${status === "unknown" ? "结局不明绝不重放" : "已进对话"}）`, async () => {
+      const leg = receiptLeg();
+      const run = await started(leg);
+      await run.push(msg(54, [SELF]));
+      leg.emits.get(54)!({ phase: "first", status: "held" });
+      leg.emits.get(54)!({ phase: "terminal", status });
+      await tick();
+      expect(leg.reports.map((report) => report.status)).toEqual(["held", status]);
+      expect(leg.releases).toEqual([]);
+      expect(leg.siblingCanClaim(54)).toBe(false);
+      await run.push(msg(54, [SELF]));
+      expect(leg.injects).toHaveLength(1);
+      await run.stop();
+    });
+  }
+
+  test("回执把 lifecycle signal 与登记目录传给 injectWithReceipt；目标恒为本机频道身份", async () => {
+    let seen: Record<string, unknown> | null = null;
+    const leg = receiptLeg({
+      injectWithReceipt: (async (_input: unknown, options: Record<string, unknown>) => {
+        seen = options;
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x", receipts: true };
+      }) as never,
+    });
+    const run = await started(leg);
+    await run.push(msg(55, [SELF]));
+    expect(seen!.signal).toBeInstanceOf(AbortSignal);
+    expect(typeof seen!.registryDir).toBe("string");
+    await run.stop();
+  });
+
+  test("空闲通知永远不订阅回执（通知不产生回执）", async () => {
+    const plain: string[] = [];
+    const leg = receiptLeg({
+      inject: (async (input: { body: string }) => {
+        plain.push(input.body);
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x" };
+      }) as DormantAnnounceDeps["inject"],
+    });
+    const run = await started(leg);
+    await run.push({ type: "idle_notice", target: "text-to-voice", reason: "idle", busy_ms: 1000, ts: 1 } as ServerFrame);
+    expect(plain).toHaveLength(1);
+    expect(leg.injects).toHaveLength(0);
+    await run.stop();
+  });
+
+  test("回落：AGENTPARTY_NO_CLAUDE_RECEIPTS=1 ⇒ 真实 injectWithReceipt 走旧路径，帧不带 from / msg_id，不上报", async () => {
+    const inputs: Record<string, unknown>[] = [];
+    const leg = receiptLeg({
+      injectWithReceipt: undefined,
+      inject: (async (input: Record<string, unknown>) => {
+        inputs.push(input);
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x" };
+      }) as never,
+    });
+    const previous = process.env.AGENTPARTY_NO_CLAUDE_RECEIPTS;
+    process.env.AGENTPARTY_NO_CLAUDE_RECEIPTS = "1";
+    try {
+      const run = await started(leg);
+      await run.push(msg(56, [SELF]));
+      await tick(40);
+      expect(inputs).toHaveLength(1);
+      expect(inputs[0]!.fromSock).toBeUndefined();
+      expect(inputs[0]!.msgId).toBeUndefined();
+      expect(leg.reports).toEqual([]);
+      expect(leg.releases).toEqual([]);
+      await run.stop();
+    } finally {
+      if (previous === undefined) delete process.env.AGENTPARTY_NO_CLAUDE_RECEIPTS;
+      else process.env.AGENTPARTY_NO_CLAUDE_RECEIPTS = previous;
+    }
+  });
+
+  test("测试注入了 inject 而没开 receipts ⇒ 默认不订阅（与改动前逐字相同的调用）", async () => {
+    let withReceipt = 0;
+    const inputs: Record<string, unknown>[] = [];
+    const { deps, connections } = makeDeps({
+      injectWithReceipt: (async () => {
+        withReceipt += 1;
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x", receipts: true };
+      }) as never,
+      inject: (async (input: Record<string, unknown>) => {
+        inputs.push(input);
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x" };
+      }) as never,
+    });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(57, [SELF]));
+    await tick();
+    expect(withReceipt).toBe(0);
+    expect(inputs).toHaveLength(1);
+    abort.abort();
+    await done;
+  });
+});
+
+describe("蛰伏腿 + 真实 injectWithReceipt + 真实 UDS（#1130）", () => {
+  test("默认（未注入 inject）⇒ 帧带 from:uds:<同目录回执 socket> 与 msg_id；收到 held 后上报，中止后不留 socket 文件", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ap-dormant-rcpt-"));
+    const sockPath = join(dir, "inbox.sock");
+    const received: string[] = [];
+    const server = createServer((socket) => {
+      socket.on("data", (chunk) => received.push(chunk.toString("utf8")));
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+    writeFileSync(
+      join(dir, `${process.ppid}.json`),
+      JSON.stringify({
+        pid: process.ppid,
+        sessionId: "11111111-1111-4111-8111-111111111111",
+        name: "agentparty-d4",
+        status: "idle",
+        kind: "interactive",
+        messagingSocketPath: sockPath,
+      }),
+      { mode: 0o600 },
+    );
+    const previous = process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV];
+    process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV] = dir;
+    const reports: string[] = [];
+    try {
+      const { deps, connections } = makeDeps({
+        receiptRegistryDir: mkdtempSync(join(tmpdir(), "ap-dormant-rcpt-reg-")),
+        receiptTiming: { firstWindowMs: 2000, targetPollMs: 20 },
+        inboxReceiptReporter: () => async (ref, event) => {
+          reports.push(`${ref.seq}:${ref.target}:${event.status}`);
+        },
+      });
+      const abort = new AbortController();
+      const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+      await tick();
+      connections[0]!.push(msg(61, [SELF]));
+      await tick(80);
+      const user = received
+        .join("")
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((frame) => frame.type === "user");
+      expect(user).toBeDefined();
+      expect(typeof user!.msg_id).toBe("string");
+      const from = String(user!.from);
+      expect(from.startsWith(`uds:${dir}/`)).toBe(true);
+      const replyPath = from.slice("uds:".length);
+      // 假接收端：把 held 写回回执 socket（写帧者就是监听者，本进程）。
+      const { createConnection } = await import("node:net");
+      await new Promise<void>((resolve, reject) => {
+        const socket = createConnection(replyPath, () => {
+          socket.end(
+            `${JSON.stringify({ type: "control", action: "peer_message_status", status: "held", orig_msg_id: user!.msg_id, msgV: 1 })}\n`,
+            () => resolve(),
+          );
+        });
+        socket.on("error", reject);
+      });
+      for (let i = 0; i < 100 && reports.length === 0; i += 1) await tick(10);
+      expect(reports).toEqual([`61:${SELF}:held`]);
+      abort.abort();
+      await done;
+      await tick(20);
+      const { readdirSync } = await import("node:fs");
+      expect(readdirSync(dir).filter((name) => /^[0-9a-f]{16}\.sock$/.test(name))).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV];
+      else process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV] = previous;
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

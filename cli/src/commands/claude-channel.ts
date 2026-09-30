@@ -46,6 +46,12 @@ import {
 } from "../claude-session-registry";
 import { announceDisplayName } from "../claude-native-display-name";
 import { injectChannelMessage } from "../claude-inbox-inject";
+import { injectWithReceipt, sweepStaleReceiptSockets, type InboxReceiptEvent } from "../claude-inbox-receipt";
+import {
+  createInboxReceiptReporter,
+  inboxReceiptWakeEffect,
+  type InboxReceiptReporter,
+} from "../claude-inbox-receipt-report";
 import {
   claimMentionWake,
   claudeChannelSiblingDormancy,
@@ -56,7 +62,7 @@ import {
   type MentionWakeClaimResult,
   type MentionWakeRef,
 } from "../mention-wake-claim";
-import { senderInjectFromName, wakeProxyNote, type InjectSenderLike } from "../serve-wake-proxy";
+import { defaultReceiptRegistryDir, senderInjectFromName, wakeProxyNote, type InjectSenderLike } from "../serve-wake-proxy";
 import {
   buildIdleNotice,
   detectWakeLang,
@@ -590,6 +596,23 @@ export interface DormantAnnounceDeps {
    * channel, seq) 只许一个抢到并注入，其余只 ack 当已读。默认走 ~/.agentparty/wake-claims 的
    * O_EXCL 文件；测试可换目录（wakeClaimDir）或整个替换（claimWake）。
    */
+  /**
+   * 是否订阅 Claude 原生投递回执（#1130，协议见 docs/cross-session-internals.md §6）。默认：用真实
+   * inject 时开，测试注入了 `inject` 时关。开了也只在能建起监听时生效——Windows、
+   * `AGENTPARTY_NO_CLAUDE_RECEIPTS=1`、监听建不起来、挂着的监听到上限 ⇒ 与以前逐字节相同的注入，
+   * 不上报、不改任何记账。空闲通知的注入永远不订阅（通知不产生回执）。
+   */
+  receipts?: boolean;
+  /** 「注入并订阅回执」的实现（测试注入点）；默认真实 injectWithReceipt。 */
+  injectWithReceipt?: typeof injectWithReceipt;
+  /** 回执上报器工厂（测试注入点）；默认按本轮 auth 建 createInboxReceiptReporter。 */
+  inboxReceiptReporter?: (auth: { server: string; token: string }) => InboxReceiptReporter;
+  /** 回执事件的原始回调（测试用）。 */
+  onInboxReceipt?: (seq: number, event: InboxReceiptEvent) => void;
+  /** 回执 socket 的登记目录（SIGKILL 残留清理）；默认 ~/.agentparty/claude-receipt-socks。 */
+  receiptRegistryDir?: string;
+  /** 回执等待窗口覆盖（测试用）。 */
+  receiptTiming?: { firstWindowMs?: number; terminalWaitMs?: number; targetPollMs?: number };
   claimWake?: (ref: MentionWakeRef) => MentionWakeClaimResult;
   releaseWake?: (claim: Extract<MentionWakeClaimResult, { state: "acquired" }>) => boolean;
   wakeClaimDir?: string;
@@ -728,6 +751,22 @@ export function dormantAnnounceMentionHit(
   return mentions.some((mention) => mentionMatchKey(mention) === wanted);
 }
 
+/**
+ * 蛰伏腿的回执 → 一行本机留痕（MCP stderr）；`accepted` 返回 null。给人看的去向是频道（上报），
+ * 这一行只为排障。`reason` 是接收端给的文本，解析时已压成一行、限长。
+ */
+export function dormantReceiptLogLine(channel: string, seq: number, event: InboxReceiptEvent): string | null {
+  if (event.status === "accepted") return null;
+  const reason = event.reason === undefined ? "" : ` reason=${event.reason}`;
+  const where = `channel=${channel} seq=${seq} status=${event.status}${reason}`;
+  if (event.status === "held") {
+    return `claude-channel: 唤醒被宿主会话的收件箱扣留待审（${where}）——尚未进对话，认领保留、不重投`;
+  }
+  if (event.status === "delivered") return `claude-channel: 被扣留的唤醒已获批准并进入对话（${where}）`;
+  if (event.status === "unknown") return `claude-channel: 被扣留的唤醒结局未知（${where}）——不重放，认领保留`;
+  return `claude-channel: 唤醒没有送达（${where}）——已让出认领，@ 欠账不变`;
+}
+
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) return resolve();
@@ -767,6 +806,18 @@ export async function runDormantClaudeSessionAnnounce(
       ...(deps.runtimeId === undefined ? {} : { runtimeId: deps.runtimeId }),
     }));
   const releaseWake = deps.releaseWake ?? releaseMentionWake;
+  // #1130：本进程（宿主会话的 MCP 子进程）既写帧又监听回执 socket，并且活到会话结束——满足接收端
+  // 「回执只发给写帧的那个进程」的要求。测试注入了假 inject 时默认不订阅（别去真实目录建文件）。
+  const receiptsEnabled = deps.receipts ?? deps.inject === undefined;
+  const receiptRegistryDir = deps.receiptRegistryDir ?? (receiptsEnabled ? defaultReceiptRegistryDir(deps.env ?? process.env) : undefined);
+  if (receiptsEnabled && receiptRegistryDir !== undefined) {
+    try {
+      sweepStaleReceiptSockets(receiptRegistryDir);
+    } catch {
+      // 清理是尽力而为。
+    }
+  }
+  const reporters = new Map<string, InboxReceiptReporter>();
   const now = deps.now ?? (() => Date.now());
   const langOverride = deps.langOverride ?? (() => configLangOverride(cwd));
   const liveBridgeHolder = deps.liveBridgeHolder ?? ((auth: { server: string; token: string }, slug: string) => {
@@ -975,10 +1026,52 @@ export async function runDormantClaudeSessionAnnounce(
           triggerBody: typeof (frame as { body?: unknown } | null)?.body === "string" ? (frame as { body: string }).body : null,
           env: deps.env ?? process.env,
         });
+        // #1130 回执记账（状态机见 docs/cross-session-internals.md §6）：
+        //   accepted / held / delivered / unknown → 认领与去重标记都留着（held 还扣着，绝不再投一次；
+        //     unknown 结局不明，绝不重放）；
+        //   expired / refused / dropped / denied → 证明没送达：撤掉去重标记、让出认领，**恰好一次**。
+        // 本腿自己不重投——让出之后由既有路径（重连重放、同身份的别的 runtime、服务端欠账）接手。
+        let wakeReleased = false;
+        const onReceipt = (event: InboxReceiptEvent) => {
+          try {
+            deps.onInboxReceipt?.(seq, event);
+          } catch {
+            // 测试回调不影响记账。
+          }
+          if (inboxReceiptWakeEffect(event) === "release" && !wakeReleased) {
+            wakeReleased = true;
+            injectedSeqs.delete(seq);
+            if (claim.state === "acquired") releaseWake(claim);
+          }
+          const line = dormantReceiptLogLine(channel, seq, event);
+          if (line !== null) logOnce(line);
+          // `accepted`（没有回执）不是一个状态：不上报。上报器自己也会过滤，这里先挡一道。
+          if (event.status === "accepted") return;
+          const reporterKey = `${authServer}\u0000${authToken}`;
+          let reporter = reporters.get(reporterKey);
+          if (reporter === undefined) {
+            reporter = (deps.inboxReceiptReporter ?? ((a: { server: string; token: string }) =>
+              createInboxReceiptReporter({ ...a, log: logOnce })))({ server: authServer, token: authToken });
+            reporters.clear(); // token 轮换后旧上报器没用了
+            reporters.set(reporterKey, reporter);
+          }
+          // target＝本机频道身份（mentions 里命中的就是它）；上报者也是它自己。上报器绝不抛错。
+          void reporter({ channel, seq, target: selfName }, event);
+        };
+        const injectOnce = (input: Parameters<typeof inject>[0]) =>
+          receiptsEnabled
+            ? (deps.injectWithReceipt ?? injectWithReceipt)(input, {
+              inject,
+              ...deps.receiptTiming,
+              signal,
+              ...(receiptRegistryDir === undefined ? {} : { registryDir: receiptRegistryDir }),
+              onReceipt,
+            })
+            : inject(input);
         for (let attempt = 1; attempt <= 3 && !signal.aborted; attempt += 1) {
           let result: Awaited<ReturnType<typeof inject>> | null = null;
           try {
-            result = await inject({
+            result = await injectOnce({
               // 自我保护：目标恒为本轮绑定的宿主会话，不接受任何外部传入的身份。
               // 寻址走 pid（registry 与 ~/.claude/sessions 同源）——宣告名与 Claude 原生
               // 会话名是两个命名空间，按名字寻址恒 no-match（#857 实测）。sessionId 一并
@@ -1007,7 +1100,7 @@ export async function runDormantClaudeSessionAnnounce(
               // from-name＝真实发信人的**友好名**（`leo`）；只有频道里另有同友好名、不同技术 name 的
               // 成员时才带短消歧后缀（`leo·9749e`），别再把整段 hash 拼进主名（#986）。
               fromName: senderInjectFromName(sender, channel, [...knownSenders.values()]),
-              // announce 进程没有自己的回执 socket——绝不冒用别人的 sock 当 from。
+              // 回执 socket 由 injectWithReceipt 自建（#1130）；建不起来就不带 from——绝不冒用别人的 sock。
             });
           } catch {
             // 与结构化 ok:false 统一走有界重试。
@@ -1015,6 +1108,10 @@ export async function runDormantClaudeSessionAnnounce(
           if (result?.ok === true) {
             // 只有字节真正写进 socket 后才去重。失败前就记 seen 会让临时故障
             // 把这条 @ 永久变成「已注入」的假成功。
+            // #1130：回执监听在写帧之前就建好了，证明没送达的回执可能先于这里的续体被处理
+            // （onReceipt 已撤掉标记、让出认领）。让出必须赢：已让出就绝不把标记写回去，
+            // 否则一条被证明没送达的 @ 会在重连重放时被当成「已注入」跳过。
+            if (wakeReleased) return;
             injectedSeqs.add(seq);
             while (injectedSeqs.size > DORMANT_ANNOUNCE_SEEN_LIMIT) {
               const oldest = injectedSeqs.values().next();
@@ -1026,7 +1123,11 @@ export async function runDormantClaudeSessionAnnounce(
           if (attempt < 3) await abortableSleep(injectRetryDelayMs, signal);
         }
         // 注入没成：把认领让出来，重连/重放时同身份的别的 runtime 才有机会接手（#963）。
-        if (claim.state === "acquired") releaseWake(claim);
+        // 与回执那条让出路径共用 wakeReleased：无论哪条先到，认领只让出一次（#1130）。
+        if (claim.state === "acquired" && !wakeReleased) {
+          wakeReleased = true;
+          releaseWake(claim);
+        }
         if (!signal.aborted) {
           logOnce(
             `claude-channel: socket 注入连续 3 次未成功（channel=${channel} seq=${seq} ` +

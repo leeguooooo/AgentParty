@@ -268,6 +268,151 @@ export interface Receipt {
   ts: number;
 }
 
+/**
+ * Claude 收件箱闸门对一条唤醒注入的归宿（#1130）。来源是 Claude Code 的原生投递回执
+ * （`peer_message_status`，协议见 docs/cross-session-internals.md §6）。
+ *
+ * - held：闸门把消息扣在待审队列里，**还没进对话**；之后会有一个终态。
+ * - delivered：被扣的消息获批进了对话。它证明的是「进了对话」，不是「对方回了」。
+ * - expired / refused / dropped / denied：没有送达。
+ * - unknown：被扣之后到点没等到终态（接收会话被杀、回执丢了）。结局不明，既不是送达也不是没送达。
+ *
+ * 刻意**没有** `accepted`：策略是 accept 时接收端一条回执都不发，「没有回执」不是已读回执，
+ * 不落库、不展示。
+ */
+export type InboxReceiptState = "held" | "delivered" | "expired" | "refused" | "dropped" | "denied" | "unknown";
+export const INBOX_RECEIPT_STATES: readonly InboxReceiptState[] = [
+  "held",
+  "delivered",
+  "expired",
+  "refused",
+  "dropped",
+  "denied",
+  "unknown",
+];
+/** 证明「没有送达」的终态。 */
+export const INBOX_RECEIPT_NOT_DELIVERED: readonly InboxReceiptState[] = ["expired", "refused", "dropped", "denied"];
+/** 接收端给的原因文本上限（字节）。它是对方可控数据：压成一行、限长、只当数据展示。 */
+export const INBOX_RECEIPT_REASON_LIMIT = 200;
+/** 单条消息保留的收件箱回执上限：每个 (target, 上报者) 一条，封顶防把它当广播位。 */
+export const INBOX_RECEIPT_MAX_PER_MESSAGE = 16;
+
+/**
+ * 挂在**被 @ 的那条消息**上的收件箱回执（#1130）。与 Receipt（#828）同一种元数据：不占 seq、
+ * 不进正文流、不触发 delivery、不需要 ack——而且**不进任何记账**：@ 欠账只认对方的回复 / ack，
+ * held / expired 反而证明没送达，delivered 也不是 ack。
+ */
+export interface InboxReceipt {
+  /** 被 @ 的目标（消息 mentions 里的那个名字）。 */
+  target: string;
+  state: InboxReceiptState;
+  /** 上报者：写帧并监听回执的那个进程所用的频道身份。服务端从鉴权取，客户端填不了。 */
+  reported_by: Sender;
+  /** 接收端给的原因（对方可控文本，一行、≤INBOX_RECEIPT_REASON_LIMIT）。空则省略。 */
+  reason?: string;
+  /** 首次记为 held 的时刻；从未经过 held 的省略。 */
+  held_at?: number;
+  /** 最近一次状态变化的时刻。 */
+  ts: number;
+}
+
+/** presence 上的一条「这条欠着的 @ 在收件箱那里怎么了」（#1130）。 */
+export interface InboxPendingMention {
+  seq: number;
+  state: InboxReceiptState;
+}
+
+export function isInboxReceiptState(input: unknown): input is InboxReceiptState {
+  return typeof input === "string" && (INBOX_RECEIPT_STATES as readonly string[]).includes(input);
+}
+
+/** `held` 是唯一的非终态。 */
+export function inboxReceiptTerminal(state: InboxReceiptState): boolean {
+  return state !== "held";
+}
+
+/** 这个状态证明消息没有送达吗（unknown / held / delivered 都不是）。 */
+export function inboxReceiptNotDelivered(state: InboxReceiptState): boolean {
+  return (INBOX_RECEIPT_NOT_DELIVERED as readonly string[]).includes(state);
+}
+
+/**
+ * 回执状态机的一步（#1130）。服务端按它裁决，客户端/文档/测试共用同一张表：
+ *
+ * | 已记录 | 新上报 | 结果 |
+ * |---|---|---|
+ * | 无 | 任意状态 | `apply`（held 丢了的话终态也得记得进来） |
+ * | held | held | `noop`（重复的 held） |
+ * | held | 任意终态 | `apply` |
+ * | 终态 X | X | `noop`（幂等重报） |
+ * | 终态 X | 其它 | `reject`（终态只记一次，不回退、不改写） |
+ */
+export function inboxReceiptTransition(
+  previous: InboxReceiptState | null,
+  next: InboxReceiptState,
+): "apply" | "noop" | "reject" {
+  if (previous === null) return "apply";
+  if (previous === next) return "noop";
+  return previous === "held" ? "apply" : "reject";
+}
+
+/** 对方可控文本压成一行：去控制字符、折叠空白。不限长（长度由调用方按字节判）。 */
+export function inboxReceiptReasonLine(input: string): string {
+  // eslint-disable-next-line no-control-regex
+  return input.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * 宽容解析一组收件箱回执（落库列 / 线上帧 / 旧新版本混跑都走它）：坏项跳过、未知状态跳过、
+ * 整体坏掉按「没有」处理——回执是附加元数据，它的损坏绝不该让一条真实消息读不出来。
+ */
+export function normalizeInboxReceipts(input: unknown): InboxReceipt[] {
+  if (!Array.isArray(input)) return [];
+  const out: InboxReceipt[] = [];
+  for (const raw of input) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.target !== "string" || r.target === "") continue;
+    if (!isInboxReceiptState(r.state)) continue;
+    const by = r.reported_by;
+    if (typeof by !== "object" || by === null) continue;
+    const sender = by as Record<string, unknown>;
+    if (typeof sender.name !== "string" || sender.name === "") continue;
+    const ts = Number(r.ts);
+    if (!Number.isFinite(ts)) continue;
+    const heldAt = Number(r.held_at);
+    const reason = typeof r.reason === "string" ? inboxReceiptReasonLine(r.reason).slice(0, INBOX_RECEIPT_REASON_LIMIT) : "";
+    out.push({
+      target: r.target,
+      state: r.state,
+      reported_by: { ...(sender as unknown as Sender), kind: sender.kind === "agent" ? "agent" : "human" },
+      ...(reason === "" ? {} : { reason }),
+      ...(r.held_at !== undefined && r.held_at !== null && Number.isFinite(heldAt) ? { held_at: heldAt } : {}),
+      ts,
+    });
+  }
+  return out;
+}
+
+/**
+ * 某个目标在一条消息上的收件箱状态：多个上报者时，目标自己报的优先，其次取最新的。
+ * 没有则 null。
+ */
+export function inboxReceiptFor(receipts: readonly InboxReceipt[] | undefined, target: string): InboxReceipt | null {
+  let best: InboxReceipt | null = null;
+  for (const receipt of receipts ?? []) {
+    if (receipt.target !== target) continue;
+    if (best === null) {
+      best = receipt;
+      continue;
+    }
+    const own = receipt.reported_by.name === target;
+    const bestOwn = best.reported_by.name === target;
+    if (own !== bestOwn ? own : receipt.ts > best.ts) best = receipt;
+  }
+  return best;
+}
+
 export interface WakeInfo {
   kind: WakeKind;
   verified_at?: number;
@@ -1075,6 +1220,13 @@ export interface PresenceEntry {
    * total. Absent when there is no debt.
    */
   pending_mention_seqs?: number[];
+  /**
+   * Claude 收件箱回执（#1130）里，该身份**仍欠着**的 @ 中被闸门扣留 / 证明没送达 / 结局不明的那几条
+   * （升序，只覆盖 pending_mention_seqs 里的 seq）。纯展示：它解释欠账为什么还在，从不增减欠账——
+   * 对方一回复，seq 离开 pending_mention_seqs，这里也随之消失。`delivered` 不列（已进对话，只是还没回）。
+   * 没有则省略；旧客户端忽略。
+   */
+  inbox_pending?: InboxPendingMention[];
   /**
    * 该身份最近一次回执（#828）的目标消息 seq。用途：同事查 who 时一眼看出「对方知道这事，只是还没轮到」，
    * 而不必去翻频道找一条长得像本人发言的机器人回执。仅有过回执时下发；旧客户端忽略。
@@ -1956,6 +2108,12 @@ export interface MsgFrame {
    * 每身份至多一条（后到覆盖），按 ts 升序。无回执时省略；旧客户端忽略。
    */
   receipts?: Receipt[];
+  /**
+   * Claude 收件箱回执（#1130）：本条 @ 在目标的收件箱闸门那里被扣留 / 获批 / 没送达。与 receipts
+   * 同为元数据，随 message_update("receipt") 重播（复用既有动作词，旧客户端不丢帧）。无则省略；
+   * 旧客户端忽略。读取一律过 normalizeInboxReceipts。
+   */
+  inbox_receipts?: InboxReceipt[];
   ts: number;
   edited?: true;
   edited_at?: number;
@@ -2557,6 +2715,8 @@ export interface PresenceFrame {
   oldest_unhandled_mention_seq?: number;
   /** 全部未处理 @ 的来源 seq（升序，封顶 50）；与 PresenceEntry 同口径（#818）。 */
   pending_mention_seqs?: number[];
+  /** 仍欠着的 @ 里被收件箱闸门扣留 / 没送达 / 结局不明的那几条（#1130）；与 PresenceEntry 同口径。 */
+  inbox_pending?: InboxPendingMention[];
   /** 最近一次回执的目标消息 seq（#828）；与 PresenceEntry 同口径。 */
   last_receipt_seq?: number;
   /** 最近一次 not_in_turn 回执的时刻；与 PresenceEntry 同口径（#828）。 */

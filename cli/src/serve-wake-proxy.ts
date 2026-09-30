@@ -33,6 +33,7 @@ import {
 } from "./claude-session-registry";
 import { injectChannelMessage } from "./claude-inbox-inject";
 import { injectWithReceipt, type InboxReceiptEvent } from "./claude-inbox-receipt";
+import type { InboxReceiptReporter } from "./claude-inbox-receipt-report";
 import { join } from "node:path";
 import { assignIdentityDisambiguators, friendlyAgentLabel } from "@agentparty/shared/identity";
 import { agentpartyHome, readConfig, type CachedIdentity } from "./config";
@@ -313,6 +314,11 @@ export interface SocketWakeProxyForwarderOptions {
   /** 回执事件的原始回调（测试用）；在 log 之前调用。 */
   onReceipt?: (event: InboxReceiptEvent, target: ClaudeSessionRegistryEntry, ref: WakeProxyRef) => void;
   /**
+   * 把回执上报到频道（#1130）：挂在被 @ 的那条消息上，发信人在网页 / `party history` 里看得见。
+   * `accepted` 不会被上报（上报器自己过滤）。不给就只打本机日志（旧行为）。上报失败绝不影响转投。
+   */
+  report?: InboxReceiptReporter;
+  /**
    * 宿主（serve）的生命周期信号：中止时关掉所有还挂着的回执监听并删掉它们的 socket 文件。
    * 信号处理归 serve 管，回执模块自己不装任何信号处理器。
    */
@@ -350,6 +356,9 @@ export interface SocketWakeProxyForwarderOptions {
  * socket 的天然是同一个进程，所以直接在这里订阅，不需要 ocs 那样的脱离终端 helper。回执**不阻塞**
  * 转投结果——帧写完即返回 ok:true（语义仍是「已写进收件箱」），`held` / 终态随后各打一行日志。
  * 回执同样**不进任何记账**：它只回答「消息被扣 / 被拒了吗」，不回答「对方处理了吗」。
+ * #1130 起回执还会经 `report` 上报到频道（挂在那条 @ 消息上），仍然只是展示：serve 自己的
+ * wake / ack / stuck 记账不读它，转投目标的 @ 欠账也不因它增减（状态机见
+ * docs/cross-session-internals.md §6）。
  *
  * TODO(#844 serve 降级集成)：当前 socket 不可用时的「serve headless resume loop stdin 注入」
  * 复用的是 serve 现行为（runner 正常处理这条 @），不是独立的 stdin 注入调用。待 serve 侧
@@ -389,6 +398,11 @@ export function socketWakeProxyForwarder(
           options.onReceipt?.(event, target, ref);
           const line = wakeProxyReceiptLogLine(claudeSessionAnnounceName(target), ref, event);
           if (line !== null) options.log?.(line);
+          // #1130：同一份回执上报到频道。target＝mentions 里命中的那个名字（宣告名）。上报器绝不抛错，
+          // 也不被 await——回执回调是同步的展示通道，上报是它后面的一次后台 REST 写。
+          // `accepted`（没有回执）不是一个状态：不上报（上报器自己也会过滤，这里先挡一道）。
+          if (event.status === "accepted") return;
+          void options.report?.({ channel: ref.channel, seq: ref.seq, target: claudeSessionAnnounceName(target) }, event);
         },
       })
       : await inject(input);

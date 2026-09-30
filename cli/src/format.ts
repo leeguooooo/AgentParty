@@ -1,5 +1,11 @@
 // 消息打印格式："[seq] name(kind): body 首行"，多行缩进跟随
-import type { AgentContext, MsgFrame } from "@agentparty/shared";
+import {
+  inboxReceiptFor,
+  normalizeInboxReceipts,
+  type AgentContext,
+  type InboxReceiptState,
+  type MsgFrame,
+} from "@agentparty/shared";
 
 // #372 安全：远端可控字段（body/name/owner/context/attachment 文件名/note 等）会被原样打进终端。
 // 攻击者发一条含终端转义序列的消息，就能在每个 watch/history 该频道的 agent 终端上注入 OSC52
@@ -160,6 +166,34 @@ function formatReceipts(receipts: MsgFrame["receipts"]): string | null {
   return `received by ${receipts.map((receipt) => `${receipt.by.name}(${receipt.reason})`).join(", ")}`;
 }
 
+/**
+ * Claude 收件箱回执（#1130）的一句话。措辞是契约的一部分：held 是「还没送达」，delivered 是「进了对话」
+ * 而不是「回了」，没有任何一个状态叫 read / accepted。
+ */
+export function inboxReceiptPhrase(state: InboxReceiptState): string {
+  switch (state) {
+    case "held":
+      return "held for approval, not delivered yet";
+    case "delivered":
+      return "delivered after approval (not a reply)";
+    case "unknown":
+      return "held, outcome unknown";
+    default:
+      return `not delivered: ${state}`;
+  }
+}
+
+// `inbox @bot: held for approval, not delivered yet`。每个目标一条（目标自己报的优先）；reason 是
+// 接收端给的文本，留给 --json / web，终端一行里不带。帧里的字段一律先过 normalizeInboxReceipts。
+function formatInboxReceipts(input: unknown): string | null {
+  const receipts = normalizeInboxReceipts(input);
+  if (receipts.length === 0) return null;
+  const targets = [...new Set(receipts.map((receipt) => receipt.target))];
+  return targets
+    .map((target) => `inbox @${target}: ${inboxReceiptPhrase(inboxReceiptFor(receipts, target)!.state)}`)
+    .join(", ");
+}
+
 function formatMsgRaw(m: MsgFrame): string {
   const badges = [
     m.completion_artifact !== undefined ? "completion" : null,
@@ -175,6 +209,8 @@ function formatMsgRaw(m: MsgFrame): string {
     // 回执（#828）：进 badge 而不是正文——「已收到」是这条消息的元数据，不是频道里的一次发言。
     // 手搓版当年正是因为长得像本人发言才误导了协作方。
     formatReceipts(m.receipts),
+    // 收件箱回执（#1130）：这条 @ 的唤醒被目标的 Claude 收件箱扣留 / 没送达。同样只是元数据。
+    formatInboxReceipts(m.inbox_receipts),
   ].filter((part): part is string => part !== null);
   const suffix = badges.length > 0 ? ` {${badges.join("; ")}}` : "";
   const prefix = `[${m.seq}] ${formatSender(m)}${suffix}: `;

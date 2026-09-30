@@ -486,6 +486,67 @@ describe("serve 唤醒代理：回执打到日志，转投结果语义不变", (
     expect(lines[1]).toContain("请勿重发");
   });
 
+  test("#1130 hold → expired：同一份回执上报到频道，目标＝宣告名；转投结果不变", async () => {
+    const box = await startInbox("hold");
+    const reports: string[] = [];
+    const forward = socketWakeProxyForwarder({
+      env: env(),
+      fromName: () => "leo",
+      fromId: () => null,
+      report: async (target, event) => {
+        reports.push(`${target.channel}:${target.seq}:${target.target}:${event.status}`);
+      },
+      receiptTiming: { firstWindowMs: 2000, targetPollMs: 20 },
+    });
+    expect(await forward(entry, ref)).toEqual({ ok: true });
+    await box.nextFrame();
+    while (reports.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(reports).toEqual(["dev:42:claude-111111111111:held"]);
+    await box.resolveHeld("expired");
+    while (reports.length === 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(reports).toEqual(["dev:42:claude-111111111111:held", "dev:42:claude-111111111111:expired"]);
+  });
+
+  test("#1130 accept：没有回执 ⇒ 什么都不上报（accepted 不是已读回执）", async () => {
+    await startInbox("accept");
+    const reports: string[] = [];
+    let settled = false;
+    const forward = socketWakeProxyForwarder({
+      env: env(),
+      fromName: () => "leo",
+      fromId: () => null,
+      onReceipt: () => {
+        settled = true;
+      },
+      report: async (_target, event) => {
+        reports.push(event.status);
+      },
+      receiptTiming: { firstWindowMs: 60 },
+    });
+    expect(await forward(entry, ref)).toEqual({ ok: true });
+    while (!settled) await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reports).toEqual([]);
+  });
+
+  test("#1130 回落（开关关闭 / 测试注入 inject）⇒ 不订阅，也就没有任何上报", async () => {
+    await startInbox("hold");
+    const reports: string[] = [];
+    const report = async (_target: unknown, event: InboxReceiptEvent) => {
+      reports.push(event.status);
+    };
+    await socketWakeProxyForwarder({
+      env: env({ AGENTPARTY_NO_CLAUDE_RECEIPTS: "1" }),
+      fromName: () => "leo",
+      fromId: () => null,
+      report,
+      receiptTiming: { firstWindowMs: 60 },
+    })(entry, ref);
+    await socketWakeProxyForwarder({ env: env(), receipts: false, fromName: () => "leo", fromId: () => null, report })(entry, ref);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(reports).toEqual([]);
+  });
+
   test("accept：没有回执 ⇒ 一行日志都不打", async () => {
     await startInbox("accept");
     const lines: string[] = [];

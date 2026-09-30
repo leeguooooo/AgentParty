@@ -1,6 +1,6 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type RuntimePeerDiscovery, type SenderKind, type TaskLeaseScope, type WakeKind, wakeableState } from "@agentparty/shared";
+import { autoWakeReachable, isInboxReceiptState, type AgentActivity, type InboxPendingMention, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type RuntimePeerDiscovery, type SenderKind, type TaskLeaseScope, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { listChannels } from "../rest";
 import { activeChannelSlugs, buildGlobalWho, globalWhoDisplay, renderGlobalRow, summarizeGlobalWho } from "./who-global";
@@ -17,7 +17,7 @@ import { resolveAuth } from "../oidc-cli";
 import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError, RestError } from "../rest";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
-import { sanitizeSingleLine } from "../format";
+import { inboxReceiptPhrase, sanitizeSingleLine } from "../format";
 import { buildPullWakeLookup, pullWakeDelivers, type PullWakeHint, type PullWakeLookup } from "../pull-wake";
 import { isSlug } from "../validation";
 import { emitOcsJson, readOcsRoster, renderOcsSection } from "../ocs-roster";
@@ -79,6 +79,13 @@ pending_mention_seqs) is the SERVER's ledger, and only a reply settles it:
 "party ack" does NOT clear it (#859): ack writes only local watch replay state, it
 sends no request to the server. Use ack to stop your own watch from replaying a
 frame — never as a way to make pending_mention_seqs go away.
+A "✉ inbox: #S held for approval, not delivered yet" note explains one of those owed
+@s: the wake was written to the agent's Claude session, and that session's
+crossSessionInbound gate parked it (dropped after 5 minutes without approval).
+"not delivered: expired|refused|dropped|denied" means it never entered the
+conversation. Neither changes the debt — do not resend; the message is in channel
+history. The receiver can set crossSessionInbound to "accept" in
+~/.claude/settings.json (a project-level "hold" overrides it).
 A "🤖 reception model:claude isolated" note means unattended @s to that name are
 answered by a resident runner in a SEPARATE per-channel session — it does not
 inherit that person's open conversation, so it does not know what they did today
@@ -117,7 +124,7 @@ Options:
                 need a channel.
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/live/residency/unreachable/pull_wake/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/idle_watches/agent_session/topology_conflicts/task_lease/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/live/residency/unreachable/pull_wake/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/inbox_pending/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/idle_watches/agent_session/topology_conflicts/task_lease/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
 
 // 导出仅供单测断言 help 文案与真实行为一致（#859/#860：文档漂移过一次，用断言钉住）。
 export const HELP_TEXT = HELP;
@@ -172,6 +179,9 @@ export interface Row {
   // #818：欠的具体是哪几条 seq。debt 按 delivery 逐条清，只有 count + oldest 时中间那些无从得知，
   // 已经处理过的 @ 会被一遍遍重放。有了列表就能 party ack --seq / --reply-to 精确清账。
   pending_mention_seqs?: number[];
+  // #1130：欠着的 @ 里，被目标的 Claude 收件箱扣留 / 证明没送达 / 结局不明的那几条。只解释欠账
+  // 为什么还在，不增减欠账。
+  inbox_pending?: InboxPendingMention[];
   // 回执游标（#828）：「对方知道这事，只是还没轮到」。与在线/离线无关——按轮执行的 agent 回执完那一轮
   // 就结束了，恰恰是它离线时这条信息最该被看到，否则同事只能从沉默里推断「没人接活」。
   last_receipt_seq?: number;
@@ -444,6 +454,7 @@ export function classify(e: PresenceEntry, now: number): Row | null {
           ...(Array.isArray(e.pending_mention_seqs) && e.pending_mention_seqs.length > 0
             ? { pending_mention_seqs: e.pending_mention_seqs.filter((seq) => Number.isInteger(seq) && seq > 0) }
             : {}),
+          ...inboxPendingField(e.inbox_pending),
         }
       : {}),
     // 回执游标（#828）：服务端仅在该身份有过回执时下发，原样带出。
@@ -556,6 +567,27 @@ export function receiptNote(r: Row, now: number): string {
 export function waitingOwnerNote(r: Row): string {
   const count = r.waiting_owner_count;
   return typeof count === "number" && count > 0 ? ` · 💬 ${count} waiting owner` : "";
+}
+
+// presence 上的 inbox_pending 宽容解析：坏项 / 未知状态跳过（新服务端加了状态，老 CLI 不该炸）。
+function inboxPendingField(input: unknown): { inbox_pending?: InboxPendingMention[] } {
+  if (!Array.isArray(input)) return {};
+  const notes: InboxPendingMention[] = [];
+  for (const raw of input) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const { seq, state } = raw as { seq?: unknown; state?: unknown };
+    if (typeof seq !== "number" || !Number.isInteger(seq) || seq <= 0 || !isInboxReceiptState(state)) continue;
+    notes.push({ seq, state });
+  }
+  return notes.length > 0 ? { inbox_pending: notes } : {};
+}
+
+// #1130：紧跟在「⚠ N unhandled @」后面，解释其中哪几条是被 Claude 收件箱挡住的。
+// `· ✉ inbox: #12 held for approval, not delivered yet; #15 not delivered: expired`
+export function inboxPendingNote(r: Row): string {
+  const notes = Array.isArray(r.inbox_pending) ? r.inbox_pending : [];
+  if (notes.length === 0) return "";
+  return ` · ✉ inbox: ${notes.map((note) => `#${note.seq} ${inboxReceiptPhrase(note.state)}`).join("; ")}`;
 }
 
 // 未处理 @ 是服务端持久 delivery 的债务，与在线/离线无关；终端必须显眼提示 owner。
@@ -829,7 +861,7 @@ export function renderRow(r: Row, now: number, lastSeq: number, channel?: string
       typeof r.resume_at === "number"
         ? ` · resumes in ${humanAge(Math.max(0, r.resume_at - now))}`
         : " · resume manually";
-    return `⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${read}${duplicate}`;
+    return `⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${inboxPendingNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${read}${duplicate}`;
   }
   // #191：可唤醒行明确标出「已验证 / 未验证」——verified＝服务端确认过（webhook，或观测到被 @ 后 resume），
   // unverified＝仅自报、服务端没验证过，别当它一定叫得醒。
@@ -848,7 +880,7 @@ export function renderRow(r: Row, now: number, lastSeq: number, channel?: string
       : r.unreachable === true
         ? " · ⚠ no live wake layer (the @ waits as this identity's reception debt until it next runs)"
         : "";
-  return `${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${wakeGuidanceNote(r.wake_guidance)}${read}${duplicate}${age}`;
+  return `${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${inboxPendingNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${wakeGuidanceNote(r.wake_guidance)}${read}${duplicate}${age}`;
 }
 
 export async function run(argv: string[]): Promise<number> {
