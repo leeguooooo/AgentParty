@@ -1108,6 +1108,10 @@ export async function runDormantClaudeSessionAnnounce(
           if (result?.ok === true) {
             // 只有字节真正写进 socket 后才去重。失败前就记 seen 会让临时故障
             // 把这条 @ 永久变成「已注入」的假成功。
+            // #1130：回执监听在写帧之前就建好了，证明没送达的回执可能先于这里的续体被处理
+            // （onReceipt 已撤掉标记、让出认领）。让出必须赢：已让出就绝不把标记写回去，
+            // 否则一条被证明没送达的 @ 会在重连重放时被当成「已注入」跳过。
+            if (wakeReleased) return;
             injectedSeqs.add(seq);
             while (injectedSeqs.size > DORMANT_ANNOUNCE_SEEN_LIMIT) {
               const oldest = injectedSeqs.values().next();
@@ -1119,7 +1123,11 @@ export async function runDormantClaudeSessionAnnounce(
           if (attempt < 3) await abortableSleep(injectRetryDelayMs, signal);
         }
         // 注入没成：把认领让出来，重连/重放时同身份的别的 runtime 才有机会接手（#963）。
-        if (claim.state === "acquired") releaseWake(claim);
+        // 与回执那条让出路径共用 wakeReleased：无论哪条先到，认领只让出一次（#1130）。
+        if (claim.state === "acquired" && !wakeReleased) {
+          wakeReleased = true;
+          releaseWake(claim);
+        }
         if (!signal.aborted) {
           logOnce(
             `claude-channel: socket 注入连续 3 次未成功（channel=${channel} seq=${seq} ` +

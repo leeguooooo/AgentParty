@@ -1295,6 +1295,30 @@ describe("蛰伏腿订阅 Claude 收件箱回执（#1130）", () => {
     });
   }
 
+  test("没送达的回执先于注入成功的续体被处理：让出必须赢——标记不被写回、认领只让出一次", async () => {
+    // injectWithReceipt 在写帧之前就建好监听，终态回执可能在 inject 的 promise 续体之前就已处理完。
+    // 这里强制这个顺序：onReceipt 在返回 ok 之前同步触发。
+    const leg = receiptLeg({
+      injectWithReceipt: (async (input: { body: string }, options: { onReceipt?: Emit }) => {
+        const seq = Number(/seq (\d+)/.exec(input.body)?.[1]);
+        leg.injects.push({ seq, input: input as unknown as Record<string, unknown> });
+        options.onReceipt!({ phase: "first", status: "expired" });
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x", receipts: true };
+      }) as never,
+    });
+    const run = await started(leg);
+    await run.push(msg(58, [SELF]));
+    expect(leg.injects).toHaveLength(1);
+    expect(leg.releases).toEqual([58]);
+    expect(leg.siblingCanClaim(58)).toBe(true);
+    // 标记没有被成功分支写回：同一条 @ 再来时不被当成「已注入」跳过。
+    await run.push(msg(58, [SELF]));
+    expect(leg.injects).toHaveLength(2);
+    // 第二次同样是「没送达」：又是一次独立的认领与让出，各一次。
+    expect(leg.releases).toEqual([58, 58]);
+    await run.stop();
+  });
+
   for (const status of ["delivered", "unknown"] as const) {
     test(`held → ${status}：上报，认领与去重标记都保留（${status === "unknown" ? "结局不明绝不重放" : "已进对话"}）`, async () => {
       const leg = receiptLeg();
