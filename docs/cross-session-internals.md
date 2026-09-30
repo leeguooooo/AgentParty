@@ -472,7 +472,25 @@ mention** (`POST /api/channels/:slug/messages/:seq/inbox-receipt`, body `{target
 `accepted` is never posted, stored or shown. No receipt is not a read receipt, and nothing in any surface
 renders it — or `delivered` — as "read" or "replied".
 
-Server rules: the reporter is taken from the bearer token and stored as `reported_by`; the target must be
+Who may report. A receipt is what the target's inbox said, and only two kinds of process can see it:
+
+- the target itself — the dormant announce leg runs with the target's own token;
+- a runtime owned by the same owner as the target — a `party serve` wake proxy injecting into a local
+  session of the same owner.
+
+The server accepts a report only when the reporter's identity is the target, or the reporter's owner
+equals the owner recorded for this mention when its delivery was created
+(`directed_deliveries.target_owner`). Current presence is not consulted: a revoked name can be registered
+by another account later. When the server has no owner on record for the target, only the target itself
+may report. Anyone else gets `403` with code `not_target_owner`, so a channel member cannot pin a fake
+"not delivered" on someone else's mention. On a 403 the CLI logs one line and stops reporting for that
+(channel, target) pair.
+
+Today the serve wake proxy still selects its target by session announce name, which the server does not
+accept as a mention, so in practice only the dormant leg produces reports; a proxy report for a name the
+message does not mention is refused.
+
+Other server rules: the reporter is taken from the bearer token and stored as `reported_by`; the target must be
 one of the message's mentions; `reason` is receiver-controlled text, collapsed to one line and rejected
 above 200 bytes; at most 16 entries per message, one per (target, reporter). When the target itself and a
 relay both report, the target's own report is the one shown.

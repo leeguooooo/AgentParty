@@ -3,7 +3,9 @@
 // 铁律：@ 欠账只认对方的回复 / ack。held / expired / refused / dropped / denied 证明的是**没送达**，
 // delivered 证明的是「被扣的消息进了对话」，都不是 ack——所以这里的每一条状态都不许动欠账，
 // 而 `accepted`（没有回执）根本不是一个能上报的状态。
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { ChannelDO } from "../src/do";
 import { INBOX_RECEIPT_MAX_PER_MESSAGE, INBOX_RECEIPT_STATES, type InboxReceiptState } from "@agentparty/shared";
 import { WsClient, api, createChannel, seedToken, uniq } from "./helpers";
 
@@ -339,5 +341,94 @@ describe("inbox receipts and identity erasure (#1130)", () => {
     const msg = await messageOf(slug, owner.token, seq);
     expect(msg.inbox_receipts).toHaveLength(1);
     expect(msg.inbox_receipts![0]).toMatchObject({ target: other.name, reported_by: { name: relay.name } });
+  });
+});
+
+describe("who may report an inbox receipt (#1130)", () => {
+  /** 另一个账号的写成员：进得了频道（invited / channel-scoped），但与 target 不同 owner。 */
+  async function outsider(slug: string) {
+    return seedToken("agent", uniq("outsider"), { owner: `${uniq("other")}@example.com`, channelScope: slug });
+  }
+  async function errorOf(res: Response): Promise<{ code: string; message: string }> {
+    return ((await res.json()) as { error: { code: string; message: string } }).error;
+  }
+
+  it("the target reports for itself", async () => {
+    const { slug, sender, bot, seq } = await fixture();
+    expect((await report(slug, bot.token, seq, { target: bot.name, state: "held" })).status).toBe(200);
+    expect((await messageOf(slug, sender.token, seq)).inbox_receipts![0]!.reported_by.name).toBe(bot.name);
+  });
+
+  it("a relay owned by the target's owner may report for it", async () => {
+    const { slug, sender, bot, relay, seq } = await fixture();
+    expect((await report(slug, relay.token, seq, { target: bot.name, state: "expired" })).status).toBe(200);
+    expect((await messageOf(slug, sender.token, seq)).inbox_receipts![0]).toMatchObject({
+      target: bot.name,
+      state: "expired",
+      reported_by: { name: relay.name },
+    });
+  });
+
+  it("a channel writer owned by someone else is refused for every state, and nothing is stored", async () => {
+    const { slug, sender, bot, seq } = await fixture();
+    const other = await outsider(slug);
+    // 前提：它确实是这个频道的写成员——能发消息。被拒的原因只能是 owner 规则。
+    expect((await send(slug, other.token, "I can write here")).status).toBe(200);
+    for (const state of INBOX_RECEIPT_STATES) {
+      const res = await report(slug, other.token, seq, { target: bot.name, state });
+      expect(res.status).toBe(403);
+      expect((await errorOf(res)).code).toBe("not_target_owner");
+    }
+    expect((await messageOf(slug, sender.token, seq)).inbox_receipts).toBeUndefined();
+    expect((await presenceOf(slug, sender.token, bot.name)).inbox_pending).toBeUndefined();
+  });
+
+  it("even the message's own sender cannot report for a target it does not own", async () => {
+    const acct = `${uniq("acct")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: acct });
+    const slug = await createChannel(owner.token);
+    const bot = await seedToken("agent", uniq("bot"), { owner: acct, channelScope: slug });
+    const other = await outsider(slug);
+    const res = await send(slug, other.token, `@${bot.name} ping`, [bot.name]);
+    expect(res.status).toBe(200);
+    const seq = ((await res.json()) as { seq: number }).seq;
+    expect((await report(slug, other.token, seq, { target: bot.name, state: "expired" })).status).toBe(403);
+  });
+
+  it("when the server knows no owner for the target, only the target itself may report", async () => {
+    const { slug, sender, bot, relay, seq } = await fixture();
+    // 把这条 @ 的投递单抹掉：服务端对 target 的 owner 一无所知（旧数据 / 不建单的目标）。
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, (_instance: ChannelDO, state) => {
+      state.storage.sql.exec("DELETE FROM directed_deliveries WHERE message_seq = ?", seq);
+    });
+    const refused = await report(slug, relay.token, seq, { target: bot.name, state: "held" });
+    expect(refused.status).toBe(403);
+    expect((await errorOf(refused)).code).toBe("not_target_owner");
+    expect((await report(slug, bot.token, seq, { target: bot.name, state: "held" })).status).toBe(200);
+    expect((await messageOf(slug, sender.token, seq)).inbox_receipts).toHaveLength(1);
+  });
+
+  it("a delivery row with a null owner counts as unknown, not as a wildcard", async () => {
+    const { slug, bot, relay, seq } = await fixture();
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, (_instance: ChannelDO, state) => {
+      state.storage.sql.exec("UPDATE directed_deliveries SET target_owner = NULL WHERE message_seq = ?", seq);
+    });
+    expect((await report(slug, relay.token, seq, { target: bot.name, state: "held" })).status).toBe(403);
+  });
+
+  it("the owner is the one recorded for this mention, not another target's on the same message", async () => {
+    const acct = `${uniq("acct")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: acct });
+    const slug = await createChannel(owner.token);
+    const mine = await seedToken("agent", uniq("mine"), { owner: acct, channelScope: slug });
+    const foreign = await seedToken("agent", uniq("foreign"), { owner: `${uniq("o")}@example.com`, channelScope: slug });
+    const relay = await seedToken("agent", uniq("relay"), { owner: acct, channelScope: slug });
+    const res = await send(slug, owner.token, "both", [mine.name, foreign.name]);
+    const seq = ((await res.json()) as { seq: number }).seq;
+    expect((await report(slug, relay.token, seq, { target: mine.name, state: "held" })).status).toBe(200);
+    expect((await report(slug, relay.token, seq, { target: foreign.name, state: "held" })).status).toBe(403);
+    expect((await report(slug, foreign.token, seq, { target: foreign.name, state: "held" })).status).toBe(200);
   });
 });

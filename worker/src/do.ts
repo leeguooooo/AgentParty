@@ -7023,6 +7023,38 @@ export class ChannelDO extends Server<Env> {
           { status: 400 },
         );
       }
+      // 谁有资格替 target 上报：回执是「target 的收件箱说了什么」，只有两种进程真的看得到它——
+      //   (a) target 自己（蛰伏 announce 腿：MCP 子进程拿的就是 target 的 token）；
+      //   (b) 与 target 同一 owner 的 runtime（`party serve` 唤醒代理往同 owner 的本机会话里注入）。
+      // 其余频道成员一律拒：否则任何写成员都能在别人的消息上给别人钉一条假的「没送达」。
+      // target 的 owner 只认这条 @ 建单时记下的 creation-time principal（directed_deliveries.target_owner）——
+      // 不从当前 presence / 消息推断（被撤销的名字之后可能被另一个账号注册）。服务端不知道 owner
+      // （没有这条 @ 的投递单）⇒ 只有 target 自己能报。
+      if (mentionMatchKey(identity.name) !== targetKey) {
+        const reporterPrincipal = this.identityDeliveryPrincipal(identity);
+        const sameOwner = this.ctx.storage.sql
+          .exec("SELECT target_name, target_owner FROM directed_deliveries WHERE message_seq = ?", seq)
+          .toArray()
+          .some(
+            (delivery) =>
+              mentionMatchKey(String(delivery.target_name)) === targetKey &&
+              typeof delivery.target_owner === "string" &&
+              delivery.target_owner.length > 0 &&
+              delivery.target_owner === reporterPrincipal,
+          );
+        if (!sameOwner) {
+          return Response.json(
+            {
+              error: {
+                code: "not_target_owner",
+                message:
+                  "only the mentioned target itself, or a runtime owned by the same owner as the target, may report its inbox receipt",
+              },
+            },
+            { status: 403 },
+          );
+        }
+      }
       const now = Date.now();
       const existing = parseStoredInboxReceipts(row.inbox_receipts_json) ?? [];
       const previous = existing.find(

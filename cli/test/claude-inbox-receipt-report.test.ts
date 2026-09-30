@@ -131,6 +131,31 @@ describe("createInboxReceiptReporter", () => {
     expect(inboxReceiptRouteMissing(new RestError(403, "forbidden", "x"))).toBe(false);
   });
 
+  test("403（无权替这个 target 上报）⇒ 这一对 (channel, target) 停报、只留一行痕；别的 target / 频道不受影响", async () => {
+    const posts: string[] = [];
+    const lines: string[] = [];
+    const report = createInboxReceiptReporter({
+      server: "s",
+      token: "t",
+      log: (line) => lines.push(line),
+      post: (async (_server: string, _token: string, slug: string, seq: number, body: { target: string; state: string }) => {
+        posts.push(`${slug}:${seq}:${body.target}:${body.state}`);
+        if (slug === "dev" && body.target === "bot") throw new RestError(403, "not_target_owner", "nope");
+        return { message: {} };
+      }) as never,
+    });
+    await report(ref, { phase: "first", status: "held" });
+    await report(ref, { phase: "terminal", status: "expired" }); // 同一条的终态：不再发
+    await report({ ...ref, seq: 43 }, { phase: "first", status: "held" }); // 同一对的下一条 @：不再发
+    await report({ ...ref, seq: 44 }, { phase: "terminal", status: "refused" });
+    await report({ ...ref, target: "other" }, { phase: "first", status: "held" });
+    await report({ ...ref, channel: "ops" }, { phase: "first", status: "held" });
+    expect(posts).toEqual(["dev:42:bot:held", "dev:42:other:held", "ops:42:bot:held"]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("@bot");
+    expect(lines[0]).toContain("not_target_owner");
+  });
+
   test("上报器与留痕回调抛错都不外泄", async () => {
     const report = createInboxReceiptReporter({
       server: "s",

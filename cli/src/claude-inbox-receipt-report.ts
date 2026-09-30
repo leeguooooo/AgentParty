@@ -59,6 +59,8 @@ const REPORTER_SEEN_LIMIT = 512;
  * - **一次性**：每个 (channel, seq, target) 至多报一次 `held`、一次终态；重复的事件直接丢。
  * - **不重试、不订阅**：上报本身是一次普通 REST 写，失败就失败（终态上报在服务端可以不经 held
  *   直接落，所以丢一条 held 不会卡住后面的终态）。上报绝不触发新的注入或新的回执订阅。
+ * - **无权上报**（403）：服务端只接受 target 自己或同 owner 的 runtime。被拒的 (channel, target)
+ *   此后不再上报，只留一行痕。
  * - **旧服务端**：路由不存在（404 且不是「消息不存在」/ 405 / 501）⇒ 本进程此后不再上报，只留一行痕。
  * - **绝不抛错**：回执展示失败不许影响注入与清理。
  */
@@ -75,12 +77,16 @@ export function createInboxReceiptReporter(options: InboxReceiptReporterOptions)
   /** key → 已报到哪一步。 */
   const seen = new Map<string, "held" | "terminal">();
   let unsupported = false;
+  /** 被服务端以 403 拒过的 (channel, target)：这一对此后不再上报。 */
+  const forbidden = new Set<string>();
   return async (ref, event) => {
+    const pair = `${ref.channel}\u0000${ref.target}`;
     try {
       const state = inboxReceiptReportState(event);
       // `accepted`：没有回执。不上报——落库就会被读成「送达了 / 已读」。
       if (state === null) return;
       if (unsupported) return;
+      if (forbidden.has(pair)) return;
       const key = `${ref.channel}\u0000${ref.seq}\u0000${ref.target}`;
       const previous = seen.get(key);
       if (previous === "terminal") return;
@@ -103,6 +109,22 @@ export function createInboxReceiptReporter(options: InboxReceiptReporterOptions)
         log(
           `inbox receipt: 服务端不支持收件箱回执上报（HTTP ${error.status}）——本进程不再上报，` +
             "回执仍只在本机日志里（升级服务端后重启即恢复）",
+        );
+        return;
+      }
+      // 403：本进程的身份无权替这个 target 上报（既不是 target 自己，也不与它同 owner；或只读 /
+      // 已被移出频道）。这不会自己好转——这一对 (channel, target) 停报，只留一行痕，不重试。
+      if (error instanceof RestError && error.status === 403) {
+        forbidden.add(pair);
+        while (forbidden.size > limit) {
+          const oldest = forbidden.values().next();
+          if (oldest.done === true) break;
+          forbidden.delete(oldest.value);
+        }
+        log(
+          `inbox receipt: 服务端拒绝本身份替 @${ref.target} 上报（channel=${ref.channel} ` +
+            `code=${error.code ?? "forbidden"}）——只有目标自己或与它同 owner 的 runtime 可以上报；` +
+            "这一对不再上报，回执仍在本机日志里",
         );
         return;
       }

@@ -1663,7 +1663,9 @@ export const openapiDocument = {
           "Metadata on the mentioning message, not a message: it takes no seq, triggers no delivery, and never " +
           "changes @ debt — only the target's own reply or ack settles a mention. `held` is the only non-terminal " +
           "state; a terminal state is recorded once per (target, reporter) and cannot be rewritten. There is no " +
-          "`accepted` state: no receipt is not a read receipt. The reporter is taken from the bearer.",
+          "`accepted` state: no receipt is not a read receipt. The reporter is taken from the bearer and must be " +
+          "the target itself or a runtime owned by the same owner as the target (the owner recorded when the " +
+          "mention's delivery was created); when the server knows no owner for the target, only the target may report.",
         security: [{ bearer: [] }],
         parameters: [
           { name: "slug", in: "path", required: true, schema: { type: "string" } },
@@ -1694,7 +1696,11 @@ export const openapiDocument = {
         responses: {
           "200": { description: "{message, deduped?}; broadcasts message_update(receipt) and the target's refreshed presence" },
           "400": { description: "unknown state (including accepted), missing target, target not mentioned by the message, or retracted message" },
-          "403": { description: "readonly session, removed participant, or no write seat in a public_watch channel" },
+          "403": {
+            description:
+              "readonly session, removed participant, no write seat in a public_watch channel, or (code not_target_owner) " +
+              "the reporter is neither the target nor owned by the target's owner",
+          },
           "404": { description: "channel or message not found (also: a server that predates this route)" },
           "409": { description: "a different terminal state is already recorded, or the message carries too many inbox receipts" },
           "410": { description: "channel archived" },
