@@ -33,8 +33,9 @@ import {
 } from "./claude-session-registry";
 import { injectChannelMessage } from "./claude-inbox-inject";
 import { injectWithReceipt, type InboxReceiptEvent } from "./claude-inbox-receipt";
+import { join } from "node:path";
 import { assignIdentityDisambiguators, friendlyAgentLabel } from "@agentparty/shared/identity";
-import { readConfig, type CachedIdentity } from "./config";
+import { agentpartyHome, readConfig, type CachedIdentity } from "./config";
 import {
   buildWakeNote,
   wakeNoteFromId,
@@ -311,6 +312,13 @@ export interface SocketWakeProxyForwarderOptions {
   log?: (line: string) => void;
   /** 回执事件的原始回调（测试用）；在 log 之前调用。 */
   onReceipt?: (event: InboxReceiptEvent, target: ClaudeSessionRegistryEntry, ref: WakeProxyRef) => void;
+  /**
+   * 宿主（serve）的生命周期信号：中止时关掉所有还挂着的回执监听并删掉它们的 socket 文件。
+   * 信号处理归 serve 管，回执模块自己不装任何信号处理器。
+   */
+  signal?: AbortSignal;
+  /** 回执 socket 的登记目录（见 sweepStaleReceiptSockets）；不给就不登记。 */
+  receiptRegistryDir?: string;
   /** 回执等待窗口覆盖（测试用）。 */
   receiptTiming?: { firstWindowMs?: number; terminalWaitMs?: number; targetPollMs?: number };
   /** 频道昵称解析（"Message from <fromName>"）；默认本机 identity 的友好名（injectFromName）。 */
@@ -375,6 +383,8 @@ export function socketWakeProxyForwarder(
       ? await injectWithReceipt(input, {
         inject,
         ...options.receiptTiming,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.receiptRegistryDir === undefined ? {} : { registryDir: options.receiptRegistryDir }),
         onReceipt: (event) => {
           options.onReceipt?.(event, target, ref);
           const line = wakeProxyReceiptLogLine(claudeSessionAnnounceName(target), ref, event);
@@ -387,6 +397,11 @@ export function socketWakeProxyForwarder(
     // 「目标会话已死 / socket 陈旧残留 / 同名多会话」在日志里长得一模一样。
     return result.ok ? { ok: true } : { ok: false, reason: result.reason, detail: result.detail };
   };
+}
+
+/** serve 登记自己建的回执 socket 的目录（`~/.agentparty/claude-receipt-socks`）。 */
+export function defaultReceiptRegistryDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(agentpartyHome(env), "claude-receipt-socks");
 }
 
 /**

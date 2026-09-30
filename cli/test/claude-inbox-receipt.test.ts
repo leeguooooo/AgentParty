@@ -3,13 +3,14 @@
 // 它照真机行为核对回执地址形状、同目录、以及「监听者 pid == 写帧者 pid」。
 // 临时 sessions 目录 + 临时 socket 目录，绝不碰真实 `~/.claude/sessions` 或 `/tmp/cc-socks/`。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CLAUDE_NATIVE_SESSIONS_DIR_ENV } from "../src/claude-inbox-inject";
 import {
   CLAUDE_RECEIPTS_DISABLE_ENV,
   RECEIPT_MAX_PENDING,
+  sweepStaleReceiptSockets,
   injectWithReceipt,
   openReceiptListener,
   parsePeerReceipt,
@@ -28,10 +29,12 @@ let sockDir: string;
 let sockPath: string;
 let inbox: FakeInbox | null;
 
+/** 指向临时 sessions 目录的环境。 */
 function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return { ...process.env, [CLAUDE_NATIVE_SESSIONS_DIR_ENV]: sessionsDir, ...extra };
 }
 
+/** 起假收件箱，并把本进程登记成一个指向它的 Claude 原生会话。 */
 async function startInbox(policy: InboundPolicy): Promise<FakeInbox> {
   inbox = fakeClaudeInbox(sockPath, policy);
   await new Promise<void>((resolve) => inbox!.server.once("listening", () => resolve()));
@@ -55,6 +58,7 @@ function leftovers(): string[] {
   return readdirSync(sockDir).filter((name) => name !== "inbox.sock");
 }
 
+/** 注入入参：目标是本进程冒充的那个会话。 */
 const input = (extra: Record<string, unknown> = {}) => ({
   pid: process.pid,
   sessionId: SESSION_ID,
@@ -300,6 +304,117 @@ describe("injectWithReceipt", () => {
     });
     await result.settled;
     expect(leftovers()).toEqual([]);
+  });
+});
+
+describe("宿主关停与 SIGKILL 残留", () => {
+  test("lifecycle 信号中止 ⇒ 挂着的监听立刻关、socket 文件与登记都删，且不把被打断的等待报成 accepted / unknown", async () => {
+    await startInbox("hold");
+    const registryDir = join(sessionsDir, "registry");
+    const controller = new AbortController();
+    const events: InboxReceiptEvent[] = [];
+    const result = await injectWithReceipt(input(), {
+      onReceipt: (event) => void events.push(event),
+      firstWindowMs: 2000,
+      targetPollMs: 20,
+      signal: controller.signal,
+      registryDir,
+    });
+    while (events.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(leftovers()).toHaveLength(1);
+    expect(readdirSync(registryDir)).toEqual([leftovers()[0]!.replace(/\.sock$/, ".json")]);
+    controller.abort();
+    // 同步生效：serve 的 finally 里 abort 之后进程就可能退出，不能依赖后续事件循环。
+    expect(leftovers()).toEqual([]);
+    expect(readdirSync(registryDir)).toEqual([]);
+    await result.settled;
+    expect(events.map((event) => `${event.phase}:${event.status}`)).toEqual(["first:held"]);
+  });
+
+  test("第一窗口内中止 ⇒ 一个事件都不报；已中止的信号 ⇒ 直接走不带回执的旧路径", async () => {
+    const box = await startInbox("accept");
+    const controller = new AbortController();
+    const events: InboxReceiptEvent[] = [];
+    const result = await injectWithReceipt(input(), {
+      onReceipt: (event) => void events.push(event),
+      firstWindowMs: 2000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await result.settled;
+    expect(events).toEqual([]);
+    expect(leftovers()).toEqual([]);
+    await box.nextFrame();
+    const after = await injectWithReceipt(input(), { signal: controller.signal });
+    expect(after).toMatchObject({ ok: true, receipts: false });
+    expect(userFrame(await box.nextFrame()).from).toBeUndefined();
+  });
+
+  test("serve 唤醒代理把 signal 与登记目录传下去：中止后目录里不留回执 socket", async () => {
+    await startInbox("hold");
+    const registryDir = join(sessionsDir, "registry");
+    const controller = new AbortController();
+    const events: InboxReceiptEvent[] = [];
+    const forward = socketWakeProxyForwarder({
+      env: env(),
+      fromName: () => "leo",
+      fromId: () => null,
+      onReceipt: (event) => void events.push(event),
+      receiptTiming: { firstWindowMs: 2000, targetPollMs: 20 },
+      signal: controller.signal,
+      receiptRegistryDir: registryDir,
+    });
+    await forward(
+      { version: 1, session_id: SESSION_ID, pid: process.pid, display_name: null, channel: "dev", server: "https://a.example.com", cwd: "/tmp/project", registered_at: 1 },
+      { channel: "dev", server: "https://a.example.com", seq: 1 },
+    );
+    while (events.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(leftovers()).toHaveLength(1);
+    expect(readdirSync(registryDir)).toHaveLength(1);
+    controller.abort();
+    expect(leftovers()).toEqual([]);
+    expect(readdirSync(registryDir)).toEqual([]);
+  });
+
+  test("SIGKILL 留下的回执 socket：下次启动按登记删掉；活进程的、没登记的、形状不对的一律不碰", async () => {
+    const registryDir = join(sessionsDir, "registry");
+    mkdirSync(registryDir, { mode: 0o700 });
+    // 真的杀一个监听着 socket 的进程：文件留在目录里，没人监听。
+    const stale = join(sockDir, "aaaaaaaaaaaaaaaa.sock");
+    const child = Bun.spawn(
+      ["bun", "-e", `require("node:net").createServer().listen(${JSON.stringify(stale)}); setInterval(() => {}, 1000);`],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    const deadline = Date.now() + 4000;
+    while (!existsSync(stale) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(existsSync(stale)).toBe(true);
+    child.kill("SIGKILL");
+    await child.exited;
+    expect(existsSync(stale)).toBe(true);
+    writeFileSync(join(registryDir, "aaaaaaaaaaaaaaaa.json"), JSON.stringify({ pid: child.pid, path: stale }));
+
+    // 活进程（本进程）登记的：不碰。
+    const live = await openReceiptListener(sockPath, MSG);
+    expect(live.ok).toBe(true);
+    if (!live.ok) return;
+    const liveName = live.listener.path.split("/").at(-1)!.replace(/\.sock$/, "");
+    writeFileSync(join(registryDir, `${liveName}.json`), JSON.stringify({ pid: process.pid, path: live.listener.path }));
+    // 登记项指向别的文件（名字对不上 / 不是回执形状 / 不是 socket）：不删目标。
+    const inboxLike = await startInbox("accept");
+    writeFileSync(join(registryDir, "bbbbbbbbbbbbbbbb.json"), JSON.stringify({ pid: child.pid, path: inboxLike.path }));
+    const plainFile = join(sockDir, "cccccccccccccccc.sock");
+    writeFileSync(plainFile, "not a socket");
+    writeFileSync(join(registryDir, "cccccccccccccccc.json"), JSON.stringify({ pid: child.pid, path: plainFile }));
+    writeFileSync(join(registryDir, "dddddddddddddddd.json"), "not json");
+
+    expect(sweepStaleReceiptSockets(registryDir)).toEqual([stale]);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(live.listener.path)).toBe(true);
+    expect(existsSync(inboxLike.path)).toBe(true);
+    expect(existsSync(plainFile)).toBe(true);
+    expect(readdirSync(registryDir).sort()).toEqual([`${liveName}.json`, "dddddddddddddddd.json"].sort());
+    live.listener.close();
+    expect(sweepStaleReceiptSockets(join(registryDir, "missing"))).toEqual([]);
   });
 });
 

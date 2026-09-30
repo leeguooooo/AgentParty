@@ -69,6 +69,10 @@ export interface FakeInbox {
 
 const REPLY_PATH_RE = /^\/\S*\.sock$/;
 
+/**
+ * 起一个假收件箱：监听 `path`，按 `policy` 对带 `from` + `msg_id` 的 user 帧回回执。
+ * 用完调 close()。
+ */
 export function fakeClaudeInbox(path: string, policy: InboundPolicy = "accept"): FakeInbox {
   const frames: string[] = [];
   const waiters: Array<(frame: string) => void> = [];

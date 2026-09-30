@@ -430,8 +430,12 @@ Two receiver-side checks shape the implementation:
 - The reply path must match `/^\/\S*\.sock$/` and live in the **same directory** as the receiver's own
   socket. AgentParty uses `<receiver socket dir>/<16 hex>.sock`, mode 0600, and creates it only when
   that directory is a real directory owned by the current user. This one temporary file is the only
-  thing AgentParty ever creates in Claude's socket directory; it is removed when the receipt watch ends
-  and on process exit. A `SIGKILL` leaves a dead 0600 socket file behind.
+  thing AgentParty ever creates in Claude's socket directory. It is removed when the receipt watch ends,
+  when `party serve` shuts down (its lifecycle signal, aborted on `SIGINT`/`SIGTERM` and in its exit
+  path, closes every pending listener), and by a process `exit` hook. The receipt module installs no
+  signal handlers of its own. Each socket is also recorded in `~/.agentparty/claude-receipt-socks/`
+  while it exists; after a `SIGKILL`, the next `party serve` start removes the leftover file, and only
+  files that were recorded there by a process that is no longer alive.
 - The receiver sends the receipt only to **the process that wrote the frame** (it compares the reply
   socket's peer pid with the writer's). The writer must therefore be the listener and must stay alive
   until the terminal receipt. open-cross-session's CLI is short-lived, so it hands the wake to a detached

@@ -23,17 +23,19 @@
 //   脱离终端的 helper；这里的调用方（`party serve`）本身常驻，直接在本进程里监听即可。
 //
 // 「Claude 的目录只读消费」的唯一例外在这里：我们在 Claude 的 socket 目录里建**一个**临时
-// socket 文件（0600），用完必删（close() + 进程退出钩子）。进程被 SIGKILL 时那个文件会留下：
-// 它只是一个没人监听的 0600 socket，除此之外不建、不改、不删那个目录里的任何东西。
+// socket 文件（0600），用完必删：close()、调用方的 AbortSignal（serve 的关停路径）、进程退出钩子
+// 三道。本模块**不装任何信号处理器**——信号归宿主进程管。进程被 SIGKILL 时那个文件会留下；
+// 调用方给了登记目录（`registryDir`）的话，下次启动由 sweepStaleReceiptSockets 按登记删掉
+// （只删登记过、且登记进程已死的路径）。除此之外不建、不改、不删那个目录里的任何东西。
 // Windows 上回执地址得是命名管道，还要带我们不该发布的认证材料——不做，调用方保持旧行为。
 //
 // 记账纪律不变：回执只用来**告诉人**消息被扣/被拒；`accepted` 不是已读回执。任何 @ 欠账 /
 // wake 记账仍然只认对方回话。
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, unlinkSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import {
   injectChannelMessage,
   resolveSessionSocketByPid,
@@ -56,6 +58,8 @@ export const RECEIPT_MAX_PENDING = 16;
 /** 置为 `1` 关闭回执订阅，回到不带 `from` 的旧行为。 */
 export const CLAUDE_RECEIPTS_DISABLE_ENV = "AGENTPARTY_NO_CLAUDE_RECEIPTS";
 
+/** 回执 socket 的文件名形状；清理时只认这个形状。 */
+const REPLY_NAME_RE = /^[0-9a-f]{16}\.sock$/;
 /** 单条回执连接最多缓冲这么多字节；回执帧只有几百字节。 */
 const RECEIPT_MAX_BYTES = 64 * 1024;
 const RECEIPT_REASON_MAX = 200;
@@ -72,6 +76,7 @@ export interface PeerReceipt {
   reason?: string;
 }
 
+/** 对方可控文本压成一行并限长：去控制字符、折叠空白。 */
 function oneLine(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, RECEIPT_REASON_MAX);
@@ -309,6 +314,89 @@ export interface InboxReceiptEvent {
   reason?: string;
 }
 
+/** 登记项：哪个进程建了哪个回执 socket。文件名就是 socket 的文件名去掉 `.sock`。 */
+function registryEntryPath(registryDir: string, socketPath: string): string {
+  return join(registryDir, `${basename(socketPath, ".sock")}.json`);
+}
+
+/** 把一个刚建好的回执 socket 记到登记目录（0700 目录、0600 文件）。失败返回 false，不抛。 */
+function registerReceiptSocket(registryDir: string, socketPath: string): boolean {
+  try {
+    mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+    writeFileSync(registryEntryPath(registryDir, socketPath), JSON.stringify({ pid: process.pid, path: socketPath }), {
+      mode: 0o600,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 删掉一条登记；不存在不算错。 */
+function unregisterReceiptSocket(registryDir: string, socketPath: string): void {
+  try {
+    unlinkSync(registryEntryPath(registryDir, socketPath));
+  } catch {
+    // 已经没了
+  }
+}
+
+/** pid 是否还活着（EPERM 也算活）。 */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * 清掉被 SIGKILL 的进程留下的回执 socket。只动登记过的路径，而且要同时满足：登记进程已死、
+ * 文件名是 `<16 hex>.sock` 且与登记文件同名、确实是 socket、属本 uid。登记进程还活着的一律不碰
+ * （另一个 serve 正在用）。返回删掉的 socket 路径。绝不抛错。
+ */
+export function sweepStaleReceiptSockets(registryDir: string): string[] {
+  const removed: string[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(registryDir);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    if (!/^[0-9a-f]{16}\.json$/.test(name)) continue;
+    const entryPath = join(registryDir, name);
+    try {
+      const stat = lstatSync(entryPath);
+      if (!stat.isFile() || stat.size > 4096) continue;
+      const value = JSON.parse(readFileSync(entryPath, "utf8")) as { pid?: unknown; path?: unknown };
+      const pid = typeof value.pid === "number" && Number.isInteger(value.pid) && value.pid > 0 ? value.pid : null;
+      if (pid !== null && pidAlive(pid)) continue;
+      const path = typeof value.path === "string" ? value.path : "";
+      if (
+        isAbsolute(path) &&
+        REPLY_NAME_RE.test(basename(path)) &&
+        basename(path, ".sock") === basename(name, ".json")
+      ) {
+        try {
+          const sock = lstatSync(path);
+          if (sock.isSocket() && (typeof process.getuid !== "function" || sock.uid === process.getuid())) {
+            unlinkSync(path);
+            removed.push(path);
+          }
+        } catch {
+          // socket 已经不在了
+        }
+      }
+      unlinkSync(entryPath);
+    } catch {
+      // 坏登记项留着不管：宁可多留一个文件，也不按读不懂的内容去删东西。
+    }
+  }
+  return removed;
+}
+
 export interface InjectWithReceiptOptions {
   /** 注入实现（测试注入点）；默认真实 injectChannelMessage。 */
   inject?: typeof injectChannelMessage;
@@ -319,6 +407,16 @@ export interface InjectWithReceiptOptions {
   terminalWaitMs?: number;
   targetPollMs?: number;
   os?: NodeJS.Platform;
+  /**
+   * 宿主的生命周期信号。中止时立刻关掉还挂着的监听并删 socket 文件，不再报任何回执。
+   * 已中止则直接走不带回执的旧路径。
+   */
+  signal?: AbortSignal;
+  /**
+   * 登记目录：每个回执 socket 存续期间在这里留一条 `{pid, path}`，供下次启动的
+   * sweepStaleReceiptSockets 清理 SIGKILL 留下的文件。不给就不登记。
+   */
+  registryDir?: string;
 }
 
 export type InjectWithReceiptResult = InjectResult & {
@@ -353,6 +451,7 @@ export async function injectWithReceipt(
     input.pid === undefined ||
     input.fromSock !== undefined ||
     input.msgId !== undefined ||
+    options.signal?.aborted === true ||
     pendingListeners >= RECEIPT_MAX_PENDING
   ) return plain();
   const pid = input.pid;
@@ -368,13 +467,19 @@ export async function injectWithReceipt(
     return plain();
   }
   const listener = opened.listener;
+  const { signal, registryDir } = options;
+  const registered = registryDir !== undefined && registerReceiptSocket(registryDir, listener.path);
   let released = false;
   const release = () => {
     if (released) return;
     released = true;
     pendingListeners -= 1;
+    signal?.removeEventListener("abort", release);
     listener.close();
+    if (registered) unregisterReceiptSocket(registryDir, listener.path);
   };
+  // 宿主关停：close() 会让挂着的 next() 立刻返回 null，下面的观察循环看到 aborted 就收工。
+  signal?.addEventListener("abort", release, { once: true });
 
   let result: InjectResult;
   try {
@@ -398,6 +503,8 @@ export async function injectWithReceipt(
   const settled = (async () => {
     try {
       const initial = await listener.next(options.firstWindowMs ?? RECEIPT_FIRST_WINDOW_MS);
+      // 被宿主关停打断的「没有回执」不是 accepted，什么都不报。
+      if (released) return;
       if (initial === null) {
         emit({ phase: "first", status: "accepted" });
         return;
@@ -415,6 +522,7 @@ export async function injectWithReceipt(
           return;
         }
         const receipt = await listener.next(Math.min(remaining, pollMs));
+        if (released) return;
         if (receipt !== null) {
           if (receipt.status === "held") continue; // 重复的 held 不是终态
           // 一次性：报过终态就结束，后面再来什么回执都不管（监听随即关闭）。
