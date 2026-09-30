@@ -1,7 +1,8 @@
 /**
  * ChatGPT Desktop's native multi-window/thread follower IPC.
  *
- * The App owns a private 0600 Unix socket under $CODEX_HOME/ipc/ipc.sock.
+ * The App owns a private 0600 Unix socket under $CODEX_HOME/ipc/ipc.sock
+ * (on Windows: the named pipe \\.\pipe\codex-ipc, used only after its server is verified).
  * Clients use length-prefixed JSON frames, discover the renderer that owns a
  * thread, then invoke the same `thread-follower-start-turn` path ChatGPT uses
  * across its own windows. A codex_app toolOutput preserves the native
@@ -11,7 +12,14 @@ import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { createConnection, type Socket } from "node:net";
+import { createConnection } from "node:net";
+import {
+  openVerifiedCodexPipe,
+  WindowsPipeStream,
+  type WindowsPipeApi,
+  type WindowsPipeHandle,
+  type WindowsPipeServerFacts,
+} from "./codex-desktop-ipc-windows";
 import {
   isClaudeSessionRegistrySessionId,
   listCodexSessions,
@@ -41,6 +49,17 @@ export class CodexDesktopIpcUnavailableError extends Error {
   }
 }
 
+/**
+ * Windows: the pipe could not be opened, or its server failed the identity check.
+ * Nothing has been written when this is thrown, so falling back is safe.
+ */
+export class CodexDesktopIpcPipeRefusedError extends CodexDesktopIpcUnavailableError {
+  constructor(message: string) {
+    super(message);
+    this.name = "CodexDesktopIpcPipeRefusedError";
+  }
+}
+
 export class CodexDesktopIpcRequestError extends Error {
   constructor(message: string) {
     super(message);
@@ -59,14 +78,49 @@ function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * On Windows ChatGPT Desktop serves its IPC on a named pipe in the machine-wide namespace
+ * (OpenAI.Codex 26.924, observed 2026-09-29). The name can be squatted, so it is only used
+ * after the server's identity is verified (codex-desktop-ipc-windows.ts, #1132).
+ */
+export const CODEX_WINDOWS_IPC_PIPE = "\\\\.\\pipe\\codex-ipc";
+
+/** Test seam: platform and the Windows pipe API. Production passes neither. */
+export interface CodexDesktopIpcPlatform {
+  platform?: NodeJS.Platform;
+  windowsPipeApi?: WindowsPipeApi;
+}
+
 export function codexDesktopIpcSocketPath(
   env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): string {
+  // AGENTPARTY_CODEX_IPC_PIPE changes the pipe name, never the trust rule.
+  if (platform === "win32") return env.AGENTPARTY_CODEX_IPC_PIPE?.trim() || CODEX_WINDOWS_IPC_PIPE;
   const codexHome = env.CODEX_HOME?.trim() || join(homedir(), ".codex");
   return join(codexHome, "ipc", "ipc.sock");
 }
 
-export function validateCodexDesktopIpcSocket(path: string): void {
+/**
+ * Windows: open the pipe and verify its server on that same connection. On refusal the
+ * handle is closed and nothing has been written.
+ */
+function openVerifiedWindowsPipe(
+  path: string,
+  deps: CodexDesktopIpcPlatform,
+): { handle: WindowsPipeHandle; facts: WindowsPipeServerFacts } {
+  const verified = openVerifiedCodexPipe(path, deps.windowsPipeApi);
+  if (!verified.ok) throw new CodexDesktopIpcPipeRefusedError(verified.reason);
+  return verified;
+}
+
+export function validateCodexDesktopIpcSocket(path: string, deps: CodexDesktopIpcPlatform = {}): void {
+  if ((deps.platform ?? process.platform) === "win32") {
+    // A probe connection: verified, then closed without sending a frame. The connection that
+    // carries frames is verified again, on its own handle, in connect().
+    openVerifiedWindowsPipe(path, deps).handle.close();
+    return;
+  }
   let socket;
   let directory;
   try {
@@ -87,15 +141,41 @@ export function validateCodexDesktopIpcSocket(path: string): void {
   }
 }
 
+export type CodexDesktopIpcStatus =
+  | { available: true; path: string; server?: WindowsPipeServerFacts }
+  | { available: false; path: string; reason: string };
+
+/** Availability plus the reason when unavailable. On Windows, the verified server's identity. */
+export function codexDesktopIpcStatus(
+  env: NodeJS.ProcessEnv = process.env,
+  deps: CodexDesktopIpcPlatform = {},
+): CodexDesktopIpcStatus {
+  const platform = deps.platform ?? process.platform;
+  const path = codexDesktopIpcSocketPath(env, platform);
+  try {
+    if (platform === "win32") {
+      const { handle, facts } = openVerifiedWindowsPipe(path, deps);
+      handle.close();
+      return { available: true, path, server: facts };
+    }
+    validateCodexDesktopIpcSocket(path, deps);
+    return { available: true, path };
+  } catch (error) {
+    return { available: false, path, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export function codexDesktopIpcAvailable(
   env: NodeJS.ProcessEnv = process.env,
+  deps: CodexDesktopIpcPlatform = {},
 ): boolean {
-  try {
-    validateCodexDesktopIpcSocket(codexDesktopIpcSocketPath(env));
-    return true;
-  } catch {
-    return false;
-  }
+  return codexDesktopIpcStatus(env, deps).available;
+}
+
+/** The part of a connection the client uses: a net.Socket on Unix, a verified pipe handle on Windows. */
+interface IpcStream {
+  write(frame: Buffer): void;
+  destroy(): void;
 }
 
 export function selectCodexDesktopIpcRoute(
@@ -185,7 +265,7 @@ interface ConversationState {
   state: Record<string, unknown>;
 }
 
-export interface CodexDesktopIpcClientOptions {
+export interface CodexDesktopIpcClientOptions extends CodexDesktopIpcPlatform {
   env?: NodeJS.ProcessEnv;
   clientType?: string;
   requestTimeoutMs?: number;
@@ -215,7 +295,7 @@ export interface CodexDesktopIpcTransport {
 }
 
 export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
-  private socket: Socket | null = null;
+  private socket: IpcStream | null = null;
   private clientId = INITIALIZING_CLIENT_ID;
   private pending = new Map<string, PendingRequest>();
   private incoming = Buffer.alloc(0);
@@ -227,9 +307,11 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
   private readonly timeoutMs: number;
   private readonly startTurnTimeoutMs: number;
   private readonly clientType: string;
+  private readonly deps: CodexDesktopIpcPlatform;
 
   constructor(options: CodexDesktopIpcClientOptions = {}) {
-    this.socketPath = codexDesktopIpcSocketPath(options.env ?? process.env);
+    this.deps = { platform: options.platform ?? process.platform, windowsPipeApi: options.windowsPipeApi };
+    this.socketPath = codexDesktopIpcSocketPath(options.env ?? process.env, this.deps.platform);
     this.timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.startTurnTimeoutMs = options.startTurnTimeoutMs ?? 30_000;
     this.clientType = options.clientType ?? "agentparty-native-bridge";
@@ -237,7 +319,28 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
 
   async connect(): Promise<void> {
     if (this.socket !== null) return;
-    validateCodexDesktopIpcSocket(this.socketPath);
+    if (this.deps.platform === "win32") {
+      // The handle that is verified is the handle that carries the frames: there is no
+      // "checked A, connected to B" window. A refusal throws before `initialize` is written.
+      const { handle } = openVerifiedWindowsPipe(this.socketPath, this.deps);
+      this.socket = new WindowsPipeStream(
+        handle,
+        (chunk) => this.handleData(chunk),
+        (error) => this.handleClose(error),
+      );
+    } else {
+      await this.connectUnixSocket();
+    }
+    const response = await this.request("initialize", 0, { clientType: this.clientType });
+    const id = object(response.result) && typeof response.result.clientId === "string"
+      ? response.result.clientId
+      : null;
+    if (id === null) throw new CodexDesktopIpcUnavailableError(`ChatGPT Desktop IPC initialize failed`);
+    this.clientId = id;
+  }
+
+  private async connectUnixSocket(): Promise<void> {
+    validateCodexDesktopIpcSocket(this.socketPath, this.deps);
     const socket = createConnection(this.socketPath);
     this.socket = socket;
     socket.on("data", (chunk) => this.handleData(Buffer.from(chunk)));
@@ -248,12 +351,6 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
       socket.once("connect", () => { clearTimeout(timer); resolve(); });
       socket.once("error", (error) => { clearTimeout(timer); reject(error); });
     });
-    const response = await this.request("initialize", 0, { clientType: this.clientType });
-    const id = object(response.result) && typeof response.result.clientId === "string"
-      ? response.result.clientId
-      : null;
-    if (id === null) throw new CodexDesktopIpcUnavailableError(`ChatGPT Desktop IPC initialize failed`);
-    this.clientId = id;
   }
 
   async discoverThreadOwner(threadId: string, hostId: string = "local"): Promise<string> {
@@ -406,7 +503,11 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(requestId);
-        reject(error);
+        // A synchronous write (the Windows pipe handle) can fail part-way. If any byte of a
+        // start-turn frame may have left, the outcome is unknown, not "not sent".
+        reject(method === "thread-follower-start-turn"
+          ? new CodexDesktopIpcUnknownOutcomeError(`ChatGPT IPC start-turn write failed: ${String(error)}`)
+          : error);
       }
     }).then((response) => {
       if (response.resultType !== "success") {

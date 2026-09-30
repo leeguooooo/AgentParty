@@ -458,3 +458,54 @@ announce leg, which does not subscribe yet.
 Receipts do not change any accounting. A `held` or `expired` receipt is shown to the operator; it does
 not clear, retry, or re-route the mention, and `accepted` is never treated as a reply. Wake, ack and
 stuck accounting still follow the receiver's own reply on the channel.
+
+## ChatGPT Desktop IPC on Windows: the pipe's server is verified first (#1132)
+
+`party bridge codex-native` and the Codex auto-wake hook talk to ChatGPT Desktop's follower IPC
+(`cli/src/codex-desktop-ipc.ts`). On macOS and Linux that is `$CODEX_HOME/ipc/ipc.sock`, trusted only
+when the socket and its directory are owned by the current uid and are mode-private. On Windows it is
+the named pipe `\\.\pipe\codex-ipc`: a fixed name in the machine-wide pipe namespace. Whoever creates
+the name first is the server, so a pipe that merely exists proves nothing. A squatting server would
+receive every delegation prompt and thread id, and could answer as the task owner.
+
+Before any frame is written, `cli/src/codex-desktop-ipc-windows.ts` checks, on the handle that then
+carries the frames:
+
+1. **Pipe owner SID == current user SID** (`GetKernelObjectSecurity`). The counterpart of the uid
+   check, and the barrier against another account: a non-admin cannot create a pipe owned by someone
+   else. It does not depend on a process id.
+2. **The server process runs as the current user** (`GetNamedPipeServerProcessId`, then the process
+   token's user SID).
+3. **The server process is ChatGPT Desktop**: its token carries the package family
+   `OpenAI.Codex_2p2nqsd0c76g0` (`GetPackageFamilyName`), and its image is inside that package's
+   install directory (`…\WindowsApps\OpenAI.Codex_<version>…\`, writable only by TrustedInstaller).
+   Both are required: a command an agent runs under Desktop can inherit the package identity, but its
+   image is outside the package. Authenticode is not used: Store packages are signed as a package,
+   not per executable, and `WinVerifyTrust` is slow.
+
+If any check fails the handle is closed and the client throws `CodexDesktopIpcPipeRefusedError`
+(a `CodexDesktopIpcUnavailableError`): nothing was sent, so callers take their normal "Desktop IPC
+unavailable" path. A start-turn frame whose write fails part-way is an unknown outcome and is never
+replayed.
+
+Why the check is per connection. Desktop's pipe has the default DACL (SYSTEM, Administrators and the
+owner get full access; Everyone gets read), so another non-admin account can neither write to it nor
+add instances. A process of the same user can add its own instances next to the real server
+(`FILE_FLAG_FIRST_PIPE_INSTANCE` only protects the moment of creation). A "probe, then connect
+again" design would therefore check one server and talk to another. `net.Socket` does not expose the
+pipe handle, so on Windows the whole transport runs over the verified handle through `bun:ffi`
+(`PeekNamedPipe` polling, 2 ms after traffic, backing off to 50 ms). The handle is opened with
+`SECURITY_IDENTIFICATION`, so a rogue server cannot impersonate the client, and only `\\.\pipe\…`
+names are accepted (a `\\host\pipe\…` name would send credentials over SMB).
+`codexDesktopIpcAvailable` is an open-verify-close probe that sends no frame; no server identity is
+cached.
+
+`AGENTPARTY_CODEX_IPC_PIPE` changes the pipe name (for tests); the same checks apply to it.
+
+Limits. A process already running as the same user can defeat any user-mode check (it can inject
+into Desktop itself), and checks 2 and 3 rely on a process id. A ChatGPT Desktop that is not the
+Store package, or that runs elevated (the pipe's owner becomes Administrators), is refused.
+
+Verified on Windows 11 with OpenAI.Codex 26.924 (2026-09-30, through open-cross-session, which shares
+this code): the real Desktop passes; a squatting pipe served by the same user, and one served by
+another user with an Everyone-writable DACL, are both refused and receive 0 bytes.
