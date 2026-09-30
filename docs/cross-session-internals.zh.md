@@ -432,3 +432,44 @@ serve 的唤醒代理仍是纯增量：它的返回值照旧被 `serve` 丢弃�
 兼容性：没有这条路由的服务端回 404，CLI 在本进程余下的时间里停止上报（回执仍在本机日志里）。旧版 CLI / 网页忽略
 `inbox_receipts` 和 `inbox_pending` 字段；实时更新复用已有的 `message_update` 动作 `receipt`，旧客户端不会丢帧。
 读取方跳过不认识的状态。
+
+## Windows 上的 ChatGPT Desktop IPC：先核对管道的服务端（#1132）
+
+`party bridge codex-native` 和 Codex 自动唤醒 hook 通过 ChatGPT Desktop 的 follower IPC 通信
+（`cli/src/codex-desktop-ipc.ts`）。macOS 和 Linux 上是 `$CODEX_HOME/ipc/ipc.sock`，只有 socket
+和所在目录都属于当前 uid、权限私有时才信任。Windows 上是命名管道 `\\.\pipe\codex-ipc`：全机共用
+的管道命名空间里的固定名字，谁先建谁就是服务端，名字存在不说明任何事。抢注的服务端会收到每一条
+委派 prompt 和 thread id，还能冒充任务 owner 应答。
+
+写出任何帧之前，`cli/src/codex-desktop-ipc-windows.ts` 在随后发帧的那个句柄上检查：
+
+1. **管道属主 SID == 当前用户 SID**（`GetKernelObjectSecurity`）。对应 uid 检查，也是挡住别的
+   账号的那一道：非管理员建不出属主是别人的管道。它不依赖进程 id。
+2. **服务端进程以当前用户运行**（`GetNamedPipeServerProcessId`，再读进程令牌的用户 SID）。
+3. **服务端进程是 ChatGPT Desktop**：令牌带包族名 `OpenAI.Codex_2p2nqsd0c76g0`
+   （`GetPackageFamilyName`），并且映像在该包的安装目录里（`…\WindowsApps\OpenAI.Codex_<版本>…\`，
+   只有 TrustedInstaller 可写）。两条都要：Desktop 底下 agent 跑的命令会继承包身份，但映像在包
+   目录外。不用 Authenticode：Store 包按包签名而不是按可执行文件，`WinVerifyTrust` 也慢。
+
+任何一条不过，就关闭句柄并抛 `CodexDesktopIpcPipeRefusedError`（它是
+`CodexDesktopIpcUnavailableError` 的子类）：什么都没发出去，调用方走原有的「Desktop IPC 不可用」
+路径。start-turn 帧写到一半失败算结果未知，绝不重放。
+
+为什么必须逐连接检查。Desktop 的管道用的是默认 DACL（SYSTEM、Administrators、属主全权，Everyone
+只读），别的非管理员账号写不进去，也加不了实例。同一用户的进程却可以在真服务端旁边加自己的实例
+（`FILE_FLAG_FIRST_PIPE_INSTANCE` 只保护创建那一刻）。「先探测、再另连一次」查的和用的就可能不是
+同一个服务端。`net.Socket` 不给管道句柄，所以 Windows 上整条传输都通过 `bun:ffi` 跑在校验过的
+句柄上（`PeekNamedPipe` 轮询，有流量时 2 ms，空闲退到 50 ms）。句柄设成 `PIPE_NOWAIT`，管道暂时
+收不下的字节排队等待，服务端停止读取也不会把事件循环卡在 `WriteFile` 里，请求超时照常触发。句柄以 `SECURITY_IDENTIFICATION`
+打开，流氓服务端不能冒充客户端；只接受 `\\.\pipe\…` 形式的名字（`\\host\pipe\…` 会把凭据送上
+SMB）。`codexDesktopIpcAvailable` 是一次「开、查、关」的探测，不发帧；不缓存服务端身份。
+
+`AGENTPARTY_CODEX_IPC_PIPE` 可以换管道名（测试用），换了名字的管道走同样的检查。
+
+边界。已经以同一用户运行的进程能绕过任何用户态检查（它可以直接注入 Desktop），第 2、3 条也依赖
+进程 id。不是 Store 包安装的 ChatGPT Desktop、以管理员身份运行的 Desktop（管道属主变成
+Administrators）会被拒绝。
+
+真机验证：Windows 11，OpenAI.Codex 26.924（2026-09-30，经由共用这份代码的 open-cross-session）：
+真 Desktop 通过；同一用户起的抢注管道、另一用户起的并把 DACL 放开给 Everyone 的抢注管道都被拒，
+各收到 0 字节。
