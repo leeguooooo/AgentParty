@@ -253,15 +253,33 @@ export function nativeSessionName(
 /**
  * 读 peerToken：`~/.claude/sessions/<pid>.<sha256(socket path)>.key`（native `USd`）。
  * 读不到（非 Windows optional）返回 null，写入时就不带 auth 行。
+ *
+ * Windows 上 Claude 按**小写**规范化后的管道路径算哈希（2.1.284 实测：
+ * `\\.\pipe\LOCAL\cc-msg-…` 的 key 文件名是 `\\.\pipe\local\cc-msg-…` 的 sha256）。
+ * 先试原样，Windows 再试小写（open-cross-session 回流）。`os` 仅供测试覆盖。
  */
 export function readPeerToken(
   session: NativeClaudeSession,
   env: NodeJS.ProcessEnv = process.env,
+  os: NodeJS.Platform = platform(),
 ): string | null {
   const dir = nativeSessionsDir(env);
   if (dir === null) return null;
-  const hash = createHash("sha256").update(session.messagingSocketPath).digest("hex");
-  const path = join(dir, `${session.pid}.${hash}.key`);
+  const candidates = [session.messagingSocketPath];
+  if (os === "win32") {
+    const lowered = session.messagingSocketPath.toLowerCase();
+    if (lowered !== session.messagingSocketPath) candidates.push(lowered);
+  }
+  for (const socketPath of candidates) {
+    const token = readPeerTokenFile(dir, session.pid, socketPath);
+    if (token !== null) return token;
+  }
+  return null;
+}
+
+function readPeerTokenFile(dir: string, pid: number, socketPath: string): string | null {
+  const hash = createHash("sha256").update(socketPath).digest("hex");
+  const path = join(dir, `${pid}.${hash}.key`);
   try {
     const stat = lstatSync(path);
     if (
@@ -401,9 +419,19 @@ export type InjectFailureReason =
  *
  * 返回 null ＝通过；返回字符串 ＝拒投理由（进 InjectResult.detail）。
  * 注意 `lstatSync` 不跟随符号链接：指向他人 socket 的软链会同时命中 isSymbolicLink 与
- * !isSocket 两条，任一条都足以拒投。
+ * !isSocket 两条，任一条都足以拒投。`os` 仅供测试覆盖。
  */
-export function socketOwnershipFailure(sockPath: string): string | null {
+export function socketOwnershipFailure(
+  sockPath: string,
+  os: NodeJS.Platform = platform(),
+): string | null {
+  // Windows：Claude 的收件箱是命名管道 `\\.\pipe\LOCAL\cc-msg-…`，lstat 不适用。LOCAL 命名空间
+  // 只对同一登录会话可见，管道 ACL 由 Claude 设；另外 Windows 上写入强制带 peer token
+  // （见 injectChannelMessage），两道一起替代 uid 校验（open-cross-session 回流；这里比 ocs 收得更紧：
+  // 只认 LOCAL 命名空间下的单级管道名）。管道服务端的进程身份**没有**独立校验，见 #1132 的同类问题。
+  if (os === "win32") {
+    return /^\\\\\.\\pipe\\LOCAL\\[^\\/]+$/i.test(sockPath) ? null : "path is not a LOCAL named pipe";
+  }
   let stat: ReturnType<typeof lstatSync>;
   try {
     stat = lstatSync(sockPath);
@@ -422,12 +450,14 @@ export type InjectResult =
   /**
    * ok:true 的语义，写死在这里（#867 ①附带）：**字节已交给内核**。
    * `writeFramesToSocket` 走 `socket.end(payload, cb)`，回调只在数据 flush 之后触发——
-   * 不代表对端读了、更不代表对端解析了。本模块从不读任何响应、也不订阅
-   * `peer_message_status`，所以**连 auth 行被拒都感知不到**。
+   * 不代表对端读了、更不代表对端解析了。本模块从不读任何响应，所以**连 auth 行被拒都感知不到**。
+   * 接收端闸门的归宿（held / expired / refused …）只能靠原生回执 `peer_message_status` 得知：
+   * 调用方传 `fromSock` + `msgId` 并自己监听那个 socket（claude-inbox-receipt.ts）。
    *
    * 也就是说 ok:true ＝**帧已写入收件箱 socket**，不代表已进对方对话流。接收端的
    * crossSessionInbound 闸门决定归宿：accept 才入队唤醒；默认 hold 会进待审队列并在
-   * 5 分钟无人处理后被 drop；refuse 直接丢。接收端不回错，我们无从区分。
+   * 5 分钟无人处理后被 drop；refuse 直接丢。不订阅回执时我们无从区分；订阅了也只知道
+   * 「被扣/被拒」，accept 时接收端一条都不回——没有回执不是已读回执。
    * **调用方绝不可据此清频道侧的 @ 欠账/wake 记账**——真正送达以对方回话/ack 为准。
    */
   | { ok: true; socketPath: string; usedAuth: boolean; target: string }
@@ -449,10 +479,19 @@ export interface InjectChannelMessageInput {
   body: string;
   /** 频道昵称（"Message from <fromName>"）。 */
   fromName: string;
-  /** 自己的回执 socket（serve 无则省略——绝不冒用别人的）。 */
+  /**
+   * 自己的回执 socket（没有就省略——绝不冒用别人的）。给了它，接收端会把这条消息的归宿作为
+   * `peer_message_status` 回发到这个 socket；**监听它的必须就是调用本函数的进程**（接收端按
+   * 写入方 pid 核对）。见 claude-inbox-receipt.ts。
+   */
   fromSock?: string;
   fromMode?: "prompting" | "bypass";
   priority?: "now" | "next" | "later";
+  /**
+   * 帧的 msg_id。回执（`peer_message_status`）用 `orig_msg_id` 指回它，所以要订阅回执的调用方
+   * 必须自己定这个值（见 claude-inbox-receipt.ts）；省略时照旧随机生成。
+   */
+  msgId?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -507,6 +546,7 @@ export async function injectChannelMessage(
     fromSock: input.fromSock,
     peerToken,
     priority: input.priority,
+    ...(input.msgId !== undefined ? { msgId: input.msgId } : {}),
   });
   for (const line of lines) {
     if (Buffer.byteLength(line, "utf8") + 1 > CLAUDE_INBOX_MAX_LINE_BYTES) {
@@ -527,23 +567,28 @@ export async function injectChannelMessage(
   };
 }
 
-/** 连上 → 写 JSONL（各行 `\n` 结尾）→ end()。一次性连接。 */
+/**
+ * 连上 → 写 JSONL（各行 `\n` 结尾）→ end() → **destroy()**。一次性连接。
+ *
+ * 成功路径也必须 destroy（open-cross-session Linux CI 现场，回流）：`end()` 的回调只说明字节已交给
+ * 内核，此时 socket 还是半关闭、在等对端的 FIN。对端若迟迟不 accept/不关（接收端事件循环被阻塞），
+ * 这个句柄会把进程的事件循环一直撑着——一次性命令打印完结果却永远不退出；而 timeout 分支在
+ * 已 settled 之后又直接 return，连兜底的 destroy 都不做。字节已 flush 进内核缓冲，AF_UNIX 下
+ * 我们这头关掉不会丢对端待读的数据（Linux/macOS 都实测过）。
+ */
 function writeFramesToSocket(sockPath: string, lines: readonly string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
-      if (error) {
-        try {
-          socket.destroy();
-        } catch {
-          // ignore
-        }
-        reject(error);
-      } else {
-        resolve();
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
       }
+      if (error) reject(error);
+      else resolve();
     };
     const socket = connect({ path: sockPath });
     socket.setTimeout(WRITE_TIMEOUT_MS);

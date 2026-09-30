@@ -80,6 +80,25 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+describe("socketOwnershipFailure：Windows 命名管道", () => {
+  test("win32：只放行 `\\\\.\\pipe\\LOCAL\\<name>`（lstat 不适用，靠 LOCAL 命名空间 + 强制 peer token）；别的一律拒投", () => {
+    expect(socketOwnershipFailure("\\\\.\\pipe\\LOCAL\\cc-msg-abc", "win32")).toBeNull();
+    expect(socketOwnershipFailure("\\\\.\\PIPE\\local\\cc-msg-abc", "win32")).toBeNull();
+    const refused = "path is not a LOCAL named pipe";
+    // 全局命名空间的管道：任何会话的进程都能抢这个名字。
+    expect(socketOwnershipFailure("\\\\.\\pipe\\cc-msg-abc", "win32")).toBe(refused);
+    expect(socketOwnershipFailure("\\\\.\\pipe\\LOCAL\\", "win32")).toBe(refused);
+    expect(socketOwnershipFailure("\\\\.\\pipe\\LOCAL\\a\\b", "win32")).toBe(refused);
+    expect(socketOwnershipFailure("\\\\otherhost\\pipe\\LOCAL\\cc-msg-abc", "win32")).toBe(refused);
+    expect(socketOwnershipFailure("C:\\Users\\x\\inbox.sock", "win32")).toBe(refused);
+    expect(socketOwnershipFailure("/tmp/cc-socks/1.sock", "win32")).toBe(refused);
+  });
+
+  test("非 win32：管道形状的路径不因此放行，仍走 lstat 校验", () => {
+    expect(socketOwnershipFailure("\\\\.\\pipe\\LOCAL\\cc-msg-abc", "darwin")).toContain("lstat failed");
+  });
+});
+
 describe("按 pid 寻址（#857 真实寻址层）", () => {
   test("宣告名按 name 寻址恒 no-match，按 pid 寻址命中——这正是线上失效的根因", () => {
     writeNativeSession();

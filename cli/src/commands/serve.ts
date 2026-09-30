@@ -67,7 +67,13 @@ import {
 } from "../statusline-cache";
 import { ackDelivery, downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchRecentMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
-import { attemptWakeProxy, socketWakeProxyForwarder, type WakeProxyDeps } from "../serve-wake-proxy";
+import {
+  attemptWakeProxy,
+  defaultReceiptRegistryDir,
+  socketWakeProxyForwarder,
+  type WakeProxyDeps,
+} from "../serve-wake-proxy";
+import { sweepStaleReceiptSockets } from "../claude-inbox-receipt";
 import { detectWakeLang } from "../wake-note-i18n";
 
 /** #1003：config `lang` 显式覆盖（唤醒代理通知的语言）。每条 @ 帧都会问一次，按 60s 记忆，读失败当没有。 */
@@ -5685,6 +5691,12 @@ export async function runServe(o: ServeOptions): Promise<number> {
     throw error;
   }
   const lifecycleController = new AbortController();
+  // 上一个 serve 被 SIGKILL 时来不及删的回执 socket：按登记清掉（只删登记过、登记进程已死的）。
+  if (o.wakeProxy?.forward === undefined) {
+    bestEffortLocalState(() => {
+      sweepStaleReceiptSockets(defaultReceiptRegistryDir());
+    });
+  }
   let shutdownError: ServeShutdownError | null = null;
   const requestShutdown = (error: ServeShutdownError) => {
     if (shutdownError !== null) return;
@@ -6156,7 +6168,13 @@ export async function runServe(o: ServeOptions): Promise<number> {
           ...wakeProxyDeps,
           // #844：默认接 socket 优先载体（本机 UDS 收件箱注入，原生「Message from X」UX）；
           // 失败降级为现行为。测试注入的 forward 仍优先。
-          forward: wakeProxyDeps.forward ?? socketWakeProxyForwarder(),
+          // 回执（held / 终态）各打一行到 serve 输出；不进 wake/ack 记账。lifecycle 信号一中止
+          // （SIGINT/SIGTERM 或 runServe 收尾），挂着的回执监听立刻关、socket 文件立刻删。
+          forward: wakeProxyDeps.forward ?? socketWakeProxyForwarder({
+            log: out,
+            signal: lifecycleController.signal,
+            receiptRegistryDir: defaultReceiptRegistryDir(),
+          }),
           log: out,
         });
       }

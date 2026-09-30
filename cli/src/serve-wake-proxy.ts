@@ -32,8 +32,10 @@ import {
   type ClaudeSessionRegistryEntry,
 } from "./claude-session-registry";
 import { injectChannelMessage } from "./claude-inbox-inject";
+import { injectWithReceipt, type InboxReceiptEvent } from "./claude-inbox-receipt";
+import { join } from "node:path";
 import { assignIdentityDisambiguators, friendlyAgentLabel } from "@agentparty/shared/identity";
-import { readConfig, type CachedIdentity } from "./config";
+import { agentpartyHome, readConfig, type CachedIdentity } from "./config";
 import {
   buildWakeNote,
   wakeNoteFromId,
@@ -291,8 +293,34 @@ export const noWakeProxyForwarder: WakeProxyForwarder = async (): Promise<WakePr
 });
 
 export interface SocketWakeProxyForwarderOptions {
-  /** 自己的回执 socket（`from:uds:<...>`）。serve 无回执 sock → 省略，接收端记 unknown。 */
+  /**
+   * 调用方自管的回执 socket（`from:uds:<...>`）。给了它就不再由本载体订阅回执（见 `receipts`）。
+   * 省略且回执不可用时帧不带 `from`，接收端记 unknown。
+   */
   fromSock?: string;
+  /**
+   * 是否订阅 Claude 原生投递回执（`peer_message_status`，open-cross-session
+   * docs/wake-protocol.md §6）。默认：用真实 inject 时开，测试注入了 `inject` 时关（别让一个假
+   * inject 的用例去真实的 Claude socket 目录里建文件）。开了也只在能建起监听时生效——Windows、
+   * `AGENTPARTY_NO_CLAUDE_RECEIPTS=1`、监听建不起来 ⇒ 与今天逐字节相同的不带 `from` 注入。
+   */
+  receipts?: boolean;
+  /**
+   * 回执的去向：被扣留 / 被拒 / 扣留后的终态各打一行。`accepted`（没有回执）不打——那是常态，
+   * 而且不是已读回执。不给就不打（回执照常订阅、照常清理）。
+   */
+  log?: (line: string) => void;
+  /** 回执事件的原始回调（测试用）；在 log 之前调用。 */
+  onReceipt?: (event: InboxReceiptEvent, target: ClaudeSessionRegistryEntry, ref: WakeProxyRef) => void;
+  /**
+   * 宿主（serve）的生命周期信号：中止时关掉所有还挂着的回执监听并删掉它们的 socket 文件。
+   * 信号处理归 serve 管，回执模块自己不装任何信号处理器。
+   */
+  signal?: AbortSignal;
+  /** 回执 socket 的登记目录（见 sweepStaleReceiptSockets）；不给就不登记。 */
+  receiptRegistryDir?: string;
+  /** 回执等待窗口覆盖（测试用）。 */
+  receiptTiming?: { firstWindowMs?: number; terminalWaitMs?: number; targetPollMs?: number };
   /** 频道昵称解析（"Message from <fromName>"）；默认本机 identity 的友好名（injectFromName）。 */
   fromName?: (ref: WakeProxyRef) => string;
   /**
@@ -318,6 +346,11 @@ export interface SocketWakeProxyForwarderOptions {
  * 现状已符合——serve.ts 只 await attemptWakeProxy 并**丢弃返回值**，wake/ack/stuck 记账
  * 完全走独立的 qualifies 路径，转投与否都不改变现行为（「纯增量」）。改这里前先复核那点。
  *
+ * 回执（open-cross-session docs/wake-protocol.md §6）：serve 是常驻进程，写帧的和监听回执
+ * socket 的天然是同一个进程，所以直接在这里订阅，不需要 ocs 那样的脱离终端 helper。回执**不阻塞**
+ * 转投结果——帧写完即返回 ok:true（语义仍是「已写进收件箱」），`held` / 终态随后各打一行日志。
+ * 回执同样**不进任何记账**：它只回答「消息被扣 / 被拒了吗」，不回答「对方处理了吗」。
+ *
  * TODO(#844 serve 降级集成)：当前 socket 不可用时的「serve headless resume loop stdin 注入」
  * 复用的是 serve 现行为（runner 正常处理这条 @），不是独立的 stdin 注入调用。待 serve 侧
  * 暴露显式的「把下一个 user turn 喂给 resume loop」接口后，可在此 false 分支上再挂一跳，
@@ -330,11 +363,12 @@ export function socketWakeProxyForwarder(
   // 默认 from-name＝本机 identity 的友好名；技术 ID（owner 2026-08-20：是身份本身，不能丢）
   // 不再拼进主名，而是进正文 `from-id:`（#986）。两者默认都读本机 identity，只读一次。
   const needsIdentity = options.fromName === undefined || options.fromId === undefined;
+  const receipts = options.fromSock === undefined && (options.receipts ?? options.inject === undefined);
   return async (target, ref) => {
     const identity = needsIdentity ? resolveLocalIdentity() : null;
     const fromName = options.fromName === undefined ? injectFromName(ref.channel, identity) : options.fromName(ref);
     const fromId = options.fromId === undefined ? (identity?.name ?? null) : options.fromId(ref);
-    const result = await inject({
+    const input = {
       // 同 #857：按 pid 寻址（registry entry.pid 与 ~/.claude/sessions/<pid>.json 同源），
       // sessionId 防 pid 复用。宣告名只作展示/回退，绝不用来寻址。
       pid: target.pid,
@@ -344,12 +378,60 @@ export function socketWakeProxyForwarder(
       fromName,
       fromSock: options.fromSock,
       env: options.env,
-    });
+    };
+    const result = receipts
+      ? await injectWithReceipt(input, {
+        inject,
+        ...options.receiptTiming,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.receiptRegistryDir === undefined ? {} : { registryDir: options.receiptRegistryDir }),
+        onReceipt: (event) => {
+          options.onReceipt?.(event, target, ref);
+          const line = wakeProxyReceiptLogLine(claudeSessionAnnounceName(target), ref, event);
+          if (line !== null) options.log?.(line);
+        },
+      })
+      : await inject(input);
     // #867 ①：结构化失败原因**必须**透出。以前这里是 `return result.ok;`，
     // injectChannelMessage 精心构造的 6 种 {reason, detail} 全被丢掉，
     // 「目标会话已死 / socket 陈旧残留 / 同名多会话」在日志里长得一模一样。
     return result.ok ? { ok: true } : { ok: false, reason: result.reason, detail: result.detail };
   };
+}
+
+/** serve 登记自己建的回执 socket 的目录（`~/.agentparty/claude-receipt-socks`）。 */
+export function defaultReceiptRegistryDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(agentpartyHome(env), "claude-receipt-socks");
+}
+
+/**
+ * 回执 → 一行 serve 日志；`accepted` 返回 null（不打）。`reason` 是接收端给的文本，已在解析时
+ * 压成一行、限长，这里只当数据拼进日志。
+ */
+export function wakeProxyReceiptLogLine(
+  name: string,
+  ref: Pick<WakeProxyRef, "channel" | "seq">,
+  event: InboxReceiptEvent,
+): string | null {
+  if (event.status === "accepted") return null;
+  const where = `channel=${ref.channel} seq=${ref.seq}`;
+  const reason = event.reason === undefined ? "" : ` reason=${event.reason}`;
+  if (event.phase === "first" && event.status === "held") {
+    return (
+      `serve: @${name} 的唤醒被接收端扣留待审（${where} status=held${reason}）——尚未进对话，5 分钟内无人批准即丢弃。` +
+      "接收端 crossSessionInbound 为 hold（默认值；仓库级设置会覆盖用户级 accept），消息仍在频道历史"
+    );
+  }
+  if (event.status === "delivered") {
+    return `serve: @${name} 被扣留的唤醒已获批准并送达（${where} status=delivered${reason}）`;
+  }
+  if (event.status === "unknown") {
+    return `serve: @${name} 被扣留的唤醒结局未知（${where} status=unknown${reason}）——消息仍在频道历史`;
+  }
+  return (
+    `serve: @${name} 的唤醒${event.phase === "terminal" ? "被扣留后最终" : ""}没有送达（${where} status=${event.status}${reason}）` +
+    "——消息仍在频道历史，请勿重发"
+  );
 }
 
 export interface WakeProxyAttempt {

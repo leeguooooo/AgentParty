@@ -307,3 +307,53 @@ MCP `party_send({ notify_when_idle: true })`、REST
 - 订阅方的 presence 条目在订阅未触发期间带 `idle_watches: [{target, expires_at}]`，`party who --json` 能看到「我在等谁」。
 - `send … --notify-when-idle` 先发消息，再对每个显式 `--mention` 和正文里服务端确实路由到的 `@token` 订阅；
   订阅失败只打一行 `warn:`，绝不影响已发出的消息。
+
+### §6 投递回执：收件箱的 `ok` 不等于送达
+
+节号与状态沿用[共用协议的 §6](https://github.com/leeguooooo/open-cross-session/blob/main/docs/wake-protocol.md#6-投递回执claude-载体v070)，
+以那边为准。
+
+`injectChannelMessage` 返回 `ok: true` 只说明帧的字节已经交给接收端的收件箱 socket。接收端 Claude 会话随后
+要过自己的 `crossSessionInbound` 闸门：`accept` 直接进对话；`hold`（默认值）进待审队列，5 分钟没人批准就丢；
+也可能被拒。项目级的 `crossSessionInbound: "hold"` 会覆盖用户级的 `accept`，所以一个仓库可以把在它里面
+启动的所有会话都收紧成 hold。
+
+Claude Code 用原生回执（`peer_message_status`，2.1.285 实测，未文档化，可能随版本变）报告闸门的决定。
+`user` 帧同时带 `from: "uds:<回执 socket>"` 和 `msg_id` 时，接收端连到那个 socket，每次状态变化写一条 JSONL
+控制帧，用 `orig_msg_id` 指回原消息：
+
+| 线上形态 | 归一后 | 证明什么 |
+|---|---|---|
+| 400 ms 内没有回执 | `accepted` | 没被扣、没被拒。策略是 `accept` 时接收端**一条都不回**，所以这不是已读回执，也不证明对方处理了 |
+| `held` | `held` | 被闸门扣下，**还没进**对话。写入后约 40 ms 到，之后还有一条终态 |
+| `delivered` | `delivered` | 被扣的消息有人批准，已进对话 |
+| `expired` | `expired` | 没送达：5 分钟超时、待审队列被挤、或接收端会话退出 |
+| `expired` + `status_detail: "refused"` | `refused` | 没送达：被拒 |
+| `dropped`（带 `drop_reason`） | `dropped` | 没送达：队列满 |
+| `denied` | `denied` | 没送达：策略拒绝 |
+
+`orig_msg_id` 对不上或状态不认识的回执一律丢弃。`reason` 是接收端给的文本：压成一行、限 200 字符，当数据处理。
+
+接收端的两条校验决定了实现形状：
+
+- 回执路径必须匹配 `/^\/\S*\.sock$/`，并且和接收端自己的 socket **同目录**。AgentParty 用
+  `<接收端 socket 所在目录>/<16 hex>.sock`，权限 0600，只有那个目录是真目录且属于当前用户时才建。
+  这一个临时文件是 AgentParty 在 Claude 的 socket 目录里唯一会建的东西。删除时机有三个：回执观察结束；
+  `party serve` 关停（它的生命周期信号在 `SIGINT` / `SIGTERM` 和退出路径上中止，随即关掉所有挂着的监听）；
+  进程 `exit` 钩子。回执模块自己不装任何信号处理器。每个 socket 存续期间还登记在
+  `~/.agentparty/claude-receipt-socks/`；进程被 `SIGKILL` 后，下一次 `party serve` 启动会删掉留下的文件，
+  只删登记过、且登记进程已死的那些。登记目录必须是属于当前用户、权限 0700 的真目录，否则既不登记也不清理。
+- 回执只发给**写入那条帧的进程**（接收端拿回执 socket 的对端 pid 和写入方 pid 比）。所以写帧的进程必须同时
+  是监听者，并且活到终态回执到来。open-cross-session 的 CLI 是一次性进程，只能把唤醒交给脱离终端的 helper；
+  `party serve` 本身常驻，直接在本进程监听。
+
+AgentParty 目前用到回执的地方：`party serve` 的唤醒代理（`cli/src/serve-wake-proxy.ts`、
+`cli/src/claude-inbox-receipt.ts`）。回执不阻塞转投——帧照旧写完即返回——结果打在 serve 日志里：`held` 一行，
+终态一行，第一时间的 `refused` / `dropped` / `denied` / `expired` 一行；`accepted` 不打。`held` 之后最多等
+5 分钟 + 60 秒的终态，接收端会话消失时提前结束，到点仍无终态记为 `unknown`。
+
+以下情况没有回执，注入与之前逐字节相同（不带 `from`、不建监听）：Windows（回执地址得是命名管道，还要带认证材料）、
+`AGENTPARTY_NO_CLAUDE_RECEIPTS=1`、监听建不起来，以及蛰伏 announce 腿（尚未订阅）。
+
+回执不改变任何记账。`held` / `expired` 只是给运维看的；它不会清掉、重试或改投这条 @，`accepted` 也绝不当作
+对方已回复。wake / ack / stuck 记账仍然只认接收端在频道里的回话。
