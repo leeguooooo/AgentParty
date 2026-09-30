@@ -496,16 +496,19 @@ export class CodexDesktopIpcClient implements CodexDesktopIpcTransport {
       const pending: PendingRequest = { method, written: false, resolve, reject, timer };
       this.pending.set(requestId, pending);
       try {
-        socket.write(encodeFrame(message));
-        // Once queued to the connected local router, a lost response cannot
+        const frame = encodeFrame(message);
+        // Once handed to the connected local router, a lost response cannot
         // prove the renderer did not start the turn. Prefer unknown over replay.
+        // Marked before the write: a transport that fails inside write() closes the
+        // client synchronously, and that close must already see the frame as written.
         pending.written = true;
+        socket.write(frame);
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(requestId);
-        // A synchronous write (the Windows pipe handle) can fail part-way. If any byte of a
-        // start-turn frame may have left, the outcome is unknown, not "not sent".
-        reject(method === "thread-follower-start-turn"
+        // A write that throws may already have put part of the frame on the wire. If any byte
+        // of a start-turn frame may have left, the outcome is unknown, not "not sent".
+        reject(method === "thread-follower-start-turn" && pending.written
           ? new CodexDesktopIpcUnknownOutcomeError(`ChatGPT IPC start-turn write failed: ${String(error)}`)
           : error);
       }

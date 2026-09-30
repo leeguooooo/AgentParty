@@ -384,7 +384,8 @@ AgentParty 目前用到回执的地方：`party serve` 的唤醒代理（`cli/sr
 只读），别的非管理员账号写不进去，也加不了实例。同一用户的进程却可以在真服务端旁边加自己的实例
 （`FILE_FLAG_FIRST_PIPE_INSTANCE` 只保护创建那一刻）。「先探测、再另连一次」查的和用的就可能不是
 同一个服务端。`net.Socket` 不给管道句柄，所以 Windows 上整条传输都通过 `bun:ffi` 跑在校验过的
-句柄上（`PeekNamedPipe` 轮询，有流量时 2 ms，空闲退到 50 ms）。句柄以 `SECURITY_IDENTIFICATION`
+句柄上（`PeekNamedPipe` 轮询，有流量时 2 ms，空闲退到 50 ms）。句柄设成 `PIPE_NOWAIT`，管道暂时
+收不下的字节排队等待，服务端停止读取也不会把事件循环卡在 `WriteFile` 里，请求超时照常触发。句柄以 `SECURITY_IDENTIFICATION`
 打开，流氓服务端不能冒充客户端；只接受 `\\.\pipe\…` 形式的名字（`\\host\pipe\…` 会把凭据送上
 SMB）。`codexDesktopIpcAvailable` 是一次「开、查、关」的探测，不发帧；不缓存服务端身份。
 

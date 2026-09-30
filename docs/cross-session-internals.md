@@ -494,7 +494,9 @@ add instances. A process of the same user can add its own instances next to the 
 (`FILE_FLAG_FIRST_PIPE_INSTANCE` only protects the moment of creation). A "probe, then connect
 again" design would therefore check one server and talk to another. `net.Socket` does not expose the
 pipe handle, so on Windows the whole transport runs over the verified handle through `bun:ffi`
-(`PeekNamedPipe` polling, 2 ms after traffic, backing off to 50 ms). The handle is opened with
+(`PeekNamedPipe` polling, 2 ms after traffic, backing off to 50 ms). The handle is switched to
+`PIPE_NOWAIT` and bytes the pipe cannot take yet are queued, so a server that stops reading cannot
+block the event loop inside `WriteFile` and request timeouts still fire. The handle is opened with
 `SECURITY_IDENTIFICATION`, so a rogue server cannot impersonate the client, and only `\\.\pipe\…`
 names are accepted (a `\\host\pipe\…` name would send credentials over SMB).
 `codexDesktopIpcAvailable` is an open-verify-close probe that sends no frame; no server identity is

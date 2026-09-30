@@ -60,9 +60,34 @@ class FakePipe implements WindowsPipeHandle {
   read(): Buffer { return this.inbound.shift()!; }
   close(): void { this.closed = true; }
 
-  write(data: Buffer): void {
+  /** 每次 write 最多收这么多字节（模拟管道缓冲区）；0 = 服务端不读了。 */
+  acceptPerWrite = Number.POSITIVE_INFINITY;
+  writeCalls = 0;
+  private received = Buffer.alloc(0);
+
+  write(data: Buffer): number {
+    this.writeCalls += 1;
+    if (this.closed) throw new Error("pipe closed");
+    const head = Buffer.concat([this.received, data]);
+    if (head.length >= 4 && head.length >= 4 + head.readUInt32LE(0)) {
+      const peek = JSON.parse(head.subarray(4, 4 + head.readUInt32LE(0)).toString("utf8")) as { method?: string };
+      if (peek.method === this.failWritesOf) throw new Error("pipe broke mid-write");
+    }
+    const took = Math.min(data.length, this.acceptPerWrite);
+    this.received = Buffer.concat([this.received, data.subarray(0, took)]);
+    while (this.received.length >= 4 && this.received.length >= 4 + this.received.readUInt32LE(0)) {
+      const size = 4 + this.received.readUInt32LE(0);
+      this.accept(this.received.subarray(0, size));
+      this.received = this.received.subarray(size);
+    }
+    return took;
+  }
+
+  /** 收到的、还没凑成整帧的字节数。 */
+  partialBytes(): number { return this.received.length; }
+
+  private accept(data: Buffer): void {
     const message = JSON.parse(data.subarray(4).toString("utf8")) as Record<string, unknown>;
-    if (message.method === this.failWritesOf) throw new Error("pipe broke mid-write");
     this.written.push(data);
     if (message.type !== "request") return;
     const base = { type: "response", requestId: message.requestId, resultType: "success", method: message.method };
@@ -104,7 +129,9 @@ function fakeApi(servers: WindowsPipeServerFacts[], options: { selfSid?: string 
   return { api, pipes, opened };
 }
 
-const bytesSent = (pipes: FakePipe[]) => pipes.reduce((sum, pipe) => sum + pipe.written.length, 0);
+/** 任何一个字节都算：整帧数、半帧字节数、write 调用次数全部为零才是「没发」。 */
+const bytesSent = (pipes: FakePipe[]) =>
+  pipes.reduce((sum, pipe) => sum + pipe.written.length + pipe.partialBytes() + pipe.writeCalls, 0);
 
 describe("judgeCodexPipeServer（纯判定）", () => {
   test("真 Desktop：属主是自己、服务端同用户、带包身份、映像在包目录里 → 通过", () => {
@@ -230,6 +257,45 @@ describe("CodexDesktopIpcClient（win32，注入管道 API）", () => {
     // 探测连接不发帧，用完即关。
     expect(bytesSent(real.pipes)).toBe(0);
     expect(real.pipes[0]!.closed).toBe(true);
+  });
+
+  test("管道缓冲区小：帧分多次写完，顺序不乱", async () => {
+    const { api, pipes } = fakeApi([DESKTOP]);
+    const client = new CodexDesktopIpcClient({ platform: "win32", windowsPipeApi: api, env: {} });
+    try {
+      const connecting = client.connect();
+      pipes[0]!.acceptPerWrite = 7;
+      await connecting;
+      const [a, b] = await Promise.all([client.discoverThreadOwner(THREAD_A), client.discoverThreadOwner(THREAD_B)]);
+      expect([a, b]).toEqual(["renderer-1", "renderer-1"]);
+      expect(pipes[0]!.methods()).toEqual(["initialize", "thread-owner-discovery", "thread-owner-discovery"]);
+    } finally {
+      client.close();
+    }
+  });
+
+  test("服务端不读了：写不阻塞事件循环，超时照常触发；start-turn 是 unknown-outcome", async () => {
+    const { api, pipes } = fakeApi([DESKTOP]);
+    const client = new CodexDesktopIpcClient({
+      platform: "win32", windowsPipeApi: api, env: {}, requestTimeoutMs: 40, startTurnTimeoutMs: 40,
+    });
+    try {
+      await client.connect();
+      // owner 探测先正常应答，之后服务端停止读取：start-turn 帧一个字节都收不进去。
+      const pipe = pipes[0]!;
+      const original = pipe.write.bind(pipe);
+      pipe.write = (data: Buffer) => {
+        const took = original(data);
+        if (pipe.methods().includes("thread-owner-discovery")) pipe.acceptPerWrite = 0;
+        return took;
+      };
+      await expect(client.startDelegatedTurn({
+        targetThreadId: THREAD_B, sourceThreadId: THREAD_A, prompt: "hi", clientUserMessageId: "m1",
+      })).rejects.toBeInstanceOf(CodexDesktopIpcUnknownOutcomeError);
+      expect(pipe.methods()).not.toContain("thread-follower-start-turn");
+    } finally {
+      client.close();
+    }
   });
 
   test("probe-then-connect：探测时是真 Desktop、发帧的连接拿到抢注者的实例 → 零字节", async () => {

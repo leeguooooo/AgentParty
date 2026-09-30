@@ -27,7 +27,9 @@
  * and only `\\.\pipe\…` is accepted (a `\\host\pipe\…` name would send credentials over SMB).
  *
  * Node/Bun's net.Socket does not expose the pipe HANDLE, so on Windows the transport itself
- * runs over this handle (PeekNamedPipe polling + ReadFile/WriteFile through bun:ffi).
+ * runs over this handle (PeekNamedPipe polling + ReadFile/WriteFile through bun:ffi). The handle
+ * is switched to PIPE_NOWAIT: a server that stops reading must not block the event loop inside
+ * WriteFile (timers would never fire), so writes take what fits and the rest is queued.
  */
 import { dlopen } from "bun:ffi";
 import { readdirSync } from "node:fs";
@@ -51,8 +53,8 @@ export interface WindowsPipeHandle {
   /** Bytes ready to read; -1 once the pipe is broken or closed. */
   available(): number;
   read(maxBytes: number): Buffer;
-  /** Writes the whole buffer or throws. */
-  write(data: Buffer): void;
+  /** Never blocks: returns how many bytes the pipe took (0 when its buffer is full). Throws when broken. */
+  write(data: Buffer): number;
   close(): void;
 }
 
@@ -138,6 +140,8 @@ const TOKEN_USER_CLASS = 1;
 const OWNER_SECURITY_INFORMATION = 1;
 /** x64 TOKEN_USER = { PSID (8), DWORD attributes (+pad, 8) }; the SID body follows it. */
 const TOKEN_USER_SID_OFFSET = 16;
+/** PIPE_READMODE_BYTE | PIPE_NOWAIT. */
+const PIPE_NOWAIT_MODE = 0x00000001;
 const BUSY_WAIT_MS = 250;
 const WIDE_CHARS = 1024;
 
@@ -151,6 +155,7 @@ function loadLibraries() {
     GetPackageFamilyName: { args: ["u64", "ptr", "ptr"], returns: "i32" },
     GetPackageFullName: { args: ["u64", "ptr", "ptr"], returns: "i32" },
     GetPackagePathByFullName: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+    SetNamedPipeHandleState: { args: ["u64", "ptr", "ptr", "ptr"], returns: "i32" },
     PeekNamedPipe: { args: ["u64", "ptr", "u32", "ptr", "ptr", "ptr"], returns: "i32" },
     ReadFile: { args: ["u64", "ptr", "u32", "ptr", "ptr"], returns: "i32" },
     WriteFile: { args: ["u64", "ptr", "u32", "ptr", "ptr"], returns: "i32" },
@@ -280,18 +285,12 @@ class NativePipeHandle implements WindowsPipeHandle {
     return buffer.subarray(0, got.readUInt32LE(0));
   }
 
-  write(data: Buffer): void {
-    let offset = 0;
-    while (offset < data.length) {
-      const chunk = data.subarray(offset);
-      const wrote = Buffer.alloc(4);
-      if (this.closed || this.libs.kernel32.WriteFile(this.handle, chunk, chunk.length, wrote, null) === 0) {
-        throw new Error("ChatGPT Desktop IPC pipe write failed");
-      }
-      const count = wrote.readUInt32LE(0);
-      if (count === 0) throw new Error("ChatGPT Desktop IPC pipe accepted no bytes");
-      offset += count;
+  write(data: Buffer): number {
+    const wrote = Buffer.alloc(4);
+    if (this.closed || this.libs.kernel32.WriteFile(this.handle, data, data.length, wrote, null) === 0) {
+      throw new Error("ChatGPT Desktop IPC pipe write failed");
     }
+    return wrote.readUInt32LE(0);
   }
 
   close(): void {
@@ -322,7 +321,15 @@ export function nativeWindowsPipeApi(): WindowsPipeApi {
         load().kernel32.WaitNamedPipeW(wide(path), BUSY_WAIT_MS);
         handle = open(path);
       }
-      return usableHandle(handle) ? new NativePipeHandle(load(), handle) : null;
+      if (!usableHandle(handle)) return null;
+      const mode = Buffer.alloc(4);
+      mode.writeUInt32LE(PIPE_NOWAIT_MODE, 0);
+      if (load().kernel32.SetNamedPipeHandleState(handle, mode, null, null) === 0) {
+        // A handle that could block the event loop is not used at all.
+        load().kernel32.CloseHandle(handle);
+        return null;
+      }
+      return new NativePipeHandle(load(), handle);
     },
     pipeExists(path) {
       const name = path.replace(/^\\\\\.\\pipe\\/i, "").toLowerCase();
@@ -344,13 +351,16 @@ const READ_CHUNK_BYTES = 1024 * 1024;
 const READS_PER_TICK = 16;
 
 /**
- * Duplex stream over a verified pipe handle. The handle is synchronous, so incoming bytes are
- * polled: 2ms right after traffic, backing off to 50ms when the pipe is quiet.
+ * Duplex stream over a verified pipe handle. Nothing here blocks: incoming bytes are polled
+ * (2ms right after traffic, backing off to 50ms when the pipe is quiet) and outgoing bytes the
+ * pipe cannot take yet wait in a queue, in order. A write that fails later closes the stream,
+ * exactly like a socket error after `socket.write()` returned.
  */
 export class WindowsPipeStream {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private delay = POLL_MIN_MS;
   private done = false;
+  private outgoing: Buffer[] = [];
 
   constructor(
     private readonly handle: WindowsPipeHandle,
@@ -362,9 +372,35 @@ export class WindowsPipeStream {
 
   write(data: Buffer): void {
     if (this.done) throw new Error("ChatGPT Desktop IPC closed");
-    this.handle.write(data);
+    this.outgoing.push(data);
     this.delay = POLL_MIN_MS;
+    try {
+      this.flush();
+    } catch (error) {
+      this.fail(error);
+      return;
+    }
     this.schedule();
+  }
+
+  /** Hands queued bytes to the pipe until it stops taking them. */
+  private flush(): void {
+    while (this.outgoing.length > 0) {
+      const head = this.outgoing[0]!;
+      const took = this.handle.write(head);
+      if (took >= head.length) {
+        this.outgoing.shift();
+        continue;
+      }
+      if (took > 0) this.outgoing[0] = head.subarray(took);
+      return;
+    }
+  }
+
+  private fail(error: unknown): void {
+    if (this.done) return;
+    this.destroy();
+    this.onClose(error instanceof Error ? error : new Error(String(error)));
   }
 
   destroy(): void {
@@ -372,6 +408,7 @@ export class WindowsPipeStream {
     this.done = true;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    this.outgoing = [];
     this.handle.close();
   }
 
@@ -385,19 +422,23 @@ export class WindowsPipeStream {
     this.timer = null;
     if (this.done) return;
     try {
+      if (this.outgoing.length > 0) {
+        this.flush();
+        // Still backed up: keep polling fast so the rest leaves as soon as the server reads.
+        if (this.outgoing.length > 0) this.delay = POLL_MIN_MS;
+      }
       for (let reads = 0; reads < READS_PER_TICK && !this.done; reads += 1) {
         const ready = this.handle.available();
         if (ready < 0) throw new Error("ChatGPT Desktop IPC closed");
         if (ready === 0) {
-          if (reads === 0) this.delay = Math.min(POLL_MAX_MS, Math.ceil(this.delay * 1.5));
+          if (reads === 0 && this.outgoing.length === 0) this.delay = Math.min(POLL_MAX_MS, Math.ceil(this.delay * 1.5));
           break;
         }
         this.delay = POLL_MIN_MS;
         this.onData(this.handle.read(Math.min(ready, READ_CHUNK_BYTES)));
       }
     } catch (error) {
-      this.destroy();
-      this.onClose(error instanceof Error ? error : new Error(String(error)));
+      this.fail(error);
       return;
     }
     this.schedule();
