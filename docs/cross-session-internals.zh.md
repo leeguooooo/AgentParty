@@ -342,7 +342,7 @@ Claude Code 用原生回执（`peer_message_status`，2.1.285 实测，未文档
   `party serve` 关停（它的生命周期信号在 `SIGINT` / `SIGTERM` 和退出路径上中止，随即关掉所有挂着的监听）；
   进程 `exit` 钩子。回执模块自己不装任何信号处理器。每个 socket 存续期间还登记在
   `~/.agentparty/claude-receipt-socks/`；进程被 `SIGKILL` 后，下一次 `party serve` 启动会删掉留下的文件，
-  只删登记过、且登记进程已死的那些。
+  只删登记过、且登记进程已死的那些。登记目录必须是属于当前用户、权限 0700 的真目录，否则既不登记也不清理。
 - 回执只发给**写入那条帧的进程**（接收端拿回执 socket 的对端 pid 和写入方 pid 比）。所以写帧的进程必须同时
   是监听者，并且活到终态回执到来。open-cross-session 的 CLI 是一次性进程，只能把唤醒交给脱离终端的 helper；
   `party serve` 本身常驻，直接在本进程监听。

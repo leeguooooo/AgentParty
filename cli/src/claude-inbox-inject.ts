@@ -427,9 +427,10 @@ export function socketOwnershipFailure(
 ): string | null {
   // Windows：Claude 的收件箱是命名管道 `\\.\pipe\LOCAL\cc-msg-…`，lstat 不适用。LOCAL 命名空间
   // 只对同一登录会话可见，管道 ACL 由 Claude 设；另外 Windows 上写入强制带 peer token
-  // （见 injectChannelMessage），两道一起替代 uid 校验（open-cross-session 回流）。
+  // （见 injectChannelMessage），两道一起替代 uid 校验（open-cross-session 回流；这里比 ocs 收得更紧：
+  // 只认 LOCAL 命名空间下的单级管道名）。管道服务端的进程身份**没有**独立校验，见 #1132 的同类问题。
   if (os === "win32") {
-    return /^\\\\\.\\pipe\\/i.test(sockPath) ? null : "path is not a named pipe";
+    return /^\\\\\.\\pipe\\LOCAL\\[^\\/]+$/i.test(sockPath) ? null : "path is not a LOCAL named pipe";
   }
   let stat: ReturnType<typeof lstatSync>;
   try {

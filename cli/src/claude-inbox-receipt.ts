@@ -319,10 +319,29 @@ function registryEntryPath(registryDir: string, socketPath: string): string {
   return join(registryDir, `${basename(socketPath, ".sock")}.json`);
 }
 
+/**
+ * 登记目录可信吗：真目录、非符号链接、属本 uid、组和其他人没有任何权限。登记项等于「删这个
+ * socket 的授权」，别人写得进来的目录里的登记一条都不能信。
+ */
+function registryDirTrusted(registryDir: string): boolean {
+  try {
+    const stat = lstatSync(registryDir);
+    return (
+      stat.isDirectory() &&
+      !stat.isSymbolicLink() &&
+      (typeof process.getuid !== "function" || stat.uid === process.getuid()) &&
+      (stat.mode & 0o077) === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** 把一个刚建好的回执 socket 记到登记目录（0700 目录、0600 文件）。失败返回 false，不抛。 */
 function registerReceiptSocket(registryDir: string, socketPath: string): boolean {
   try {
     mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+    if (!registryDirTrusted(registryDir)) return false;
     writeFileSync(registryEntryPath(registryDir, socketPath), JSON.stringify({ pid: process.pid, path: socketPath }), {
       mode: 0o600,
     });
@@ -353,11 +372,13 @@ function pidAlive(pid: number): boolean {
 
 /**
  * 清掉被 SIGKILL 的进程留下的回执 socket。只动登记过的路径，而且要同时满足：登记进程已死、
- * 文件名是 `<16 hex>.sock` 且与登记文件同名、确实是 socket、属本 uid。登记进程还活着的一律不碰
+ * 文件名是 `<16 hex>.sock` 且与登记文件同名、确实是 socket、属本 uid。登记目录本身必须可信
+ * （属本 uid、0700、非符号链接），否则整个跳过。登记进程还活着的一律不碰
  * （另一个 serve 正在用）。返回删掉的 socket 路径。绝不抛错。
  */
 export function sweepStaleReceiptSockets(registryDir: string): string[] {
   const removed: string[] = [];
+  if (!registryDirTrusted(registryDir)) return removed;
   let names: string[];
   try {
     names = readdirSync(registryDir);
@@ -369,7 +390,11 @@ export function sweepStaleReceiptSockets(registryDir: string): string[] {
     const entryPath = join(registryDir, name);
     try {
       const stat = lstatSync(entryPath);
-      if (!stat.isFile() || stat.size > 4096) continue;
+      if (
+        !stat.isFile() ||
+        stat.size > 4096 ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      ) continue;
       const value = JSON.parse(readFileSync(entryPath, "utf8")) as { pid?: unknown; path?: unknown };
       const pid = typeof value.pid === "number" && Number.isInteger(value.pid) && value.pid > 0 ? value.pid : null;
       if (pid !== null && pidAlive(pid)) continue;
@@ -444,6 +469,8 @@ export async function injectWithReceipt(
   const inject = options.inject ?? injectChannelMessage;
   const env = input.env ?? process.env;
   const os = options.os ?? process.platform;
+  // 每次现读：信号可能在某个 await 期间才中止（写成函数也免得类型收窄把后面的检查判成恒假）。
+  const hostAborted = (): boolean => options.signal?.aborted === true;
   const plain = async (): Promise<InjectWithReceiptResult> => ({ ...(await inject(input)), receipts: false });
   if (
     os === "win32" ||
@@ -451,7 +478,7 @@ export async function injectWithReceipt(
     input.pid === undefined ||
     input.fromSock !== undefined ||
     input.msgId !== undefined ||
-    options.signal?.aborted === true ||
+    hostAborted() ||
     pendingListeners >= RECEIPT_MAX_PENDING
   ) return plain();
   const pid = input.pid;
@@ -467,6 +494,12 @@ export async function injectWithReceipt(
     return plain();
   }
   const listener = opened.listener;
+  // 建监听的那个 await 期间宿主已经关停：这时还没挂 abort 处理，自己收掉，走旧路径。
+  if (hostAborted()) {
+    pendingListeners -= 1;
+    listener.close();
+    return plain();
+  }
   const { signal, registryDir } = options;
   const registered = registryDir !== undefined && registerReceiptSocket(registryDir, listener.path);
   let released = false;

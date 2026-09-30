@@ -435,7 +435,9 @@ Two receiver-side checks shape the implementation:
   path, closes every pending listener), and by a process `exit` hook. The receipt module installs no
   signal handlers of its own. Each socket is also recorded in `~/.agentparty/claude-receipt-socks/`
   while it exists; after a `SIGKILL`, the next `party serve` start removes the leftover file, and only
-  files that were recorded there by a process that is no longer alive.
+  files that were recorded there by a process that is no longer alive. The record directory is trusted
+  only when it is a real directory owned by the current user with mode 0700; otherwise nothing is
+  recorded and nothing is swept.
 - The receiver sends the receipt only to **the process that wrote the frame** (it compares the reply
   socket's peer pid with the writer's). The writer must therefore be the listener and must stay alive
   until the terminal receipt. open-cross-session's CLI is short-lived, so it hands the wake to a detached

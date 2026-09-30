@@ -3,7 +3,7 @@
 // 它照真机行为核对回执地址形状、同目录、以及「监听者 pid == 写帧者 pid」。
 // 临时 sessions 目录 + 临时 socket 目录，绝不碰真实 `~/.claude/sessions` 或 `/tmp/cc-socks/`。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CLAUDE_NATIVE_SESSIONS_DIR_ENV } from "../src/claude-inbox-inject";
@@ -415,6 +415,35 @@ describe("宿主关停与 SIGKILL 残留", () => {
     expect(readdirSync(registryDir).sort()).toEqual([`${liveName}.json`, "dddddddddddddddd.json"].sort());
     live.listener.close();
     expect(sweepStaleReceiptSockets(join(registryDir, "missing"))).toEqual([]);
+  });
+
+  test("登记目录别人写得进来（权限不是 0700 / 是符号链接）⇒ 整个不信：不清理、也不往里登记", async () => {
+    const registryDir = join(sessionsDir, "registry");
+    mkdirSync(registryDir, { mode: 0o700 });
+    const opened = await openReceiptListener(sockPath, MSG);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const name = opened.listener.path.split("/").at(-1)!.replace(/\.sock$/, "");
+    // 伪造的登记：pid 已死，指向一个活着的、属于我们的 socket。
+    writeFileSync(join(registryDir, `${name}.json`), JSON.stringify({ pid: 999_999_999, path: opened.listener.path }));
+    chmodSync(registryDir, 0o777);
+    expect(sweepStaleReceiptSockets(registryDir)).toEqual([]);
+    expect(existsSync(opened.listener.path)).toBe(true);
+    const link = join(sessionsDir, "registry-link");
+    chmodSync(registryDir, 0o700);
+    symlinkSync(registryDir, link);
+    expect(sweepStaleReceiptSockets(link)).toEqual([]);
+    expect(existsSync(opened.listener.path)).toBe(true);
+    opened.listener.close();
+
+    // 不可信目录里不登记；注入与回执照常。
+    rmSync(join(registryDir, `${name}.json`));
+    chmodSync(registryDir, 0o777);
+    await startInbox("refuse");
+    const result = await injectWithReceipt(input(), { firstWindowMs: 2000, registryDir });
+    expect(result).toMatchObject({ ok: true, receipts: true });
+    expect(readdirSync(registryDir)).toEqual([]);
+    await result.settled;
   });
 });
 
