@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { CLAUDE_NATIVE_SESSIONS_DIR_ENV } from "../src/claude-inbox-inject";
 import {
   CLAUDE_RECEIPTS_DISABLE_ENV,
+  RECEIPT_MAX_PENDING,
   injectWithReceipt,
   openReceiptListener,
   parsePeerReceipt,
@@ -253,6 +254,21 @@ describe("injectWithReceipt", () => {
     const own = await injectWithReceipt(input({ fromSock: join(sockDir, "mine.sock") }), { inject: async (i) => spy(i) });
     expect(own.receipts).toBe(false);
     expect(seen.at(-1)?.fromSock).toBe(join(sockDir, "mine.sock"));
+  });
+
+  test("并发注入也守住监听上限：超出的走不带回执的旧路径，结束后名额全部归还", async () => {
+    await startInbox("accept");
+    const total = RECEIPT_MAX_PENDING + 4;
+    const results = await Promise.all(
+      Array.from({ length: total }, () => injectWithReceipt(input(), { firstWindowMs: 150 })),
+    );
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(results.filter((result) => result.receipts)).toHaveLength(RECEIPT_MAX_PENDING);
+    await Promise.all(results.map((result) => result.settled));
+    expect(leftovers()).toEqual([]);
+    const again = await injectWithReceipt(input(), { firstWindowMs: 20 });
+    expect(again.receipts).toBe(true);
+    await again.settled;
   });
 
   test("目标解析不出来 ⇒ 交给 inject 报真实失败原因，不建监听", async () => {

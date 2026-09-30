@@ -360,10 +360,14 @@ export async function injectWithReceipt(
   const resolved = resolveTarget();
   if (!resolved.ok) return plain();
   const msgId = randomUUID();
-  const opened = await openReceiptListener(resolved.session.messagingSocketPath, msgId, os);
-  if (!opened.ok) return plain();
-  const listener = opened.listener;
+  // 先占位再 await：上限检查和计数之间隔着一个 await 的话，并发的 @ 会一起越过上限。
   pendingListeners += 1;
+  const opened = await openReceiptListener(resolved.session.messagingSocketPath, msgId, os);
+  if (!opened.ok) {
+    pendingListeners -= 1;
+    return plain();
+  }
+  const listener = opened.listener;
   let released = false;
   const release = () => {
     if (released) return;
