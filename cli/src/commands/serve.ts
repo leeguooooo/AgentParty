@@ -6156,7 +6156,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
           ...wakeProxyDeps,
           // #844：默认接 socket 优先载体（本机 UDS 收件箱注入，原生「Message from X」UX）；
           // 失败降级为现行为。测试注入的 forward 仍优先。
-          forward: wakeProxyDeps.forward ?? socketWakeProxyForwarder(),
+          // 回执（held / 终态）各打一行到 serve 输出；不进 wake/ack 记账。
+          forward: wakeProxyDeps.forward ?? socketWakeProxyForwarder({ log: out }),
           log: out,
         });
       }

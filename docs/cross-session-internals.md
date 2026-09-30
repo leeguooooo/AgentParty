@@ -393,3 +393,62 @@ built-in `SendMessage` option:
 - `send … --notify-when-idle` sends first, then subscribes to every explicit `--mention` and every
   body `@token` the server actually routed. Subscription failures print a `warn:` line and never affect
   the already-sent message.
+
+### §6 Delivery receipts: inbox `ok` is not delivery
+
+Section number and statuses follow
+[§6 of the shared protocol](https://github.com/leeguooooo/open-cross-session/blob/main/docs/wake-protocol.md#6-投递回执claude-载体v070),
+which is canonical.
+
+`injectChannelMessage` returning `ok: true` means only that the frame's bytes were handed to the
+receiver's inbox socket. The receiving Claude session then applies its `crossSessionInbound` gate:
+`accept` puts the message into the conversation; `hold` — the default — parks it in an approval queue
+and drops it after 5 minutes without approval; it can also be refused. A project-level
+`crossSessionInbound: "hold"` overrides a user-level `accept`, so a repository can tighten the gate for
+every session started in it.
+
+Claude Code reports the gate's decision through a native receipt (`peer_message_status`; observed on
+2.1.285, undocumented and subject to change). When the `user` frame carries both
+`from: "uds:<reply socket>"` and `msg_id`, the receiver connects to that socket and writes one JSONL
+control frame per state change, pointing back with `orig_msg_id`:
+
+| On the wire | Normalized | What it proves |
+|---|---|---|
+| no receipt within 400 ms | `accepted` | Nothing was held or refused. Policy `accept` sends **no** receipt at all, so this is not a read receipt and does not prove the receiver processed the message |
+| `held` | `held` | The gate parked the message; it is **not** in the conversation yet. Arrives about 40 ms after the write. A terminal receipt follows |
+| `delivered` | `delivered` | A held message was approved and entered the conversation |
+| `expired` | `expired` | Not delivered: the 5-minute hold lapsed, the queue evicted it, or the receiving session exited |
+| `expired` + `status_detail: "refused"` | `refused` | Not delivered: refused |
+| `dropped` (with `drop_reason`) | `dropped` | Not delivered: queue full |
+| `denied` | `denied` | Not delivered: denied by policy |
+
+Receipts with a different `orig_msg_id` or an unknown status are discarded. `reason` is
+receiver-controlled text: it is collapsed to one line, capped at 200 characters, and treated as data.
+
+Two receiver-side checks shape the implementation:
+
+- The reply path must match `/^\/\S*\.sock$/` and live in the **same directory** as the receiver's own
+  socket. AgentParty uses `<receiver socket dir>/<16 hex>.sock`, mode 0600, and creates it only when
+  that directory is a real directory owned by the current user. This one temporary file is the only
+  thing AgentParty ever creates in Claude's socket directory; it is removed when the receipt watch ends
+  and on process exit. A `SIGKILL` leaves a dead 0600 socket file behind.
+- The receiver sends the receipt only to **the process that wrote the frame** (it compares the reply
+  socket's peer pid with the writer's). The writer must therefore be the listener and must stay alive
+  until the terminal receipt. open-cross-session's CLI is short-lived, so it hands the wake to a detached
+  helper; `party serve` is long-lived and listens in-process.
+
+Where AgentParty uses receipts today: the `party serve` wake proxy (`cli/src/serve-wake-proxy.ts`,
+`cli/src/claude-inbox-receipt.ts`). The receipt never blocks the forward — the frame is written and the
+proxy returns as before — and the outcome is reported on the serve log: one line for `held`, one for the
+terminal state, one for an immediate `refused`/`dropped`/`denied`/`expired`; `accepted` logs nothing.
+After `held` the proxy waits up to 5 minutes + 60 seconds for the terminal receipt, ends early when the
+receiving session disappears, and records `unknown` otherwise.
+
+Receipts are not available, and the inject is byte-for-byte what it was before (no `from`, no listener),
+on Windows (the reply address would have to be a named pipe carrying authentication material),
+when `AGENTPARTY_NO_CLAUDE_RECEIPTS=1`, when the listener cannot be created, and on the dormant
+announce leg, which does not subscribe yet.
+
+Receipts do not change any accounting. A `held` or `expired` receipt is shown to the operator; it does
+not clear, retry, or re-route the mention, and `accepted` is never treated as a reply. Wake, ack and
+stuck accounting still follow the receiver's own reply on the channel.

@@ -210,6 +210,17 @@ describe("readPeerToken", () => {
     expect(token2).toBe(token);
   });
 
+  test("Windows：key 文件名按小写管道路径算哈希 → 原样找不到时再试小写；非 Windows 不试", () => {
+    const pipe = "\\\\.\\pipe\\LOCAL\\cc-msg-ABC123";
+    const hash = createHash("sha256").update(pipe.toLowerCase()).digest("hex");
+    const token = "b".repeat(32);
+    writeFileSync(join(sessionsDir, `88.${hash}.key`), JSON.stringify({ peerToken: token }), { mode: 0o600 });
+    const session = { pid: 88, sessionId: null, name: null, status: null, kind: null, messagingSocketPath: pipe, procStart: null };
+    expect(readPeerToken(session, env(), "win32")).toBe(token);
+    expect(readPeerToken(session, env(), "darwin")).toBeNull();
+    expect(readPeerToken(session, env(), "linux")).toBeNull();
+  });
+
   test("无 key 文件 → null（非 Windows optional）", () => {
     expect(
       readPeerToken(
@@ -295,6 +306,22 @@ describe("injectChannelMessage", () => {
     const lines = inbox.lines();
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[0]!)).toEqual({ type: "auth", token: "b".repeat(32) });
+  });
+
+  test("msgId 透传进帧的 msg_id（回执用 orig_msg_id 指回它）；省略时照旧随机", async () => {
+    const inbox = await startMockInbox(sessionsDir, process.pid);
+    inboxes.push(inbox);
+    writeSessionFile(sessionsDir, process.pid, { name: "agentparty-21", messagingSocketPath: inbox.sockPath });
+    const msgId = "0b0f6f0e-2f0b-4a51-9d0c-1f6f6f0e2f0b";
+    const base = { name: "agentparty-21", body: "x", fromName: "pwtk", env: env() };
+    expect((await injectChannelMessage({ ...base, msgId })).ok).toBe(true);
+    expect((await injectChannelMessage(base)).ok).toBe(true);
+    await new Promise((r) => setTimeout(r, 30));
+    const ids = inbox.lines().map((line) => JSON.parse(line).msg_id as string);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toBe(msgId);
+    expect(ids[1]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[1]).not.toBe(msgId);
   });
 
   test("无匹配 socket → 降级失败 no-match", async () => {

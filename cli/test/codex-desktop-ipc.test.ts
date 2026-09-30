@@ -7,7 +7,11 @@ import {
   CodexDesktopIpcClient,
   CodexDesktopIpcUnknownOutcomeError,
   codexDelegationEnvelope,
+  CODEX_WINDOWS_IPC_PIPE,
+  CODEX_WINDOWS_IPC_PIPE_ENV,
+  codexDesktopIpcSocketPath,
   selectCodexDesktopIpcRoute,
+  validateCodexDesktopIpcSocket,
 } from "../src/codex-desktop-ipc";
 
 const SOURCE = "01a04eb6-6349-7871-9c05-8eb15d68635f";
@@ -318,5 +322,24 @@ describe("ChatGPT Desktop follower IPC", () => {
     while (followCount < 2 && Date.now() < deadline) await Bun.sleep(5);
     expect(followCount).toBe(2);
     client.close();
+  });
+});
+
+describe("ChatGPT Desktop IPC on Windows (named pipe)", () => {
+  test("win32 resolves the global pipe, overridable by env; other platforms keep the CODEX_HOME socket", () => {
+    expect(codexDesktopIpcSocketPath({}, "win32")).toBe(CODEX_WINDOWS_IPC_PIPE);
+    expect(CODEX_WINDOWS_IPC_PIPE).toBe("\\\\.\\pipe\\codex-ipc");
+    expect(codexDesktopIpcSocketPath({ [CODEX_WINDOWS_IPC_PIPE_ENV]: " \\\\.\\pipe\\other " }, "win32"))
+      .toBe("\\\\.\\pipe\\other");
+    expect(codexDesktopIpcSocketPath({ CODEX_HOME: "/x/.codex", [CODEX_WINDOWS_IPC_PIPE_ENV]: "ignored" }, "darwin"))
+      .toBe(join("/x/.codex", "ipc", "ipc.sock"));
+  });
+
+  test("win32 validation only checks the pipe exists (case-insensitive); no uid/mode checks apply", () => {
+    expect(() => validateCodexDesktopIpcSocket(CODEX_WINDOWS_IPC_PIPE, "win32", () => ["Codex-IPC", "other"])).not.toThrow();
+    expect(() => validateCodexDesktopIpcSocket(CODEX_WINDOWS_IPC_PIPE, "win32", () => ["other"]))
+      .toThrow("ChatGPT Desktop IPC pipe is missing");
+    expect(() => validateCodexDesktopIpcSocket(CODEX_WINDOWS_IPC_PIPE, "win32", () => { throw new Error("EPERM"); }))
+      .toThrow("cannot list named pipes");
   });
 });
