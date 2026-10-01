@@ -90,6 +90,20 @@ function nativeSessionsDir(env: NodeJS.ProcessEnv = process.env): string | null 
 }
 
 /**
+ * `<pid>.json` 寻址文件是否存在（不解析、不校验）。#1052 #2 的祖先链用它区分「这一层不是 Claude」
+ * 与「这一层是 Claude 但文件坏了」：后者必须停下，不能越过它去认领更上层的别的会话。
+ */
+export function nativeSessionFileExists(pid: number, env: NodeJS.ProcessEnv = process.env): boolean {
+  const dir = nativeSessionsDir(env);
+  if (dir === null || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    return lstatSync(join(dir, `${pid}.json`)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 本机是否存在任何 Claude 原生会话寻址文件（`<pid>.json`）。#1052 #2 的祖先链探测先问这一句：
  * 目录不存在 / 空目录 ⇒ 这台机器上根本没有 Claude 会话，`party` 不必再花 `ps` 往上爬。
  * 只 readdir 不解析，任何失败按「没有」处理（调用方随之走既有的 cwd 解析）。

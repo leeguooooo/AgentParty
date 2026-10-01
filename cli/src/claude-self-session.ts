@@ -27,6 +27,7 @@ import { spawnSync } from "node:child_process";
 import { basename, isAbsolute } from "node:path";
 import {
   CLAUDE_NATIVE_SESSIONS_DIR_ENV,
+  nativeSessionFileExists,
   nativeSessionsAvailable,
   resolveSessionSocketByPid,
   type NativeClaudeSession,
@@ -121,6 +122,8 @@ export function walkToSelfClaudeSession(
     if (parent === null || parent <= 1 || parent === pid) return null;
     const resolved = resolveSessionSocketByPid(parent, { env });
     if (resolved.ok) return fromNative(resolved.session, hop);
+    // 这一层有寻址文件却校验不过（坏文件 / pid 不符 / 已死）⇒ 停，不越过它去认领更上层的会话。
+    if (nativeSessionFileExists(parent, env)) return null;
     pid = parent;
   }
   return null;
