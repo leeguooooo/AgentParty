@@ -1454,13 +1454,16 @@ describe("蛰伏腿 + 真实 injectWithReceipt + 真实 UDS（#1130）", () => {
       const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
       await tick();
       connections[0]!.push(msg(61, [SELF]));
-      await tick(80);
-      const user = received
-        .join("")
-        .split("\n")
-        .filter((line) => line !== "")
-        .map((line) => JSON.parse(line) as Record<string, unknown>)
-        .find((frame) => frame.type === "user");
+      // 全量门禁下事件循环拥挤，固定等 80ms 曾等不到帧；轮询到帧出现（上限 5s）。
+      const userFrame = () =>
+        received
+          .join("")
+          .split("\n")
+          .filter((line) => line !== "")
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+          .find((frame) => frame.type === "user");
+      for (let i = 0; i < 250 && !userFrame(); i += 1) await tick(20);
+      const user = userFrame();
       expect(user).toBeDefined();
       expect(typeof user!.msg_id).toBe("string");
       const from = String(user!.from);
@@ -1481,9 +1484,10 @@ describe("蛰伏腿 + 真实 injectWithReceipt + 真实 UDS（#1130）", () => {
       expect(reports).toEqual([`61:${SELF}:held`]);
       abort.abort();
       await done;
-      await tick(20);
       const { readdirSync } = await import("node:fs");
-      expect(readdirSync(dir).filter((name) => /^[0-9a-f]{16}\.sock$/.test(name))).toEqual([]);
+      const replySockets = () => readdirSync(dir).filter((name) => /^[0-9a-f]{16}\.sock$/.test(name));
+      for (let i = 0; i < 100 && replySockets().length > 0; i += 1) await tick(20);
+      expect(replySockets()).toEqual([]);
     } finally {
       if (previous === undefined) delete process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV];
       else process.env[CLAUDE_NATIVE_SESSIONS_DIR_ENV] = previous;
