@@ -1455,10 +1455,12 @@ describe("蛰伏腿 + 真实 injectWithReceipt + 真实 UDS（#1130）", () => {
       await tick();
       connections[0]!.push(msg(61, [SELF]));
       // 全量门禁下事件循环拥挤，固定等 80ms 曾等不到帧；轮询到帧出现（上限 5s）。
+      // data 块不一定是整帧：只解析以 \n 结尾的完整行，末尾残段留给下一轮。
       const userFrame = () =>
         received
           .join("")
           .split("\n")
+          .slice(0, -1)
           .filter((line) => line !== "")
           .map((line) => JSON.parse(line) as Record<string, unknown>)
           .find((frame) => frame.type === "user");
