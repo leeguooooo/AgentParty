@@ -91,9 +91,10 @@ describe("walkToSelfClaudeSession (#1052 #2)", () => {
 
   test("a malformed sessions file on the ancestor yields null instead of guessing further up", () => {
     // 文件名 pid 与内容 pid 不符 → 坏文件；祖父有好文件也不该被认领（那是别的会话）。
+    // 祖父用本进程 pid（必然活着）：以前用 300，CI 机上 pid 300 恰好活着时才暴露没停下的 bug。
     writeNativeSession(200, { pid: 201 });
-    writeNativeSession(300);
-    expect(walkToSelfClaudeSession({ env, startPid: 100, spawn: fakePs({ 100: 200, 200: 300, 300: 1 }) })).toBeNull();
+    writeNativeSession(process.pid);
+    expect(walkToSelfClaudeSession({ env, startPid: 100, spawn: fakePs({ 100: 200, 200: process.pid, [process.pid]: 1 }) })).toBeNull();
   });
 
   test("findSelfClaudeSession caches per process and never throws", () => {
