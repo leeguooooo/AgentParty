@@ -12,6 +12,6 @@
     "typecheck": "cd ../web && bunx tsc --noEmit && cd ../desktop/src-tauri && cargo check"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.6.2"
+    "@tauri-apps/cli": "^2.12.1"
   }
 }
