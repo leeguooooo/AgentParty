@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EXIT_AUTH, EXIT_STREAM_ENDED } from "@agentparty/shared";
+import { EXIT_AUTH, EXIT_SERVICE_SHUT_DOWN, EXIT_STREAM_ENDED } from "@agentparty/shared";
 import {
   dutyBlockedMarkerPath,
   dutyGenerationFromPlist,
@@ -27,6 +27,12 @@ import {
   selfBootoutTerminalDuty,
   tryReclaimStaleDutyLock,
 } from "../src/commands/serve";
+import {
+  exitOnServiceShutdown,
+  noteServiceShutdown,
+  onServiceShutdownExit,
+  resetServiceShutdownForTest,
+} from "../src/service-shutdown";
 
 const LABEL = "com.agentparty.duty.abc.dev";
 
@@ -303,6 +309,40 @@ describe("selfBootoutTerminalDuty (#744)", () => {
       expect(r.lines.some((line) => line.includes("另一安装代次"))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("托管服务已关停(20)同样自卸载，标记原因 service-shut-down——否则 KeepAlive 会无限重拉一个必然 410 的 serve", () => {
+    const bodies: string[] = [];
+    const r = recorder();
+    expect(isTerminalServeExit(EXIT_SERVICE_SHUT_DOWN)).toBe(true);
+    expect(selfBootoutTerminalDuty(EXIT_SERVICE_SHUT_DOWN, r.out, {
+      ...base({ writeMarker: (_path: string, body: string) => bodies.push(body) }),
+      spawn: r.spawn,
+    } as never)).toBe(true);
+    expect(JSON.parse(bodies[0]!).reason).toBe("service-shut-down");
+    expect(r.calls).toEqual([{ cmd: "launchctl", args: ["bootout", `gui/501/${LABEL}`] }]);
+  });
+
+  test("关停退出路径先跑 serve 注册的 #744 自卸载钩子、只跑一次，再以 20 退出", () => {
+    const exits: number[] = [];
+    const r = recorder();
+    resetServiceShutdownForTest({
+      exit: ((code: number) => { exits.push(code); throw new Error("exit"); }) as (c: number) => never,
+      log: () => {},
+    });
+    try {
+      exitOnServiceShutdown();
+      // 与 serve run() 注册的钩子同形，只是把 launchctl 换成记录器（测试不碰真 launchctl）。
+      onServiceShutdownExit(() => {
+        selfBootoutTerminalDuty(EXIT_SERVICE_SHUT_DOWN, r.out, { ...base(), spawn: r.spawn } as never);
+      });
+      expect(() => noteServiceShutdown("bye")).toThrow("exit");
+      expect(() => noteServiceShutdown("bye")).toThrow("exit");
+      expect(exits).toEqual([EXIT_SERVICE_SHUT_DOWN, EXIT_SERVICE_SHUT_DOWN]);
+      expect(r.calls).toEqual([{ cmd: "launchctl", args: ["bootout", `gui/501/${LABEL}`] }]);
+    } finally {
+      resetServiceShutdownForTest();
     }
   });
 

@@ -10,8 +10,9 @@
 // 没声明的（一次性命令）只是照常抛 RestError（code = "agentparty_shut_down"），由 handleRestError
 // 打印并映射到同一个退出码。
 //
-// 桌面「值守」agent 是 launchd KeepAlive=true 的 job：不管退出码是什么 launchd 都会按节流间隔
-// 重新拉起，每次拉起都是一次 410 后立即退出。按 owner 要求，CLI 不去改写或卸载 launchd plist。
+// 桌面「值守」agent 是 launchd KeepAlive=true 的 job：不管退出码是什么 launchd 都会重新拉起。
+// `party serve` 因此在退出前走 #744 既有的 selfBootoutTerminalDuty（EXIT_SERVICE_SHUT_DOWN 已列入其
+// 终局清单）卸载自己那个 job——不新增任何 plist 改写。
 import { EXIT_SERVICE_SHUT_DOWN } from "@agentparty/shared";
 import { stripTerminalControls } from "./format";
 
@@ -31,6 +32,15 @@ const defaultDeps: ServiceShutdownDeps = {
 let exitMode = false;
 let announced = false;
 let deps: ServiceShutdownDeps = defaultDeps;
+const beforeExitHooks: Array<() => void> = [];
+
+/**
+ * 退出前的收尾（best-effort，任何异常都吞掉，绝不挡退出）。目前只有 `party serve` 用：
+ * 在 launchd 值守 job 下走 #744 既有的 selfBootoutTerminalDuty 自卸载，免得 KeepAlive 无限重拉。
+ */
+export function onServiceShutdownExit(hook: () => void): void {
+  beforeExitHooks.push(hook);
+}
 
 /** 常驻入口调用：此后一旦识别到服务已关停，打印一次说明并以 EXIT_SERVICE_SHUT_DOWN 退出。 */
 export function exitOnServiceShutdown(): void {
@@ -41,6 +51,7 @@ export function exitOnServiceShutdown(): void {
 export function resetServiceShutdownForTest(next: Partial<ServiceShutdownDeps> = {}): void {
   exitMode = false;
   announced = false;
+  beforeExitHooks.length = 0;
   deps = { ...defaultDeps, ...next };
 }
 
@@ -61,6 +72,13 @@ export function noteServiceShutdown(message: string): void {
   if (!announced) {
     announced = true;
     deps.log(`party: ${message}`);
+    for (const hook of beforeExitHooks.splice(0)) {
+      try {
+        hook();
+      } catch {
+        // 收尾失败不挡退出
+      }
+    }
   }
   deps.exit(EXIT_SERVICE_SHUT_DOWN);
 }

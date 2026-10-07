@@ -1,7 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { exitOnServiceShutdown } from "../service-shutdown";
+import { EXIT_SERVICE_SHUT_DOWN, exitOnServiceShutdown, onServiceShutdownExit } from "../service-shutdown";
 import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, isWakeVerifyFrame, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame, type SessionOutputKind } from "@agentparty/shared";
 import { SessionOutputReporter, sessionOutputFileTap } from "../session-output";
 import { ClaudeStreamJsonParser, claudeResultBody } from "../claude-stream-json";
@@ -731,6 +731,7 @@ export function selfBootoutTerminalDuty(
     && code !== EXIT_AUTH
     && code !== EXIT_CHANNEL_NOT_FOUND
     && code !== EXIT_RUNNER_UNAVAILABLE
+    && code !== EXIT_SERVICE_SHUT_DOWN
   ) return false;
   // 严格校验注入的 label(@macmini #744 评审):只接受我们自己生成的 duty label(前缀 + launchd 合法字符),
   // 否则拒绝——绝不拿一个猜的/被篡改的 label 去 bootout,免得卸载错的甚至宽泛目标。
@@ -761,7 +762,9 @@ export function selfBootoutTerminalDuty(
       ? "auth-revoked"
       : code === EXIT_CHANNEL_NOT_FOUND
         ? "channel-not-found"
-        : "runner-unavailable";
+        : code === EXIT_SERVICE_SHUT_DOWN
+          ? "service-shut-down"
+          : "runner-unavailable";
   const plistPath = deps?.plistPath ?? dutyPlistPath(label);
   const ownGeneration = deps?.generation === undefined
     ? process.env.AP_DUTY_GENERATION ?? null
@@ -6935,7 +6938,7 @@ export function isTerminalServeExit(code: number): boolean {
   return code === 0 || code === EXIT_AUTH || code === EXIT_ARCHIVED || code === EXIT_UPGRADED ||
     code === EXIT_ALREADY_SERVING || code === EXIT_WAKE_ABANDON_CIRCUIT ||
     code === EXIT_CHANNEL_NOT_FOUND || code === EXIT_RUNNER_UNAVAILABLE ||
-    code === EXIT_SIGNAL_INT || code === EXIT_SIGNAL_TERM;
+    code === EXIT_SIGNAL_INT || code === EXIT_SIGNAL_TERM || code === EXIT_SERVICE_SHUT_DOWN;
 }
 
 function reportServeLifecycle(opts: ServeSupervisorOptions, line: string): void {
@@ -7230,7 +7233,11 @@ export function formatServeProfileHints(input: {
 
 export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<number> {
   // 常驻：托管服务关停（410 agentparty_shut_down）时打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出，不再重试。
+  // 退出前在 launchd 值守 job 下走 #744 自卸载（无 AP_DUTY_LABEL / 非 macOS 时是 no-op），免得 KeepAlive 无限重拉。
   exitOnServiceShutdown();
+  onServiceShutdownExit(() => {
+    selfBootoutTerminalDuty(EXIT_SERVICE_SHUT_DOWN, (line) => console.error(terminalOutput(`serve supervisor: ${line}`)));
+  });
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
     return 0;
