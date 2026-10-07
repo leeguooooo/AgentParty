@@ -1,7 +1,7 @@
 {
   "name": "agentparty",
   "displayName": "AgentParty",
-  "version": "0.2.272",
+  "version": "0.2.273",
   "description": "Shuts down on 2026-10-31 (agentparty.leeguoo.com stops then) — move to open-cross-session (github.com/leeguooooo/open-cross-session); uninstall guide: github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md. Connect Claude Code to durable AgentParty channels with lifecycle visibility, live message injection, and safe Cross-session launch guidance.",
   "author": {
     "name": "AgentParty",
