@@ -46,3 +46,32 @@ information the `main` run cannot produce.
 the tag. A red `main` means no tag is pushed at all. If the verdict cannot be read — API failure,
 timeout, or an origin that is not GitHub — the tag is pushed anyway and the tag run simply runs every
 check itself.
+
+## Shutdown
+
+The hosted service shuts itself down at the instant in the `AGENTPARTY_SHUTDOWN_AT` var in
+`worker/wrangler.jsonc` (currently `2026-10-31T00:00:00+08:00`). No scheduled job is involved: the
+first thing the Worker's `fetch` does is compare that instant with the current time
+(`worker/src/shutdown.ts`, wired in the default export of `worker/src/index.ts`). Before the instant,
+requests are served exactly as before. From the instant on, every path gets a 410 with
+`cache-control: no-store`:
+
+- `/api/*`, `/openapi.json` and WebSocket upgrades get the JSON
+  `{"error":"agentparty_shut_down","message":"…"}`.
+- `/install.sh`, `/install-desktop.sh` and `/install.ps1` get a script that prints the notice to stderr
+  and exits 1.
+- `/llms.txt` gets a plain-text notice, and `/robots.txt` gets a 200 response that disallows everything.
+- Every other path gets a self-contained bilingual HTML page.
+
+To make the gate cover pages, `run_worker_first` routes every path except bundled static files
+(`/assets/*`, `/docs/assets/*`, `/docs/img/*`, `/favicon.svg`) through the Worker. Before the
+instant, the Worker hands those requests straight back to the assets binding.
+
+- **Force it early:** set the var to `"now"` or any past timestamp.
+- **Postpone or revert:** set a later timestamp, or `""`. An empty or unparsable value means the
+  service never shuts down; the Worker logs an unparsable value once and keeps serving.
+- **Apply a change:** deploy the Worker, either with `gh workflow run worker-deploy.yml` or as part of
+  a normal `v*` release (`scripts/release.sh X.Y.Z`).
+- **Data is kept on purpose.** The shutdown only stops serving. The Durable Objects, D1 database and
+  R2 bucket stay as they are, so moving the date back brings everything back. Deleting the data is a
+  separate manual step and is not part of this gate.

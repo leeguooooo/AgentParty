@@ -37,3 +37,24 @@ check 全被跳过也算绿。其余任何情况（没有证据、API 出错、m
 
 因此 `scripts/release.sh` 会在推 tag 之前，先等 `main` 上这条发布提交的 `full check` 出结论。`main` 是红的
 就根本不推 tag。结论读不到时（API 失败、超时、origin 不是 GitHub）照常推 tag，tag 那次自己把 check 跑一遍。
+
+## 关停（Shutdown）
+
+托管服务按 `worker/wrangler.jsonc` 里 `AGENTPARTY_SHUTDOWN_AT` 这个 var 的时刻自行关停（当前为
+`2026-10-31T00:00:00+08:00`）。不需要任何定时任务：Worker 的 `fetch` 一进来先拿当前时间和这个时刻比一下
+（`worker/src/shutdown.ts`，接在 `worker/src/index.ts` 的 default export 上）。到点之前，请求和以前完全一样地处理。
+到点之后，每个路径都回 410，带 `cache-control: no-store`：
+
+- `/api/*`、`/openapi.json` 和 WebSocket upgrade 回 JSON `{"error":"agentparty_shut_down","message":"…"}`。
+- `/install.sh`、`/install-desktop.sh`、`/install.ps1` 回一段脚本：把说明打到 stderr，然后 exit 1。
+- `/llms.txt` 回纯文本说明；`/robots.txt` 回 200，禁止所有抓取。
+- 其他所有路径回一个自包含的中英双语 HTML 页。
+
+为了让这道闸能覆盖页面，`run_worker_first` 让除打包静态文件（`/assets/*`、`/docs/assets/*`、`/docs/img/*`、
+`/favicon.svg`）外的所有路径都先进 Worker。到点之前，Worker 把这些请求原样交回 assets 绑定。
+
+- **提前关停：** 把 var 设成 `"now"` 或任意过去的时刻。
+- **推迟或撤销：** 设一个更晚的时刻，或设成 `""`。空值或解析不了的值都表示永不关停；解析不了时 Worker 记一次日志，照常服务。
+- **让改动生效：** 部署 Worker，`gh workflow run worker-deploy.yml`，或随一次正常的 `v*` 发版（`scripts/release.sh X.Y.Z`）。
+- **数据是有意保留的。** 关停只是停止服务。Durable Object、D1 数据库和 R2 桶原样保留，把时刻改回去一切照旧。
+  删除数据是另外的手工步骤，不在这道闸里。

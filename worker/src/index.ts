@@ -131,6 +131,7 @@ const LARK_NOTIFICATION_TIMEOUT_MS = 5_000;
 declare const __AGENTPARTY_DEPLOYED_AT__: string | undefined;
 
 export { ChannelDO };
+import { isShutdownActive, shutdownResponse } from "./shutdown";
 
 const DEPLOYMENT_METADATA = Object.freeze({
   version: typeof __AGENTPARTY_BUILD_VERSION__ === "string" ? __AGENTPARTY_BUILD_VERSION__ : "dev",
@@ -160,6 +161,9 @@ type AppEnv = Env & {
   // 实例邀请制（#593）：开启后 human 账号会话必须在 instance_members 册上才能过 API，
   // 未入册 403 invite_required；外部协作者凭频道邀请面板发的一次性邀请码入册。
   INSTANCE_INVITE_ONLY?: string;
+  // 托管服务关停时刻（ISO 8601 或 "now"，见 src/shutdown.ts / docs/release-pipeline.md「Shutdown」）。
+  // 空或解析不了 = 永不关停（fail open）。
+  AGENTPARTY_SHUTDOWN_AT?: string;
 };
 
 type AppContext = {
@@ -9999,4 +10003,29 @@ app.get("/api/channels/:slug/ws", async (c) => {
   return upgrade;
 });
 
-export default app;
+/**
+ * 关停前：还原 run_worker_first 放宽前的路由顺序。wrangler.jsonc 的 run_worker_first 原来只列
+ * `/api/*` 与 `/openapi.json`，其余路径由 Workers Assets 先处理（SPA：没命中的一律回 index.html）。
+ * 为了关停那一刻能接管每个页面，run_worker_first 放宽成「除打包静态资源外的所有路径」；这里把
+ * 那些多进来的请求原样交回 ASSETS 绑定（绑定与资产优先路由同一套 html/not_found 处理），
+ * 只有绑定不处理的（非 GET/HEAD、或真 404）才进 app——与放宽前的顺序一致。
+ */
+async function serveBeforeShutdown(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
+  const { pathname } = new URL(request.url);
+  if (pathname.startsWith("/api/") || pathname === "/openapi.json") return app.fetch(request, env, ctx);
+  if (request.method === "GET" || request.method === "HEAD") {
+    const asset = await env.ASSETS.fetch(request);
+    if (asset.status !== 404) return asset;
+  }
+  return app.fetch(request, env, ctx);
+}
+
+export default {
+  fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Response | Promise<Response> {
+    // 关停闸（2026-10-31）：只是一次时间比较，不读 D1/DO/KV。到点后所有路径 410，数据原封不动。
+    if (isShutdownActive(env.AGENTPARTY_SHUTDOWN_AT, Date.now())) {
+      return shutdownResponse(request, env.ASSETS, DESKTOP_CORS_ORIGINS);
+    }
+    return serveBeforeShutdown(request, env, ctx);
+  },
+} satisfies ExportedHandler<AppEnv>;

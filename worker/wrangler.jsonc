@@ -7,7 +7,11 @@
   // 只认显式 "true"/"1"）。这一份服务的是公共实例 agentparty.leeguoo.com，故显式开启。
   // 自部署者不该继承它。
   "vars": {
-    "HOSTED_MEMBERSHIP_GATING": "true"
+    "HOSTED_MEMBERSHIP_GATING": "true",
+    // 托管服务关停时刻（owner 拍板 2026-10-31）。到点后 worker 对所有路径回 410 关停页/JSON，
+    // 不删任何数据（DO/D1/R2 原样保留）。提前："now" 或任意过去时刻；推迟/撤销：改这里再部署。
+    // 空或解析不了 = 永不关停。见 src/shutdown.ts、docs/release-pipeline.md「Shutdown」。
+    "AGENTPARTY_SHUTDOWN_AT": "2026-10-31T00:00:00+08:00"
   },
   "durable_objects": {
     "bindings": [
@@ -23,13 +27,15 @@
       "new_sqlite_classes": ["ChannelDO"]
     }
   ],
-  // web 构建产物由 Workers Assets 托管；run_worker_first 保证 API 路径进 worker，
-  // 其余路径（含 /c/:slug 分享链接）直接走 SPA 静态资源，不消耗 worker 调用
+  // web 构建产物由 Workers Assets 托管。run_worker_first 原来只列 /api/* 与 /openapi.json；
+  // 为了关停那一刻（AGENTPARTY_SHUTDOWN_AT）worker 能接管每个页面，放宽成「除打包静态资源外
+  // 全部先进 worker」。关停前 worker 把非 API 请求原样交回 ASSETS（src/index.ts serveBeforeShutdown），
+  // 响应与原来一致，代价是页面/SPA 路由每次多一次 worker 调用；带哈希的 JS/CSS/图片仍不进 worker。
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/openapi.json"]
+    "run_worker_first": ["/*", "!/assets/*", "!/docs/assets/*", "!/docs/img/*", "!/favicon.svg"]
   },
   "d1_databases": [
     {

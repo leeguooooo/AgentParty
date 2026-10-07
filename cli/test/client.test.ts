@@ -859,6 +859,29 @@ describe("ws client", () => {
     expect(ProbeWebSocket.instances).toHaveLength(1);
   });
 
+  test("HTTP 410 (hosted service shut down) ends the stream with the server's message, no reconnect", async () => {
+    useProbeWebSocket();
+    const message = "Agent Party shut down on 2026-10-31. Move to open-cross-session: https://github.com/leeguooooo/open-cross-session";
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "agentparty_shut_down", message: `${message}\u001b[2J` }), {
+        status: 410,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+    const statuses: Array<{ status: string; error?: string }> = [];
+
+    conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+      backoffBaseMs: 5,
+      onStatus: (status, detail) => statuses.push({ status, ...(detail?.error ? { error: detail.error } : {}) }),
+    });
+    const next = conn.frames[Symbol.asyncIterator]().next();
+    ProbeWebSocket.instances[0]!.failHandshake();
+
+    await expect(next).rejects.toThrow(message);
+    expect(statuses).toEqual([{ status: "closed", error: message }]);
+    await Bun.sleep(15);
+    expect(ProbeWebSocket.instances).toHaveLength(1);
+  });
+
   test("an unknown fatal-probe exception rejects the frame stream instead of reconnecting", async () => {
     useProbeWebSocket();
     const failure = new Error("probe invariant failed");

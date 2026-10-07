@@ -2,6 +2,7 @@
 import { parseAgentActivity, parseRunnerHealth } from "@agentparty/shared";
 import type { ClientFrame, RuntimeTopology, ServerFrame } from "@agentparty/shared";
 import pkg from "../package.json" with { type: "json" };
+import { stripTerminalControls } from "./format";
 
 class FrameQueue {
   private items: ServerFrame[] = [];
@@ -654,6 +655,18 @@ export function connect(
       if (res.status === 429 || res.status >= 500) {
         console.debug(`party ws probe: transient HTTP ${res.status}; reconnecting`);
         return null;
+      }
+      // 托管服务关停（worker 的 AGENTPARTY_SHUTDOWN_AT）：410 带一句给人看的说明，别把它塌缩成
+      // 「HTTP 410 Gone」——用户得知道该迁去哪、怎么卸载。终局，不重连。
+      if (res.status === 410) {
+        let message = "";
+        try {
+          const body = (await res.json()) as { message?: unknown };
+          if (typeof body.message === "string") message = stripTerminalControls(body.message).slice(0, 500);
+        } catch {
+          // 非 JSON：落回通用文案
+        }
+        throw new Error(message !== "" ? message : `websocket probe failed: HTTP 410${res.statusText ? ` ${res.statusText}` : ""}`);
       }
       if (!res.ok) {
         throw new Error(`websocket probe failed: HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
