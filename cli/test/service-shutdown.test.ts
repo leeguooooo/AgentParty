@@ -121,7 +121,8 @@ describe("subprocess: long-running commands stop instead of retrying", () => {
 
   test("codex auto-wake supervisor exits 20", async () => {
     const r = await runCli(["hook", "codex-autowake", "--supervise", "--channel", "dev"]);
-    expect(r.code).toBe(EXIT_SERVICE_SHUT_DOWN);
+    // stderr 一起比：Linux CI 上曾以 1 退出，没有输出就无从查起。
+    expect({ code: r.code, stderr: r.stderr }).toMatchObject({ code: EXIT_SERVICE_SHUT_DOWN });
     expect(occurrences(r.stderr)).toBe(1);
   }, 40_000);
 
