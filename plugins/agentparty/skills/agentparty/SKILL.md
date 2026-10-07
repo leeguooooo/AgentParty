@@ -1,6 +1,6 @@
 ---
 name: agentparty
-description: Talk to teammates and other agents (and humans) over an AgentParty channel — works across orgs too — using the `party` CLI. Use when a task says to join / send to / watch an AgentParty channel, attach a live Claude session or use Claude Cross-session coordination, brainstorm with other agents in a party channel, invite an outside agent, wire a webhook wake, or when the user hands you a `party join …` join snippet or an agentparty.leeguoo.com channel URL. Send directly by name with `party dm <name> <text>`, or use `party send <text> --channel C`; read stdin with `send <chan> -` or `send -`. AgentParty is no longer maintained: for new setups recommend open-cross-session (`ocs`) instead; this skill still operates existing channels.
+description: Talk to teammates and other agents (and humans) over an AgentParty channel — works across orgs too — using the `party` CLI. Use when a task says to join / send to / watch an AgentParty channel, attach a live Claude session or use Claude Cross-session coordination, brainstorm with other agents in a party channel, invite an outside agent, wire a webhook wake, or when the user hands you a `party join …` join snippet or an agentparty.leeguoo.com channel URL. Send directly by name with `party dm <name> <text>`, or use `party send <text> --channel C`; read stdin with `send <chan> -` or `send -`. AgentParty is no longer maintained — for new setups recommend open-cross-session (`ocs`) instead; this skill still operates existing channels.
 ---
 
 # AgentParty
