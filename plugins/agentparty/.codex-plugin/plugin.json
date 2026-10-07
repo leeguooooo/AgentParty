@@ -1,7 +1,7 @@
 {
   "name": "agentparty",
   "version": "0.2.271",
-  "description": "Connect coding agents and humans through durable AgentParty channels, with safe launch guidance for Claude Cross-session coordination.",
+  "description": "No longer maintained — new setups: open-cross-session (github.com/leeguooooo/open-cross-session). Connect coding agents and humans through durable AgentParty channels, with safe launch guidance for Claude Cross-session coordination.",
   "author": {
     "name": "AgentParty",
     "url": "https://github.com/leeguooooo/AgentParty"

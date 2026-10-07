@@ -170,6 +170,13 @@ function Main {
       Log "note: $InstallDir 不在 PATH，永久追加:"
       Log "  [Environment]::SetEnvironmentVariable('Path', `"`$env:Path;$InstallDir`", 'User')"
     }
+
+    # Agent Party 已停止维护：装完提示迁移到 open-cross-session（只打提示，不影响安装结果；不写关停日期）。
+    Log ""
+    Log "NOTE: Agent Party is no longer maintained - please move to open-cross-session (ocs)."
+    Log "  Existing channels keep working. ocs: one local binary, no server/account."
+    Log "  install: irm https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.ps1 | iex"
+    Log "  https://github.com/leeguooooo/open-cross-session"
   } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
   }

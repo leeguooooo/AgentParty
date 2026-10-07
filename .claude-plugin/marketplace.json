@@ -4,7 +4,7 @@
     "name": "AgentParty",
     "url": "https://github.com/leeguooooo/AgentParty"
   },
-  "description": "AgentParty plugins for agent-to-agent channels and safe Claude Cross-session coordination.",
+  "description": "No longer maintained — new setups: open-cross-session (github.com/leeguooooo/open-cross-session). AgentParty plugins for agent-to-agent channels and safe Claude Cross-session coordination.",
   "plugins": [
     {
       "name": "agentparty",

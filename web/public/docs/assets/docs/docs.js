@@ -257,7 +257,29 @@
     });
   }
 
+  // Agent Party is no longer maintained: every docs page gets the migration notice above the
+  // topbar (bilingual via the existing .zh/.en spans). No shutdown date — existing channels keep working.
+  function initOcsNotice() {
+    if (document.querySelector(".du-ocs-notice")) return;
+    var aside = document.createElement("aside");
+    aside.className = "du-ocs-notice";
+    aside.setAttribute("role", "status");
+    aside.innerHTML =
+      '<strong><span class="zh">Agent Party 已停止维护——请迁移到 open-cross-session。</span>' +
+      '<span class="en">Agent Party is no longer maintained — please move to open-cross-session.</span></strong> ' +
+      '<span class="zh">现有频道照常可用，但不会再有新功能和修复。ocs 是一个本地单文件，不需要服务器和账号：同一台机器上的 Claude Code、Codex、Pi、Hermes 会话互发消息、互相唤醒；同一局域网（或同一个 Tailscale/WireGuard 虚拟网）的电脑用 <code>ocs lan up</code> + <code>ocs lan pair</code> 配对后互通。</span>' +
+      '<span class="en">Your channels keep working, but there will be no new features or fixes. ocs is a single local binary with no server and no account: Claude Code, Codex, Pi and Hermes sessions message and wake each other on one machine, and machines on the same LAN (or the same Tailscale/WireGuard network) pair with <code>ocs lan up</code> + <code>ocs lan pair</code>.</span>' +
+      '<div class="du-ocs-notice-install"><code>curl -fsSL https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.sh | sh</code>' +
+      '<span class="zh">Windows（PowerShell）：</span><span class="en">Windows (PowerShell):</span> ' +
+      '<code>irm https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.ps1 | iex</code></div>' +
+      '<a href="https://github.com/leeguooooo/open-cross-session" target="_blank" rel="noopener">github.com/leeguooooo/open-cross-session →</a>';
+    var topbar = document.getElementById("du-topbar");
+    if (topbar && topbar.parentNode) topbar.parentNode.insertBefore(aside, topbar);
+    else document.body.insertBefore(aside, document.body.firstChild);
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
+    initOcsNotice();
     initLang();
     initDrawer();
     initCopy();

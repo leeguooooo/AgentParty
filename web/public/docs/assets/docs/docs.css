@@ -728,3 +728,24 @@ img { max-width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* ======================================================= OCS NOTICE ==== */
+/* Agent Party is no longer maintained: migration notice injected by docs.js above the topbar. */
+.du-ocs-notice {
+  padding: 10px 20px;
+  background: var(--yellow);
+  color: var(--ink);
+  border-bottom: 1.5px solid var(--line-ink);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.du-ocs-notice strong { margin-right: 4px; }
+.du-ocs-notice code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--paper);
+  padding: 1px 6px;
+  overflow-wrap: anywhere;
+}
+.du-ocs-notice-install { margin: 4px 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.du-ocs-notice a { font-weight: 700; color: var(--ink); }

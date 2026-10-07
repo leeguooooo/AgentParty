@@ -37,6 +37,16 @@ MIRROR="${AGENTPARTY_MIRROR:-$DEFAULT_MIRROR}"
 log()  { printf '%s\n' "agentparty: $*" >&2; }
 die()  { printf '%s\n' "agentparty: error: $*" >&2; exit 1; }
 
+# Agent Party 已停止维护：装完提示迁移到 open-cross-session（只打 stderr，不影响退出码；不写关停日期）。
+deprecation_notice() {
+  log ""
+  log "NOTE: Agent Party is no longer maintained — please move to open-cross-session (ocs)."
+  log "  Agent Party 已停止维护——请迁移到 open-cross-session（ocs）。现有频道照常可用。"
+  log "  ocs: one local binary, no server/account; Claude Code <-> Codex <-> Pi <-> Hermes, same machine or paired LAN."
+  log "  install: curl -fsSL https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.sh | sh"
+  log "  https://github.com/leeguooooo/open-cross-session"
+}
+
 need() { command -v "$1" >/dev/null 2>&1; }
 
 # ---- 平台探测: uname -sm → target 白名单 ----
@@ -219,6 +229,7 @@ main() {
       log "  export PATH=\"${INSTALL_DIR}:\$PATH\""
       ;;
   esac
+  deprecation_notice
 }
 
 main "$@"

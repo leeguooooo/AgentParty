@@ -259,6 +259,12 @@ main() {
   else
     log "已按你的显式选择安装未公证的 ad-hoc 分发；发布状态可在桌面设置中查看。"
   fi
+  # Agent Party 已停止维护：装完提示迁移（只打 stderr，不影响退出码；不写关停日期）。
+  log ""
+  log "NOTE: Agent Party is no longer maintained — please move to open-cross-session (ocs)."
+  log "  Agent Party 已停止维护——请迁移到 open-cross-session（ocs）。现有频道照常可用。"
+  log "  install: curl -fsSL https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.sh | sh"
+  log "  https://github.com/leeguooooo/open-cross-session"
 }
 
 main "$@"

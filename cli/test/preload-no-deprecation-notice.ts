@@ -1,0 +1,1 @@
+process.env.AGENTPARTY_NO_DEPRECATION_NOTICE = "1";
