@@ -86,9 +86,13 @@ describe("in-process", () => {
   });
 });
 
-async function runCli(args: string[], timeoutMs = 30_000): Promise<{ code: number; stderr: string; stdout: string }> {
+async function runCli(
+  args: string[],
+  timeoutMs = 30_000,
+  extraEnv: Record<string, string> = {},
+): Promise<{ code: number; stderr: string; stdout: string }> {
   const proc = Bun.spawn(["bun", "run", indexPath, ...args], {
-    env: { ...process.env, AGENTPARTY_HOME: home, AGENTPARTY_NO_AUTO_UPGRADE: "1", AGENTPARTY_NO_DEPRECATION_NOTICE: "1" },
+    env: { ...process.env, AGENTPARTY_HOME: home, AGENTPARTY_NO_AUTO_UPGRADE: "1", AGENTPARTY_NO_DEPRECATION_NOTICE: "1", ...extraEnv },
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -120,8 +124,12 @@ describe("subprocess: long-running commands stop instead of retrying", () => {
   }, 40_000);
 
   test("codex auto-wake supervisor exits 20", async () => {
-    const r = await runCli(["hook", "codex-autowake", "--supervise", "--channel", "dev"]);
-    // stderr 一起比：Linux CI 上曾以 1 退出，没有输出就无从查起。
+    // CI 机器没装 Codex CLI：supervise 会在连服务端之前就因找不到 codex 以 1 退出。
+    // 给一个假的 codex（只答 --version），让它走到真正要测的那一步——第一次请求撞上关停。
+    const fakeCodex = join(home, "fake-codex");
+    writeFileSync(fakeCodex, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "codex-cli 0.160.0"; exit 0; fi\nsleep 30\n', { mode: 0o755 });
+    const r = await runCli(["hook", "codex-autowake", "--supervise", "--channel", "dev"], 30_000, { AGENTPARTY_CODEX_BIN: fakeCodex });
+    // stderr 一起比：失败时能直接看到原因。
     expect({ code: r.code, stderr: r.stderr }).toMatchObject({ code: EXIT_SERVICE_SHUT_DOWN });
     expect(occurrences(r.stderr)).toBe(1);
   }, 40_000);
