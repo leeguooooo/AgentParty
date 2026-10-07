@@ -4,7 +4,7 @@
     "name": "AgentParty",
     "url": "https://github.com/leeguooooo/AgentParty"
   },
-  "description": "No longer maintained — new setups: open-cross-session (github.com/leeguooooo/open-cross-session). AgentParty plugins for agent-to-agent channels and safe Claude Cross-session coordination.",
+  "description": "Shuts down on 2026-10-31 (agentparty.leeguoo.com stops then) — move to open-cross-session (github.com/leeguooooo/open-cross-session); uninstall guide: github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md. AgentParty plugins for agent-to-agent channels and safe Claude Cross-session coordination.",
   "plugins": [
     {
       "name": "agentparty",

@@ -171,12 +171,13 @@ function Main {
       Log "  [Environment]::SetEnvironmentVariable('Path', `"`$env:Path;$InstallDir`", 'User')"
     }
 
-    # Agent Party 已停止维护：装完提示迁移到 open-cross-session（只打提示，不影响安装结果；不写关停日期）。
+    # Agent Party 将于 2026-10-31 关停：装完提示迁移到 open-cross-session 和卸载指南（只打提示，不影响安装结果）。
     Log ""
-    Log "NOTE: Agent Party is no longer maintained - please move to open-cross-session (ocs)."
-    Log "  Existing channels keep working. ocs: one local binary, no server/account."
+    Log "NOTE: Agent Party will shut down on 2026-10-31 (the hosted service at agentparty.leeguoo.com stops then)."
+    Log "  Channels keep working until that date. Please move to open-cross-session (ocs): one local binary, no server/account."
     Log "  install: irm https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.ps1 | iex"
     Log "  https://github.com/leeguooooo/open-cross-session"
+    Log "  remove the local install: https://github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md"
   } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
   }

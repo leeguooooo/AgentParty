@@ -1,5 +1,5 @@
-// Agent Party 停止维护公告：挂在 #root 最上方（main.tsx），所以登录门、邀请落地、频道页、桌面版
-// 都能看到。引导迁移到 open-cross-session（ocs）。
+// Agent Party 关停公告（2026-10-31）：挂在 #root 最上方（main.tsx），所以登录门、邀请落地、频道页、
+// 桌面版都能看到。引导迁移到 open-cross-session（ocs），并链到卸载指南。
 //
 // 关闭规则（owner 拍板）：本浏览器**第一次**看到时不给关——必须先被看见；之后再打开页面才出现
 // 「知道了」按钮，点了按浏览器记住（localStorage），不再显示。存储不可用（隐私模式等）时一律当作
@@ -70,9 +70,14 @@ export function OcsMigrationNotice() {
         <span>{t("OcsMigrationNotice.installWindows")}</span>
         <code className="t-mono">{OCS_INSTALL_PS1}</code>
       </div>
-      <a className="ocs-migration-notice-link" href={OCS_REPO_URL} target="_blank" rel="noopener noreferrer">
-        {t("OcsMigrationNotice.repo")}
-      </a>
+      <div className="ocs-migration-notice-links">
+        <a className="ocs-migration-notice-link" href={OCS_REPO_URL} target="_blank" rel="noopener noreferrer">
+          {t("OcsMigrationNotice.repo")}
+        </a>
+        <a className="ocs-migration-notice-link" href={t("OcsMigrationNotice.uninstallUrl")} target="_blank" rel="noopener noreferrer">
+          {t("OcsMigrationNotice.uninstall")}
+        </a>
+      </div>
     </aside>
   );
 }

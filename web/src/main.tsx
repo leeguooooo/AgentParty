@@ -23,7 +23,7 @@ async function startApplication() {
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <LocaleProvider>
-        {/* Agent Party 停止维护：迁移公告挂在 #root 最上方，任何页面（含登录门、桌面版）都看得到。 */}
+        {/* Agent Party 关停（2026-10-31）公告挂在 #root 最上方，任何页面（含登录门、桌面版）都看得到。 */}
         <OcsMigrationNotice />
         <App />
       </LocaleProvider>

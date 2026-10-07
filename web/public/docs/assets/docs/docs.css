@@ -730,7 +730,7 @@ img { max-width: 100%; }
 }
 
 /* ======================================================= OCS NOTICE ==== */
-/* Agent Party is no longer maintained: migration notice injected by docs.js above the topbar. */
+/* Agent Party shuts down on 2026-10-31: notice injected by docs.js above the topbar. */
 .du-ocs-notice {
   padding: 10px 20px;
   background: var(--yellow);

@@ -60,30 +60,33 @@ beforeEach(() => {
 
 afterEach(unmount);
 
-describe("OcsMigrationNotice (Agent Party retirement)", () => {
+describe("OcsMigrationNotice (Agent Party shutdown)", () => {
   test("first view: shows the notice, repo link and both install lines, with no dismiss button", () => {
     mount("en");
     const out = text();
     expect(out).toContain(OcsMigrationNoticeStrings.en["OcsMigrationNotice.title"]!);
     expect(out).toContain(OCS_INSTALL_SH);
     expect(out).toContain(OCS_INSTALL_PS1);
-    const link = renderer!.root.find((n) => n.type === "a");
-    expect(link.props.href).toBe(OCS_REPO_URL);
+    const hrefs = renderer!.root.findAll((n) => n.type === "a").map((n) => n.props.href);
+    expect(hrefs).toEqual([OCS_REPO_URL, "https://github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md"]);
     expect(dismissButtons()).toHaveLength(0);
     expect(localStorage.getItem(OCS_NOTICE_STORAGE_KEY)).toBe("seen");
   });
 
-  test("never states a shutdown date", () => {
+  test("states the 2026-10-31 shutdown of the hosted service in both languages", () => {
     for (const locale of ["en", "zh"] as const) {
-      for (const value of Object.values(OcsMigrationNoticeStrings[locale])) {
-        expect(value).not.toMatch(/20\d\d|shut ?down|关停|下线/i);
-      }
+      const strings = OcsMigrationNoticeStrings[locale];
+      expect(strings["OcsMigrationNotice.title"]).toContain("2026-10-31");
+      expect(strings["OcsMigrationNotice.lead"]).toContain("agentparty.leeguoo.com");
+      expect(strings["OcsMigrationNotice.uninstallUrl"]).toMatch(/docs\/uninstall(\.zh)?\.md$/);
     }
   });
 
   test("zh copy is used under the zh locale", () => {
     mount("zh");
     expect(text()).toContain(OcsMigrationNoticeStrings.zh["OcsMigrationNotice.title"]!);
+    const hrefs = renderer!.root.findAll((n) => n.type === "a").map((n) => n.props.href);
+    expect(hrefs).toContain("https://github.com/leeguooooo/agentparty/blob/main/docs/uninstall.zh.md");
   });
 
   test("later views offer dismiss, and dismissal is remembered per browser", () => {

@@ -1,4 +1,4 @@
-# 子进程冒烟测试大量断言 stderr === ""；Agent Party 停止维护提示（src/deprecation-notice.ts）在
+# 子进程冒烟测试大量断言 stderr === ""；Agent Party 关停提示（src/deprecation-notice.ts）在
 # 每个临时 AGENTPARTY_HOME 里的第一条交互式命令上都会打一次，所以测试进程统一关掉它，
 # 子进程经 {...process.env} 继承。提示本身由 test/deprecation-notice.test.ts 直接覆盖。
 [test]

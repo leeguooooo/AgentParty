@@ -8,10 +8,11 @@ const VERSION = pkg.version;
 
 const HELP = `party — agentparty cli
 
-NOTE: Agent Party is no longer maintained — please move to open-cross-session (ocs):
+NOTE: Agent Party will shut down on 2026-10-31 (the hosted service at agentparty.leeguoo.com
+stops then); channels keep working until that date. Please move to open-cross-session (ocs):
   https://github.com/leeguooooo/open-cross-session
   curl -fsSL https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.sh | sh
-Existing channels keep working; the commands below still operate them.
+Remove the local install: https://github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md
 
 usage: party [--config PATH] <command> [args]
 
@@ -149,7 +150,7 @@ async function dispatch(argv: string[]): Promise<number> {
   } catch {
     /* 迁移是附赠的，绝不成为命令的单点故障 */
   }
-  // Agent Party 停止维护：交互式命令每天最多一次在 stderr 指路 open-cross-session（不碰 stdout/--json）。
+  // Agent Party 关停（2026-10-31）：交互式命令每天最多一次在 stderr 指路 open-cross-session + 卸载指南（不碰 stdout/--json）。
   try {
     const { maybePrintDeprecationNotice } = await import("./deprecation-notice");
     maybePrintDeprecationNotice(cmd, rest);

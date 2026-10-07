@@ -21,13 +21,14 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 describe("Agent Party deprecation notice", () => {
-  test("points to open-cross-session with the install line, and never states a shutdown date", () => {
-    expect(DEPRECATION_NOTICE).toContain("no longer maintained");
+  test("states the 2026-10-31 shutdown, points to open-cross-session with the install line and the uninstall guide", () => {
+    expect(DEPRECATION_NOTICE).toContain("will shut down on 2026-10-31");
+    expect(DEPRECATION_NOTICE).toContain("agentparty.leeguoo.com");
+    expect(DEPRECATION_NOTICE).toContain("https://github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md");
     expect(DEPRECATION_NOTICE).toContain("https://github.com/leeguooooo/open-cross-session");
     expect(DEPRECATION_NOTICE).toContain(
       "curl -fsSL https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.sh | sh",
     );
-    expect(DEPRECATION_NOTICE).not.toMatch(/20\d\d|shut ?down/i);
   });
 
   test("interactive command prints once, then is throttled for 24h", () => {

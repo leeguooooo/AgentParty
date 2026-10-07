@@ -1,4 +1,5 @@
-// Agent Party 停止维护：交互式 party 命令在 stderr 打一条「请迁移到 open-cross-session」提示。
+// Agent Party 关停（2026-10-31）：交互式 party 命令在 stderr 打一条「将关停、请迁移到 open-cross-session、
+// 卸载见指南」提示。
 //
 // 约束（照抄 #1083 自动迁移 / #703 升级提示的形态）：
 //   - **只走 stderr**，绝不碰 stdout——很多命令支持 --json，stdout 被下游解析。带 --json 时干脆不打。
@@ -7,7 +8,7 @@
 //   - **每台机器（每个 AGENTPARTY_HOME）最多每 24 小时一次**，磁盘时间戳节流（每条命令都是新进程）。
 //   - 能关：AGENTPARTY_NO_DEPRECATION_NOTICE=1。
 //   - 全 best-effort：读写节流文件失败也绝不挡命令本身。
-// 不写任何关停日期——owner 拍板：现有频道照常可用，只是不再维护。
+// 关停日期（owner 拍板）：2026-10-31，届时 agentparty.leeguoo.com 托管服务停止；此前频道照常可用。
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { agentpartyHome } from "./config";
@@ -15,12 +16,17 @@ import { agentpartyHome } from "./config";
 export const NO_DEPRECATION_NOTICE_ENV = "AGENTPARTY_NO_DEPRECATION_NOTICE";
 export const DEPRECATION_NOTICE_TTL_MS = 24 * 60 * 60 * 1000;
 
+export const SHUTDOWN_DATE = "2026-10-31";
+export const UNINSTALL_GUIDE_URL = "https://github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md";
+
 export const DEPRECATION_NOTICE = [
-  "party: Agent Party is no longer maintained — please move to open-cross-session (ocs).",
-  "  Your channels keep working, but there will be no new features or fixes.",
-  "  ocs: one local binary, no server/account; Claude Code ↔ Codex ↔ Pi ↔ Hermes on one machine or a paired LAN.",
+  `party: Agent Party will shut down on ${SHUTDOWN_DATE} (the hosted service at agentparty.leeguoo.com stops then).`,
+  "  Channels keep working until that date. Please move to open-cross-session (ocs):",
+  "  one local binary, no server/account; Claude Code ↔ Codex ↔ Pi ↔ Hermes on one machine or a paired LAN.",
   "  install: curl -fsSL https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.sh | sh",
-  "  https://github.com/leeguooooo/open-cross-session  (silence: AGENTPARTY_NO_DEPRECATION_NOTICE=1)",
+  "  https://github.com/leeguooooo/open-cross-session",
+  `  remove the local install: ${UNINSTALL_GUIDE_URL}`,
+  "  (silence this reminder: AGENTPARTY_NO_DEPRECATION_NOTICE=1)",
 ].join("\n");
 
 /** harness 拉起的进程内入口 / 常驻守护：不在这里打字。 */

@@ -8607,7 +8607,7 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
 .composer-paste--insecure { opacity: 0.55; }
 .composer-paste-error { margin: 4px 0 0; font-size: 12px; color: var(--red, #c0392b); }
 
-/* Agent Party 停止维护：#root 顶部的迁移公告（OcsMigrationNotice）。#root 是视口高的 flex 列，
+/* Agent Party 关停（2026-10-31）：#root 顶部的迁移公告（OcsMigrationNotice）。#root 是视口高的 flex 列，
    公告 flex:none 占自然高度，下面的 .app/.gate 用 flex:1 吃掉剩余空间、自己滚。 */
 .ocs-migration-notice {
   flex: none;
@@ -8641,6 +8641,7 @@ button.roster-name:hover { text-decoration-color: var(--d-ink); }
   background: var(--t-panel);
   padding: 1px 6px;
 }
+.ocs-migration-notice-links { display: flex; flex-wrap: wrap; gap: 4px 18px; }
 .ocs-migration-notice-link { font-weight: 600; color: var(--d-ink); }
 @media (max-width: 640px) {
   .ocs-migration-notice-install { grid-template-columns: minmax(0, 1fr); }

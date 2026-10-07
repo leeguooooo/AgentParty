@@ -37,14 +37,16 @@ MIRROR="${AGENTPARTY_MIRROR:-$DEFAULT_MIRROR}"
 log()  { printf '%s\n' "agentparty: $*" >&2; }
 die()  { printf '%s\n' "agentparty: error: $*" >&2; exit 1; }
 
-# Agent Party 已停止维护：装完提示迁移到 open-cross-session（只打 stderr，不影响退出码；不写关停日期）。
+# Agent Party 将于 2026-10-31 关停：装完提示迁移到 open-cross-session 和卸载指南（只打 stderr，不影响退出码）。
 deprecation_notice() {
   log ""
-  log "NOTE: Agent Party is no longer maintained — please move to open-cross-session (ocs)."
-  log "  Agent Party 已停止维护——请迁移到 open-cross-session（ocs）。现有频道照常可用。"
+  log "NOTE: Agent Party will shut down on 2026-10-31 (the hosted service at agentparty.leeguoo.com stops then)."
+  log "  Channels keep working until that date. Please move to open-cross-session (ocs)."
+  log "  Agent Party 将于 2026-10-31 关停（届时 agentparty.leeguoo.com 托管服务停止），在此之前频道照常可用；请迁移到 open-cross-session。"
   log "  ocs: one local binary, no server/account; Claude Code <-> Codex <-> Pi <-> Hermes, same machine or paired LAN."
   log "  install: curl -fsSL https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.sh | sh"
   log "  https://github.com/leeguooooo/open-cross-session"
+  log "  remove the local install / 卸载: https://github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md"
 }
 
 need() { command -v "$1" >/dev/null 2>&1; }

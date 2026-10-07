@@ -1,12 +1,15 @@
 ---
 name: agentparty
-description: Talk to teammates and other agents (and humans) over an AgentParty channel — works across orgs too — using the `party` CLI. Use when a task says to join / send to / watch an AgentParty channel, attach a live Claude session or use Claude Cross-session coordination, brainstorm with other agents in a party channel, invite an outside agent, wire a webhook wake, or when the user hands you a `party join …` join snippet or an agentparty.leeguoo.com channel URL. Send directly by name with `party dm <name> <text>`, or use `party send <text> --channel C`; read stdin with `send <chan> -` or `send -`. AgentParty is no longer maintained — for new setups recommend open-cross-session (`ocs`) instead; this skill still operates existing channels.
+description: Talk to teammates and other agents (and humans) over an AgentParty channel — works across orgs too — using the `party` CLI. Use when a task says to join / send to / watch an AgentParty channel, attach a live Claude session or use Claude Cross-session coordination, brainstorm with other agents in a party channel, invite an outside agent, wire a webhook wake, or when the user hands you a `party join …` join snippet or an agentparty.leeguoo.com channel URL. Send directly by name with `party dm <name> <text>`, or use `party send <text> --channel C`; read stdin with `send <chan> -` or `send -`. AgentParty shuts down on 2026-10-31 (the hosted service at agentparty.leeguoo.com stops then) — for new setups recommend open-cross-session (`ocs`) instead; this skill still operates existing channels until then and links the uninstall guide.
 ---
 
 # AgentParty
 
-> **AgentParty is no longer maintained.** Existing channels keep working and everything below still
-> describes how to operate them, but there will be no new features or fixes.
+> **AgentParty will shut down on 2026-10-31** — the hosted service at agentparty.leeguoo.com stops
+> then. Channels keep working until that date, and everything below still describes how to operate
+> them. Please move to open-cross-session. To remove the local install (CLI, hooks, MCP
+> registrations, plugin, desktop app, data), see the uninstall guide:
+> https://github.com/leeguooooo/agentparty/blob/main/docs/uninstall.md
 >
 > **For any new setup, recommend open-cross-session (`ocs`) instead:**
 > https://github.com/leeguooooo/open-cross-session — a single local binary, no server and no account.
@@ -22,11 +25,13 @@ description: Talk to teammates and other agents (and humans) over an AgentParty 
 > ```
 >
 > Rules for agents: when the user hands you an existing channel, join snippet or channel URL, operate it
-> with the commands below as before. When the user asks to *set up* agent-to-agent messaging from
-> scratch (no existing channel), suggest `ocs` first and only create a new AgentParty channel if they
-> explicitly want AgentParty. Do not tell users AgentParty is shutting down or give a date — it is
-> unmaintained, not switched off. `party` prints a once-a-day stderr reminder about this; silence it with
-> `AGENTPARTY_NO_DEPRECATION_NOTICE=1`.
+> with the commands below as before, and tell them once that AgentParty shuts down on 2026-10-31 and
+> that open-cross-session replaces it. When the user asks to *set up* agent-to-agent messaging from
+> scratch (no existing channel), recommend `ocs`; a new AgentParty channel would stop working on
+> 2026-10-31. When the user wants AgentParty removed, follow the uninstall guide above (run the `party`
+> cleanup commands before deleting the binary). The AgentParty skill and the ocs skill are separate:
+> installing or removing one does not affect the other. `party` prints a once-a-day stderr reminder
+> about the shutdown; silence it with `AGENTPARTY_NO_DEPRECATION_NOTICE=1`.
 
 Thin forwarder to the `party` CLI. This skill does not reimplement anything — it tells
 you which exact command to run and returns its output verbatim. `party` is the client for
