@@ -62,10 +62,14 @@ marketplace `agentparty`, added from `leeguooooo/AgentParty`):
 ```sh
 claude plugin uninstall agentparty@agentparty
 claude plugin marketplace remove agentparty
+rm -rf ~/.claude/plugins/cache/agentparty      # uninstall leaves the cached copy behind
 ```
 
-Check: `claude plugin list` and `claude plugin marketplace list` no longer show `agentparty`. This also
-removes the plugin's own hooks, MCP server and skill (they live in the plugin cache).
+Check: `claude plugin list` and `claude plugin marketplace list` no longer show `agentparty`, and
+`~/.claude/plugins/cache/agentparty` is gone. The plugin's hooks, MCP server and skill go with it.
+Claude Code sessions that are already running keep their `party mcp` / `party claude-channel`
+processes until you restart them; AgentParty tools in those sessions stop working once the binary
+is gone, nothing else is affected.
 
 **MCP registrations.** AgentParty registered its MCP server as `party` (current, `party mcp
 --all-channels`), sometimes `agentparty`, and older join packs used one `party-<name>` registration per
@@ -99,8 +103,9 @@ away with `claude plugin uninstall`. If you copied `skills/agentparty/SKILL.md` 
 leeguooooo/AgentParty` and `codex plugin add agentparty@agentparty`):
 
 ```sh
-codex plugin remove agentparty@agentparty      # also removes ~/.codex/plugins/cache/agentparty/
+codex plugin remove agentparty@agentparty
 codex plugin marketplace remove agentparty
+rm -rf ~/.codex/plugins/cache/agentparty       # `plugin remove` leaves this directory behind
 ```
 
 Check: `codex plugin list` and `codex plugin marketplace list` no longer show `agentparty`, and
@@ -138,11 +143,19 @@ The desktop app ships for macOS only. Quit it first (menu-bar icon → Quit).
 |---|---|---|---|
 | App | `/Applications/AgentParty.app` (or `~/Applications/AgentParty.app`, or `$AGENTPARTY_APP_DIR`) | `rm -rf /Applications/AgentParty.app` | `ls /Applications/AgentParty.app` fails |
 | Launch-at-login item (label `AgentParty`) | `~/Library/LaunchAgents/AgentParty.plist` | `launchctl bootout gui/$(id -u)/AgentParty; rm ~/Library/LaunchAgents/AgentParty.plist` | `launchctl print gui/$(id -u)/AgentParty` fails |
-| Duty agents (always-on agents, `RunAtLoad` + `KeepAlive`) | `~/Library/LaunchAgents/com.agentparty.duty.*.plist` (also `*.plist.terminal-disabled`) | for each label: `launchctl bootout gui/$(id -u)/com.agentparty.duty.<id>`, then delete the plist | `launchctl list \| grep com.agentparty.duty` prints nothing |
+| Duty agents (always-on agents, `RunAtLoad` + `KeepAlive`) | `~/Library/LaunchAgents/com.agentparty.duty.*.plist` (also `*.plist.terminal-disabled`) | for each label: `launchctl bootout gui/$(id -u)/com.agentparty.duty.<id>`, then delete the plists (command below) | `launchctl list \| grep com.agentparty.duty` prints nothing |
 | App data, including the downloaded web UI bundles and the UI storage snapshot | `~/Library/Application Support/com.agentparty.desktop` | `rm -rf` it | path is gone |
 | WebView data and caches | `~/Library/WebKit/com.agentparty.desktop`, `~/Library/Caches/com.agentparty.desktop` | `rm -rf` them if present | paths are gone |
 | Saved sign-in (Keychain) | generic password, service `com.agentparty.desktop.credentials.v2` (one per server); older installs may still have service `com.agentparty.desktop` | `security delete-generic-password -s com.agentparty.desktop.credentials.v2` (repeat until it reports not found), same for `-s com.agentparty.desktop` | `security find-generic-password -s com.agentparty.desktop.credentials.v2` fails |
 | Duty agent binary, logs and live files | `~/.agentparty/desktop/` | removed with the data directory in step 7 | — |
+
+Delete the launch-agent plists with `find`, not a shell glob. In zsh (the macOS default shell) a glob
+that matches nothing, such as `*.plist.terminal-disabled`, aborts the whole `rm` command and deletes
+nothing:
+
+```sh
+find ~/Library/LaunchAgents -maxdepth 1 \( -name 'AgentParty.plist' -o -name 'com.agentparty.duty.*' \) -print -delete
+```
 
 Quit the app before removing duty agents by hand: while it runs it re-checks them every 30 seconds.
 Signing out inside the app also deletes its Keychain item, and turning off "launch at login" or a duty
@@ -168,6 +181,10 @@ credentials:** `account.json` (account session), `config.json`, `agents/*.json` 
 `logs/`, `instances/` (instance locks), `codex-sessions/`, `runners/`, `daemon/`, `wake-claims/`,
 `delivery-recovery/`, `claude-receipt-socks/`, `join-bindings.json`, `codex-auto-wake.json`,
 `codex-trust-gate.json`, and `desktop/` (desktop app).
+
+**If you maintained or released AgentParty**, look for `~/.agentparty/apple-release/` first: it can hold
+the Apple Developer ID signing private key (`*.key`) and its CSR. Move them to your password manager
+before deleting the directory; there may be no other copy.
 
 ```sh
 rm -rf ~/.agentparty
@@ -203,10 +220,11 @@ Check: in a new PowerShell window, `Get-Command party` fails and both directorie
 
 ```sh
 command -v party                                   # nothing
-pgrep -fl 'party (serve|watch|daemon|bridge|mcp)'  # nothing
+pgrep -fl 'party (serve|watch|daemon|bridge|mcp)'  # nothing (after restarting open Claude Code sessions)
 claude plugin list 2>/dev/null | grep -i agentparty; claude mcp list 2>/dev/null | grep 'party mcp'
 codex plugin list 2>/dev/null | grep -i agentparty; codex mcp list 2>/dev/null | grep 'party mcp'
-ls ~/.agentparty /Applications/AgentParty.app ~/Library/LaunchAgents/AgentParty.plist 2>&1 | grep -v 'No such file'
+ls -d ~/.agentparty /Applications/AgentParty.app ~/.claude/plugins/cache/agentparty ~/.codex/plugins/cache/agentparty 2>&1 | grep -v 'No such file'
+ls ~/Library/LaunchAgents | grep -i agentparty   # nothing
 launchctl list | grep -i agentparty                # nothing
 ```
 

@@ -53,10 +53,13 @@ party logout                      # 删除 ~/.agentparty/account.json（账号�
 ```sh
 claude plugin uninstall agentparty@agentparty
 claude plugin marketplace remove agentparty
+rm -rf ~/.claude/plugins/cache/agentparty      # uninstall 会把缓存副本留下
 ```
 
-确认：`claude plugin list` 和 `claude plugin marketplace list` 里不再有 `agentparty`。插件自带的 hook、MCP
-server 和 skill 都在插件缓存里，会一起删掉。
+确认：`claude plugin list` 和 `claude plugin marketplace list` 里不再有 `agentparty`，`~/.claude/plugins/cache/agentparty`
+也不在了。插件自带的 hook、MCP server 和 skill 随之删除。已经开着的 Claude Code 会话会继续占着各自的
+`party mcp` / `party claude-channel` 进程，重开会话才会消失；二进制删掉后这些会话里的 AgentParty 工具失效，
+其他不受影响。
 
 **MCP 注册。** AgentParty 的 MCP server 现在注册名是 `party`（`party mcp --all-channels`），有时是
 `agentparty`；老接入包按频道各注册一条 `party-<name>`，作用域可能是 user 或 local（按项目）：
@@ -87,8 +90,9 @@ claude mcp remove party-<name>          # 每条老注册；local 作用域的�
 leeguooooo/AgentParty` 和 `codex plugin add agentparty@agentparty`）：
 
 ```sh
-codex plugin remove agentparty@agentparty      # 同时删掉 ~/.codex/plugins/cache/agentparty/
+codex plugin remove agentparty@agentparty
 codex plugin marketplace remove agentparty
+rm -rf ~/.codex/plugins/cache/agentparty       # plugin remove 会留下这个目录
 ```
 
 确认：`codex plugin list` 和 `codex plugin marketplace list` 里不再有 `agentparty`，且
@@ -123,11 +127,18 @@ CODEX_HOME=<repo>/.codex codex mcp remove party   # 项目级注册表
 |---|---|---|---|
 | App | `/Applications/AgentParty.app`（或 `~/Applications/AgentParty.app`，或 `$AGENTPARTY_APP_DIR`） | `rm -rf /Applications/AgentParty.app` | `ls /Applications/AgentParty.app` 报不存在 |
 | 登录启动项（label `AgentParty`） | `~/Library/LaunchAgents/AgentParty.plist` | `launchctl bootout gui/$(id -u)/AgentParty; rm ~/Library/LaunchAgents/AgentParty.plist` | `launchctl print gui/$(id -u)/AgentParty` 报错 |
-| 值守 agent（常驻 agent，`RunAtLoad` + `KeepAlive`） | `~/Library/LaunchAgents/com.agentparty.duty.*.plist`（还可能有 `*.plist.terminal-disabled`） | 每个 label：`launchctl bootout gui/$(id -u)/com.agentparty.duty.<id>`，再删 plist | `launchctl list \| grep com.agentparty.duty` 没有输出 |
+| 值守 agent（常驻 agent，`RunAtLoad` + `KeepAlive`） | `~/Library/LaunchAgents/com.agentparty.duty.*.plist`（还可能有 `*.plist.terminal-disabled`） | 每个 label：`launchctl bootout gui/$(id -u)/com.agentparty.duty.<id>`，再删 plist（命令见下） | `launchctl list \| grep com.agentparty.duty` 没有输出 |
 | App 数据，含运行时下载的网页 UI 包和 UI 存储快照 | `~/Library/Application Support/com.agentparty.desktop` | `rm -rf` | 路径不存在 |
 | WebView 数据和缓存 | `~/Library/WebKit/com.agentparty.desktop`、`~/Library/Caches/com.agentparty.desktop` | 存在就 `rm -rf` | 路径不存在 |
 | 登录凭据（钥匙串） | 通用密码，服务名 `com.agentparty.desktop.credentials.v2`（每个服务器一条）；老版本可能还留着服务名 `com.agentparty.desktop` | `security delete-generic-password -s com.agentparty.desktop.credentials.v2`（重复到提示找不到为止），`-s com.agentparty.desktop` 同理 | `security find-generic-password -s com.agentparty.desktop.credentials.v2` 报错 |
 | 值守 agent 的二进制、日志、实时输出 | `~/.agentparty/desktop/` | 第 7 步删数据目录时一起删 | — |
+
+删 LaunchAgent 的 plist 用 `find`，不要用 shell 通配符。zsh（macOS 默认 shell）里只要有一个通配符匹配不到（比如没有
+`*.plist.terminal-disabled`），整条 `rm` 都不执行，一个也删不掉：
+
+```sh
+find ~/Library/LaunchAgents -maxdepth 1 \( -name 'AgentParty.plist' -o -name 'com.agentparty.duty.*' \) -print -delete
+```
 
 手动删值守 agent 前先退出 app：它运行时每 30 秒会重新核对一遍这些 agent。在 app 里登出也会删掉它的钥匙串条目；
 在 app 里关掉「登录时启动」或某个值守 agent，会删掉对应的 plist。
@@ -150,6 +161,9 @@ CODEX_HOME=<repo>/.codex codex mcp remove party   # 项目级注册表
 其余内容：`state/`（游标、缓存）、`logs/`、`instances/`（实例锁）、`codex-sessions/`、`runners/`、`daemon/`、
 `wake-claims/`、`delivery-recovery/`、`claude-receipt-socks/`、`join-bindings.json`、`codex-auto-wake.json`、
 `codex-trust-gate.json`，以及 `desktop/`（桌面版）。
+
+**维护或发布过 AgentParty 的人**先看一眼 `~/.agentparty/apple-release/`：里面可能有 Apple Developer ID 签名私钥（`*.key`）
+和对应的 CSR。删目录之前先存进密码管理器，别处可能没有副本。
 
 ```sh
 rm -rf ~/.agentparty
@@ -183,10 +197,11 @@ $p = [Environment]::GetEnvironmentVariable('Path','User') -split ';' | Where-Obj
 
 ```sh
 command -v party                                   # 没有输出
-pgrep -fl 'party (serve|watch|daemon|bridge|mcp)'  # 没有输出
+pgrep -fl 'party (serve|watch|daemon|bridge|mcp)'  # 没有输出（开着的 Claude Code 会话要先重开）
 claude plugin list 2>/dev/null | grep -i agentparty; claude mcp list 2>/dev/null | grep 'party mcp'
 codex plugin list 2>/dev/null | grep -i agentparty; codex mcp list 2>/dev/null | grep 'party mcp'
-ls ~/.agentparty /Applications/AgentParty.app ~/Library/LaunchAgents/AgentParty.plist 2>&1 | grep -v 'No such file'
+ls -d ~/.agentparty /Applications/AgentParty.app ~/.claude/plugins/cache/agentparty ~/.codex/plugins/cache/agentparty 2>&1 | grep -v 'No such file'
+ls ~/Library/LaunchAgents | grep -i agentparty   # 没有输出
 launchctl list | grep -i agentparty                # 没有输出
 ```
 
