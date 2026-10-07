@@ -1,4 +1,5 @@
 // party watch — 补拉错过消息，阻塞等新消息
+import { exitOnServiceShutdown } from "../service-shutdown";
 import {
   EXIT_ARCHIVED,
   EXIT_AUTH,
@@ -835,6 +836,8 @@ export async function runWatch(o: WatchOptions): Promise<number> {
 }
 
 export async function run(argv: string[]): Promise<number> {
+  // 常驻：托管服务关停（410 agentparty_shut_down）时打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出，不再重试。
+  exitOnServiceShutdown();
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
     return 0;

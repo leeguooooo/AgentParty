@@ -7,8 +7,11 @@
 // Hard rules:
 //   - Before the instant, nothing changes: the gate is one Date comparison, no D1/DO/KV reads.
 //   - Empty / unparsable value ⇒ never active (fail open to normal service), logged once per isolate.
-//   - At/after the instant every path gets a 410 with `cache-control: no-store`, except robots.txt
-//     (200, disallow all, so crawlers drop the site) and favicons (passed to the static assets).
+//   - At/after the instant every path gets a 410 with `cache-control: no-store`, except:
+//     installer paths (200 — `curl -fsSL … | sh` / `irm … | iex` discard a 4xx body, and old docs and
+//     older ocs releases told people to pipe agentparty.leeguoo.com/install.sh; the script itself only
+//     prints the notice and exits 1), robots.txt (200, disallow all, so crawlers drop the site) and
+//     favicons (passed to the static assets).
 
 export const SHUTDOWN_ERROR_CODE = "agentparty_shut_down";
 export const OCS_REPO_URL = "https://github.com/leeguooooo/open-cross-session";
@@ -93,6 +96,14 @@ function jsonGone(request: Request, allowedOrigins: ReadonlySet<string>): Respon
 function textGone(body: string, contentType: string): Response {
   return new Response(body, {
     status: 410,
+    headers: { "content-type": contentType, "cache-control": NO_STORE },
+  });
+}
+
+/** 200 on purpose: `curl -f` / `irm` drop the body of a 4xx, so a 410 would hide the notice. */
+function installerScript(body: string, contentType: string): Response {
+  return new Response(body, {
+    status: 200,
     headers: { "content-type": contentType, "cache-control": NO_STORE },
   });
 }
@@ -199,9 +210,9 @@ export function shutdownResponse(
     return jsonGone(request, allowedOrigins);
   }
   if (pathname === "/install.sh" || pathname === "/install-desktop.sh") {
-    return textGone(SHUTDOWN_INSTALL_SH, "text/x-shellscript; charset=utf-8");
+    return installerScript(SHUTDOWN_INSTALL_SH, "text/x-shellscript; charset=utf-8");
   }
-  if (pathname === "/install.ps1") return textGone(SHUTDOWN_INSTALL_PS1, "text/plain; charset=utf-8");
+  if (pathname === "/install.ps1") return installerScript(SHUTDOWN_INSTALL_PS1, "text/plain; charset=utf-8");
   if (pathname === "/llms.txt") return textGone(SHUTDOWN_LLMS_TXT, "text/plain; charset=utf-8");
   if (pathname === "/robots.txt") {
     return new Response(SHUTDOWN_ROBOTS_TXT, {

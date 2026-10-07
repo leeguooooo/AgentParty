@@ -20,6 +20,7 @@
 //   ② delivery 租约续期：跑 SDK 期间周期性发 `delivery_update running`（间隔远小于 90s 租约，默认 45s）把
 //      lease_until 顶上去；turn 一结束即停。修掉「SDK 会话长于 DIRECTED_DELIVERY_LEASE_MS(90s) → 服务端租约到期
 //      重派/重跑（重复模型副作用）」的窗口（#688 B）。快 turn（<45s）不发续租、只走终局 reply（reply_to 了结）。
+import { exitOnServiceShutdown } from "../service-shutdown";
 import {
   DIRECTED_DELIVERY_LEASE_MS,
   EXIT_ARCHIVED,
@@ -385,6 +386,8 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
 }
 
 export async function run(argv: string[]): Promise<number> {
+  // 常驻：托管服务关停（410 agentparty_shut_down）时打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出，不再重试。
+  exitOnServiceShutdown();
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
     return 0;

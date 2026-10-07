@@ -1,4 +1,5 @@
 // party mcp — stdio MCP server exposing AgentParty as structured tools.
+import { exitOnServiceShutdown } from "../service-shutdown";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ChannelDecisionRecord, MsgFrame, StatusState, TaskAssigneeKind, TaskState } from "@agentparty/shared";
 import { MAX_ALSO_RESOLVES } from "@agentparty/shared";
@@ -1888,6 +1889,8 @@ export function createMcpServer(defaultChannel?: string, aggregateChannels: bool
 }
 
 export async function run(argv: string[]): Promise<number> {
+  // 常驻：托管服务关停（410 agentparty_shut_down）时打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出，不再重试。
+  exitOnServiceShutdown();
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(HELP);
     return 0;

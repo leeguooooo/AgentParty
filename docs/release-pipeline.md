@@ -54,12 +54,13 @@ The hosted service shuts itself down at the instant in the `AGENTPARTY_SHUTDOWN_
 first thing the Worker's `fetch` does is compare that instant with the current time
 (`worker/src/shutdown.ts`, wired in the default export of `worker/src/index.ts`). Before the instant,
 requests are served exactly as before. From the instant on, every path gets a 410 with
-`cache-control: no-store`:
+`cache-control: no-store`, with the exceptions noted below:
 
 - `/api/*`, `/openapi.json` and WebSocket upgrades get the JSON
   `{"error":"agentparty_shut_down","message":"…"}`.
-- `/install.sh`, `/install-desktop.sh` and `/install.ps1` get a script that prints the notice to stderr
-  and exits 1.
+- `/install.sh`, `/install-desktop.sh` and `/install.ps1` get a **200** with a script that prints the
+  notice to stderr and exits 1. It is a 200 because `curl -fsSL … | sh` and `irm … | iex` throw away the
+  body of a 4xx response, so a 410 would hide the notice.
 - `/llms.txt` gets a plain-text notice, and `/robots.txt` gets a 200 response that disallows everything.
 - Every other path gets a self-contained bilingual HTML page.
 

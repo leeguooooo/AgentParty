@@ -12,6 +12,7 @@
 //   1. stdout 永远为空——hook 的 stdout 会被灌进模型上下文；
 //   2. 任何失败都静默 exit 0——exit 2 会 block 模型的工具调用，坏 JSON/写盘失败都不配阻断模型；
 //   3. 本体不等网络——上行要么归 serve 心跳，要么交给 detached 子进程。
+import { exitOnServiceShutdown } from "../service-shutdown";
 import { existsSync, readFileSync } from "node:fs";
 import { stripTerminalControls } from "../format";
 import { randomUUID } from "node:crypto";
@@ -1727,6 +1728,8 @@ function runCodexAutoWakeCommand(argv: string[]): Promise<number> | number {
   const env = process.env;
   const home = agentpartyHome(env);
   if (argv[0] === "--supervise") {
+    // 常驻的唤醒层（serve 在本进程内跑）：服务已关停就打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出。
+    exitOnServiceShutdown();
     const { channel, targetThreadId, sourceThreadId } = parseCodexAutoWakeSupervisorArgs(argv);
     if (!channel) {
       console.error("hook codex-autowake --supervise 需要 --channel <channel>");

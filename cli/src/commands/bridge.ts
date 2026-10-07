@@ -5,6 +5,7 @@
 // a channel notification is a harness-supported input path that queues a new
 // turn in the current session, while logging/resource/tool-list notifications
 // remain diagnostics and must never be treated as delivery.
+import { exitOnServiceShutdown } from "../service-shutdown";
 import {
   accessSync,
   chmodSync,
@@ -1935,6 +1936,10 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
       console.error("party bridge codex-app source and target must be different tasks");
       return 1;
     }
+    // codex-app 桥不带子进程，可以直接退出：服务已关停时打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出。
+    // （bridge codex / bridge claude 挂着交互式 TUI 子进程，不在这里硬退：claude 侧的重试在
+    // claude-channel 子进程里、它自己会退；codex 侧的帧流在握手探测到 410 时已经终局结束。）
+    exitOnServiceShutdown();
     return await (deps.runCodexNativeBridge ?? runCodexNativeBridge)({
       channel,
       targetThreadId,

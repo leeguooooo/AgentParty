@@ -43,10 +43,11 @@ check 全被跳过也算绿。其余任何情况（没有证据、API 出错、m
 托管服务按 `worker/wrangler.jsonc` 里 `AGENTPARTY_SHUTDOWN_AT` 这个 var 的时刻自行关停（当前为
 `2026-10-31T00:00:00+08:00`）。不需要任何定时任务：Worker 的 `fetch` 一进来先拿当前时间和这个时刻比一下
 （`worker/src/shutdown.ts`，接在 `worker/src/index.ts` 的 default export 上）。到点之前，请求和以前完全一样地处理。
-到点之后，每个路径都回 410，带 `cache-control: no-store`：
+到点之后，每个路径都回 410（例外见下），带 `cache-control: no-store`：
 
 - `/api/*`、`/openapi.json` 和 WebSocket upgrade 回 JSON `{"error":"agentparty_shut_down","message":"…"}`。
-- `/install.sh`、`/install-desktop.sh`、`/install.ps1` 回一段脚本：把说明打到 stderr，然后 exit 1。
+- `/install.sh`、`/install-desktop.sh`、`/install.ps1` 回 **200** 和一段脚本：把说明打到 stderr，然后 exit 1。
+  用 200 是因为 `curl -fsSL … | sh` 和 `irm … | iex` 遇到 4xx 会丢掉响应体，回 410 说明就看不到了。
 - `/llms.txt` 回纯文本说明；`/robots.txt` 回 200，禁止所有抓取。
 - 其他所有路径回一个自包含的中英双语 HTML 页。
 

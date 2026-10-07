@@ -188,6 +188,11 @@ export const EXIT_UNREACHABLE = 10;
 // 服务端 task 状态原封不动，任务不会因此丢失。拿到这个码的执行体应当降级为只读（可以看、可以
 // 汇报，别开始有副作用的活），而不是换个措辞重试。
 export const EXIT_TASK_LEASE_HELD = 11;
+// 托管服务已关停（服务端 410 + error "agentparty_shut_down"，见 worker/src/shutdown.ts）：终局，
+// 重试永远不会好。常驻命令（serve / watch / daemon / mcp / claude-channel / codex 自动唤醒）打一次
+// 说明后以此码退出，不再退避重连；一次性命令（send 等）也用它，方便脚本区分「服务没了」与普通失败。
+// 20 刻意远离 1–13 的既有码，以免被误认成任何一种可恢复故障。
+export const EXIT_SERVICE_SHUT_DOWN = 20;
 
 // ---- 基础类型 ----
 

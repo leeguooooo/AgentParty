@@ -5,6 +5,7 @@
 // injects a queued input into the *current* Claude session. Do not replace this
 // with ordinary MCP logging/resource notifications: those were proven not to
 // wake an idle harness in #553.
+import { exitOnServiceShutdown } from "../service-shutdown";
 import { OcsRosterReporter, ocsReportDisabled } from "../ocs-presence-report";
 import {
   BODY_LIMIT,
@@ -3359,6 +3360,8 @@ function toolResult(text: string, isError = false): {
 }
 
 export async function run(argv: string[]): Promise<number> {
+  // 常驻：托管服务关停（410 agentparty_shut_down）时打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出，不再重试。
+  exitOnServiceShutdown();
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
     return 0;

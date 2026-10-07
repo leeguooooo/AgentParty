@@ -118,11 +118,12 @@ describe("at/after the shutdown instant", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("tauri://localhost");
   });
 
-  it("/install.sh returns a shell script that prints the notice and exits 1", async () => {
+  it("installer paths return 200 (so `curl -fsSL … | sh` runs it) with a script that prints the notice and exits 1", async () => {
     setShutdownAt("now");
     for (const path of ["/install.sh", "/install-desktop.sh"]) {
       const res = await SELF.fetch(`http://ap.test${path}`);
-      expect(res.status, path).toBe(410);
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get("cache-control"), path).toBe("no-store");
       expect(res.headers.get("content-type"), path).toContain("text/x-shellscript");
       const body = await res.text();
       expect(body.startsWith("#!/bin/sh\n"), path).toBe(true);
@@ -131,7 +132,8 @@ describe("at/after the shutdown instant", () => {
       expect(body, path).toContain("open-cross-session");
     }
     const ps1 = await SELF.fetch("http://ap.test/install.ps1");
-    expect(ps1.status).toBe(410);
+    expect(ps1.status).toBe(200);
+    expect(ps1.headers.get("cache-control")).toBe("no-store");
     const ps1Body = await ps1.text();
     expect(ps1Body).toContain("exit 1");
     expect(ps1Body).toContain("open-cross-session");

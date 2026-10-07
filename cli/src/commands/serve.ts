@@ -1,6 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
+import { exitOnServiceShutdown } from "../service-shutdown";
 import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, isWakeVerifyFrame, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame, type SessionOutputKind } from "@agentparty/shared";
 import { SessionOutputReporter, sessionOutputFileTap } from "../session-output";
 import { ClaudeStreamJsonParser, claudeResultBody } from "../claude-stream-json";
@@ -7228,6 +7229,8 @@ export function formatServeProfileHints(input: {
 }
 
 export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<number> {
+  // 常驻：托管服务关停（410 agentparty_shut_down）时打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出，不再重试。
+  exitOnServiceShutdown();
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
     return 0;

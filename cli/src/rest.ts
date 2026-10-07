@@ -47,6 +47,7 @@ import {
 } from "@agentparty/shared";
 import pkg from "../package.json" with { type: "json" };
 import { stripTerminalControls } from "./format";
+import { EXIT_SERVICE_SHUT_DOWN, noteServiceShutdown, SERVICE_SHUT_DOWN_CODE, serviceShutdownMessage } from "./service-shutdown";
 
 export type { ChannelMode, WebhookFilter };
 export type { CompletionGate, CompletionReview, CompletionReviewPolicy };
@@ -208,6 +209,13 @@ export interface ProjectAgentChannelRuntime {
 }
 
 function extractError(status: number, body: unknown, raw: string): RestError {
+  // 托管服务已关停（410 agentparty_shut_down）：所有 REST 错误都经过这里，是识别关停的唯一出口。
+  // 常驻命令在此直接打印一次并以 EXIT_SERVICE_SHUT_DOWN 退出（不回到任何重试循环）；一次性命令照常抛错。
+  const shutdown = serviceShutdownMessage(status, body);
+  if (shutdown !== null) {
+    noteServiceShutdown(shutdown);
+    return new RestError(status, SERVICE_SHUT_DOWN_CODE, shutdown, body);
+  }
   let code: string | null = null;
   let message = raw || `http ${status}`;
   if (body && typeof body === "object") {
@@ -1866,6 +1874,7 @@ export function handleRestError(e: unknown): number {
       );
       return EXIT_AUTH;
     }
+    if (e.code === SERVICE_SHUT_DOWN_CODE) return EXIT_SERVICE_SHUT_DOWN;
     if (e.code === "loop_guard") return EXIT_LOOP_GUARD;
     // workflow guard 与 loop guard 同类：停手等人类，别换个措辞重试（#122）
     if (e.code === "workflow_guard") {
