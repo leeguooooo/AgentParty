@@ -105,7 +105,9 @@ describe("AgentParty marketplace plugin", () => {
       const hooks = (entries[0] as { hooks: Array<Record<string, unknown>> }).hooks;
       expect(hooks).toEqual([{
         type: "command",
-        command: `"${claudeRuntimeCommand}" hook ${event === "Stop" ? "stop-guard" : "report"}`,
+        // #1123：带 `sh` 前缀。Cursor 在 Windows 上用 PowerShell 跑 `& <command>`，直接点名一个
+        // 无扩展名文件会弹「打开方式」对话框；Claude（POSIX sh / Windows Git Bash）里两者等价。
+        command: `sh "${claudeRuntimeCommand}" hook ${event === "Stop" ? "stop-guard" : "report"}`,
         timeout: event === "SessionEnd" ? 3 : 10,
       }]);
     }
@@ -191,6 +193,68 @@ describe("AgentParty marketplace plugin", () => {
         expect(result.status).toBe(0);
         expect(result.stdout).toBe("{}\n");
         expect(result.stderr).toBe("");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    // #1123：Cursor 把「exit 0 + 空 stdout」当非法 JSON 拦下工具调用。
+    test("Cursor 的 hook（CURSOR_VERSION + payload 带 cursor_version，含 BOM）：不启动 party，回 {}", () => {
+      const { home, marker } = stubHome();
+      try {
+        for (const sub of ["report", "stop-guard"]) {
+          const result = spawnSync(runtimeLauncher, ["hook", sub], {
+            env: { HOME: home, PATH: "/usr/bin:/bin", CURSOR_VERSION: "2026.09.26" },
+            input: '\uFEFF{"hook_event_name":"preToolUse","cursor_version":"2026.09.26","tool_name":"Shell"}',
+            encoding: "utf8",
+          });
+          expect(existsSync(marker)).toBe(false);
+          expect(result.status).toBe(0);
+          expect(result.stdout).toBe("{}\n");
+          expect(result.stderr).toBe("");
+        }
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("Cursor 里起的 Claude 会话（只继承了 CURSOR_VERSION）：照旧零输出", () => {
+      const { home, marker } = stubHome();
+      try {
+        const result = spawnSync(runtimeLauncher, ["hook", "report"], {
+          env: { HOME: home, PATH: "/usr/bin:/bin", CURSOR_VERSION: "2026.09.26" },
+          input: '{"hook_event_name":"PreToolUse","tool_name":"Bash"}',
+          encoding: "utf8",
+        });
+        expect(existsSync(marker)).toBe(false);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("hooks.json 里的整条命令经 shell 执行（Claude 的跑法）：等价于直接跑 launcher", () => {
+      const { home, marker } = stubHome();
+      try {
+        const hookConfig = readJson("plugins/agentparty/hooks/hooks.json");
+        const command = (hookConfig.hooks.PreToolUse[0].hooks[0].command as string)
+          .replace("${CLAUDE_PLUGIN_ROOT}", pluginRoot);
+        const unarmed = spawnSync("/bin/sh", ["-c", command], {
+          env: { HOME: home, PATH: "/usr/bin:/bin" },
+          input: '{"hook_event_name":"PreToolUse","tool_name":"Bash"}',
+          encoding: "utf8",
+        });
+        expect(unarmed.status).toBe(0);
+        expect(unarmed.stdout).toBe("");
+        expect(existsSync(marker)).toBe(false);
+        const armed = spawnSync("/bin/sh", ["-c", command], {
+          env: { HOME: home, PATH: "/usr/bin:/bin", AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: "1" },
+          input: '{"hook_event_name":"SessionStart"}',
+          encoding: "utf8",
+        });
+        expect(existsSync(marker)).toBe(true);
+        expect(armed.stdout).toBe("hook report\n");
       } finally {
         rmSync(home, { recursive: true, force: true });
       }

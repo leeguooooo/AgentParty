@@ -183,6 +183,24 @@ describe("party hook report end-to-end", () => {
     expect(events.map((e) => `${e.tool}:${e.status}`)).toEqual(["Bash:start", "Bash:start", "Bash:failed"]);
   });
 
+  // #1123：Cursor 的 payload 带 UTF-8 BOM 与 cursor_version；空 stdout 会被 Cursor 当非法 JSON 拦下工具。
+  test("a Cursor payload (BOM-prefixed) is still parsed and answered with {}", async () => {
+    const file = runnerActivityFile(tempDir());
+    const r = await runHookReport(
+      "\uFEFF" + JSON.stringify({
+        hook_event_name: "PreToolUse",
+        cursor_version: "2026.09.26",
+        tool_name: "Shell",
+        session_id: "s1",
+      }),
+      file,
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("{}\n");
+    const written = JSON.parse(readFileSync(file, "utf8")) as { tool: string };
+    expect(written.tool).toBe("Shell");
+  });
+
   test("bad JSON stays silent and exits 0 (never blocks the model)", async () => {
     const file = runnerActivityFile(tempDir());
     const r = await runHookReport("this is not json", file);

@@ -138,7 +138,7 @@ function pluginHookArguments(pluginRoot: string, event: string): string[] {
   }
   const handler = handlers[0];
   const expectedArgs = ["hook", event === "Stop" ? "stop-guard" : "report"];
-  const expectedCommand = `"${"${CLAUDE_PLUGIN_ROOT}"}/bin/agentparty-runtime" ${expectedArgs.join(" ")}`;
+  const expectedCommand = `sh "${"${CLAUDE_PLUGIN_ROOT}"}/bin/agentparty-runtime" ${expectedArgs.join(" ")}`;
   if (
     typeof handler !== "object" || handler === null ||
     (handler as { type?: unknown }).type !== "command" ||
