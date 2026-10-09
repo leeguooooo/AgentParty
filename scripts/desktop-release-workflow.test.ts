@@ -12,7 +12,7 @@ const workflowDocument = Bun.YAML.parse(workflow) as {
   jobs: {
     release: {
       concurrency?: { group?: string; "cancel-in-progress"?: boolean };
-      steps: Array<{ name?: string; run?: string }>;
+      steps: Array<{ name?: string; if?: string; run?: string }>;
     };
   };
 };
@@ -335,6 +335,27 @@ describe("desktop release workflow", () => {
     const syntax = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
     expect(syntax.status).toBe(0);
     expect(syntax.stderr).toBe("");
+  });
+
+  test("bridges the ad-hoc preview channel to production releases only", () => {
+    const steps = workflowDocument.jobs.release.steps;
+    const publishIndex = steps.findIndex((step) => step.name === "publish isolated desktop updater channel");
+    const bridgeIndex = steps.findIndex((step) => step.name === "bridge ad-hoc preview channel to production");
+    expect(bridgeIndex).toBeGreaterThan(publishIndex);
+    const bridge = steps[bridgeIndex];
+    expect(bridge.if).toBe("steps.desktop-distribution.outputs.distribution == 'production'");
+    const script = bridge.run ?? "";
+    expect(script).toContain('manifest="dist/latest-v2.json"');
+    expect(script).toContain('gh release upload desktop-preview "$manifest"');
+    expect(script).not.toContain("dist/latest.json");
+    expect(script).toContain('--check-not-older-than "$current_version" "$candidate_version"');
+    expect(script).toContain('cmp --silent "$manifest" "$bridge_dir/verify/latest-v2.json"');
+    expect(script).toContain('grep -Fxq latest-v2.json <<<"$preview_assets"');
+    expect(script).not.toContain("2>/dev/null; then");
+    expect(script).toContain("trap restore_preview_manifest ERR");
+    expect(script).toContain('gh release upload desktop-preview "$backup"');
+    const syntax = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
+    expect(syntax.status).toBe(0);
   });
 
   test("serializes fixed-channel publication and restores verified manifests on failure", () => {

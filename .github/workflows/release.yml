@@ -1252,3 +1252,57 @@ jobs:
             cmp --silent "$manifest" "$verification_dir/$manifest_name"
           done
           trap - ERR
+
+      # Ad-hoc preview builds (desktop-preview endpoint) stopped once Apple signing secrets were
+      # configured, which left those installs on their last preview version forever. Both channels
+      # pin the same v2 updater key, so point the preview channel at each production release; the
+      # app already warns preview users that this update may need one Keychain authorization.
+      - name: bridge ad-hoc preview channel to production
+        if: steps.desktop-distribution.outputs.distribution == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="dist/latest-v2.json"
+          if [ ! -s "$manifest" ]; then
+            echo "::warning::no v2 updater manifest; preview channel left unchanged"
+            exit 0
+          fi
+          if ! gh release view desktop-preview --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "preview channel does not exist; nothing to bridge"
+            exit 0
+          fi
+          candidate_version="$(jq -er '.version | strings' "$manifest")"
+          bridge_dir="$RUNNER_TEMP/desktop-preview-bridge"
+          rm -rf "$bridge_dir"
+          mkdir -p "$bridge_dir/backup" "$bridge_dir/verify"
+          # Only a confirmed-absent manifest may skip the version check; any lookup or download
+          # error fails the step so a rerun of an old release can never move the channel backwards.
+          preview_assets="$(gh release view desktop-preview --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          backup=""
+          if grep -Fxq latest-v2.json <<<"$preview_assets"; then
+            gh release download desktop-preview --repo "$GITHUB_REPOSITORY" \
+              --pattern latest-v2.json --output "$bridge_dir/backup/latest-v2.json"
+            backup="$bridge_dir/backup/latest-v2.json"
+            current_version="$(jq -er '.version | strings' "$backup")"
+            bun scripts/release-version.ts --check-not-older-than "$current_version" "$candidate_version"
+          fi
+
+          restore_preview_manifest() {
+            trap - ERR
+            set +e
+            echo "::warning::preview channel bridge failed; restoring the previous manifest"
+            if [ -n "$backup" ]; then
+              gh release upload desktop-preview "$backup" --repo "$GITHUB_REPOSITORY" --clobber \
+                || echo "::error::failed to restore desktop-preview latest-v2.json"
+            fi
+            exit 1
+          }
+          trap restore_preview_manifest ERR
+
+          gh release upload desktop-preview "$manifest" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release download desktop-preview --repo "$GITHUB_REPOSITORY" \
+            --pattern latest-v2.json --output "$bridge_dir/verify/latest-v2.json"
+          cmp --silent "$manifest" "$bridge_dir/verify/latest-v2.json"
+          trap - ERR
+          echo "preview channel now offers production $candidate_version"
