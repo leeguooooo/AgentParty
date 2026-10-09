@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { agentpartyHome } from "./config";
+import { fsyncDirectory } from "./directory-fsync";
 
 export type DeliveryRecoveryPhase =
   | "claimed"
@@ -58,27 +59,6 @@ interface DeliveryRecoveryFile {
 }
 
 const MAX_RECOVERY_ENTRIES = 64;
-
-function unsupportedDirectoryFsync(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const code = (error as { code?: unknown }).code;
-  return code === "EINVAL" ||
-    code === "ENOTSUP" ||
-    code === "EOPNOTSUPP" ||
-    code === "ENOSYS";
-}
-
-function fsyncDirectory(path: string): void {
-  let fd: number | null = null;
-  try {
-    fd = openSync(path, "r");
-    fsyncSync(fd);
-  } catch (error) {
-    if (!unsupportedDirectoryFsync(error)) throw error;
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
-}
 
 /**
  * Commit the recovery WAL through the actual storage boundary: fsync the

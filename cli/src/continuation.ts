@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { fsyncDirectory } from "./directory-fsync";
 
 export const RUNNER_CONTINUATIONS_DIR = "continuations";
 
@@ -72,12 +73,6 @@ function isSqliteBusy(error: unknown): boolean {
     (typeof body.message === "string" && /database is (?:locked|busy)/i.test(body.message));
 }
 
-function isUnsupportedDirectoryFsync(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const code = (error as { code?: unknown }).code;
-  return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "ENOSYS";
-}
-
 /** Cross-process serialization for continuation read-modify-rename transactions. */
 export function withRunnerContinuationLock<T>(
   path: string,
@@ -135,17 +130,8 @@ function writeRunnerContinuationUnlocked(path: string, state: RunnerContinuation
     closeSync(fd);
     fd = null;
     renameSync(temporary, path);
-    let directoryFd: number | null = null;
-    try {
-      directoryFd = openSync(directory, "r");
-      fsyncSync(directoryFd);
-    } catch (error) {
-      // Some platforms/filesystems do not support fsync on a directory descriptor. Only that
-      // explicit capability gap is safe to ignore; ENOSPC/EIO/EACCES must fail the commit.
-      if (!isUnsupportedDirectoryFsync(error)) throw error;
-    } finally {
-      if (directoryFd !== null) closeSync(directoryFd);
-    }
+    // Unsupported directory fsync (and Windows, #1128) is tolerated; ENOSPC/EIO/EACCES still fail.
+    fsyncDirectory(directory);
   } finally {
     if (fd !== null) closeSync(fd);
     if (existsSync(temporary)) rmSync(temporary, { force: true });
