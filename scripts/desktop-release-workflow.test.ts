@@ -350,6 +350,10 @@ describe("desktop release workflow", () => {
     expect(script).not.toContain("dist/latest.json");
     expect(script).toContain('--check-not-older-than "$current_version" "$candidate_version"');
     expect(script).toContain('cmp --silent "$manifest" "$bridge_dir/verify/latest-v2.json"');
+    expect(script).toContain('grep -Fxq latest-v2.json <<<"$preview_assets"');
+    expect(script).not.toContain("2>/dev/null; then");
+    expect(script).toContain("trap restore_preview_manifest ERR");
+    expect(script).toContain('gh release upload desktop-preview "$backup"');
     const syntax = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
     expect(syntax.status).toBe(0);
   });
