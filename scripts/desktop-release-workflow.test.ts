@@ -12,7 +12,7 @@ const workflowDocument = Bun.YAML.parse(workflow) as {
   jobs: {
     release: {
       concurrency?: { group?: string; "cancel-in-progress"?: boolean };
-      steps: Array<{ name?: string; run?: string }>;
+      steps: Array<{ name?: string; if?: string; run?: string }>;
     };
   };
 };
