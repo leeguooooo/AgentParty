@@ -1252,3 +1252,37 @@ jobs:
             cmp --silent "$manifest" "$verification_dir/$manifest_name"
           done
           trap - ERR
+
+      # Ad-hoc preview builds (desktop-preview endpoint) stopped once Apple signing secrets were
+      # configured, which left those installs on their last preview version forever. Both channels
+      # pin the same v2 updater key, so point the preview channel at each production release; the
+      # app already warns preview users that this update may need one Keychain authorization.
+      - name: bridge ad-hoc preview channel to production
+        if: steps.desktop-distribution.outputs.distribution == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="dist/latest-v2.json"
+          if [ ! -s "$manifest" ]; then
+            echo "::warning::no v2 updater manifest; preview channel left unchanged"
+            exit 0
+          fi
+          if ! gh release view desktop-preview --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "preview channel does not exist; nothing to bridge"
+            exit 0
+          fi
+          candidate_version="$(jq -er '.version | strings' "$manifest")"
+          bridge_dir="$RUNNER_TEMP/desktop-preview-bridge"
+          rm -rf "$bridge_dir"
+          mkdir -p "$bridge_dir/current" "$bridge_dir/verify"
+          if gh release download desktop-preview --repo "$GITHUB_REPOSITORY" \
+            --pattern latest-v2.json --output "$bridge_dir/current/latest-v2.json" 2>/dev/null; then
+            current_version="$(jq -er '.version | strings' "$bridge_dir/current/latest-v2.json")"
+            bun scripts/release-version.ts --check-not-older-than "$current_version" "$candidate_version"
+          fi
+          gh release upload desktop-preview "$manifest" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release download desktop-preview --repo "$GITHUB_REPOSITORY" \
+            --pattern latest-v2.json --output "$bridge_dir/verify/latest-v2.json"
+          cmp --silent "$manifest" "$bridge_dir/verify/latest-v2.json"
+          echo "preview channel now offers production $candidate_version"
