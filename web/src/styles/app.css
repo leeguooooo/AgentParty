@@ -6444,6 +6444,7 @@ button.org-person-name {
 }
 .gate-hint::before { content: "$ "; color: var(--t-accent); }
 .gate-lang { margin-top: 20px; }
+.gate-byline { margin-top: 12px; font-size: 12px; opacity: 0.7; }
 
 /* ---- 外部协作者邀请落地页（#593）：频道 + 预设昵称预览 ---- */
 .invite-preview {

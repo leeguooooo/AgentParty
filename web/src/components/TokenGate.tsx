@@ -2,6 +2,7 @@
 import { useState } from "react";
 import type { AuthProviderConfig } from "../lib/oidc";
 import { useT } from "../i18n/useT";
+import { useLocale } from "../i18n/locale";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import "../i18n/strings/App";
 import "../i18n/strings/TokenGate";
@@ -16,6 +17,7 @@ interface Props {
 export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
   const [value, setValue] = useState("");
   const t = useT();
+  const { locale } = useLocale();
 
   return (
     <main className="gate">
@@ -79,6 +81,16 @@ export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
       <div className="gate-lang">
         <LanguageSwitcher />
       </div>
+      <p className="gate-byline">
+        {t("TokenGate.bylineBy")}
+        <a href={locale === "zh" ? "https://leeguoo.com/about" : "https://leeguoo.com/about/en"} rel="author">
+          {t("TokenGate.bylineAuthor")}
+        </a>
+        {t("TokenGate.bylineAlias")}
+        <a href={locale === "zh" ? "https://blog.leeguoo.com/zh/" : "https://blog.leeguoo.com/en/"}>
+          {t("TokenGate.bylineBlog")}
+        </a>
+      </p>
     </main>
   );
 }
