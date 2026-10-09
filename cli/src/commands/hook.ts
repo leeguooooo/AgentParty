@@ -215,7 +215,16 @@ async function readStdin(maxBytes: number): Promise<string> {
     chunks.push(buf);
     if (total >= maxBytes) break;
   }
-  return Buffer.concat(chunks).toString("utf8", 0, Math.min(total, maxBytes));
+  // Cursor 经 PowerShell `Get-Content -Raw` 喂 payload，开头带 UTF-8 BOM（#1123）；JSON.parse 不认它。
+  return Buffer.concat(chunks).toString("utf8", 0, Math.min(total, maxBytes)).replace(/^\uFEFF/, "");
+}
+
+/**
+ * Cursor 的 CLI 会导入已启用的 Claude 插件并跑它们的 hook（#1123），但它的契约不同：
+ * exit 0 + 空 stdout 被当成非法 JSON，于是工具调用被拦下。它的 payload 带 `cursor_version`。
+ */
+export function isCursorHookPayload(record: Record<string, unknown>): boolean {
+  return typeof record.cursor_version === "string";
 }
 
 export function activityTargetFile(
@@ -1853,11 +1862,13 @@ async function unfinishedClaudeChannelEntries(record: Record<string, unknown>): 
 
 async function runHookInput(blockStop: boolean): Promise<number> {
   let emittedStopDecision = false;
+  let cursorPayload = false;
   try {
     const raw = await readStdin(MAX_STDIN_BYTES);
     const payload = JSON.parse(raw) as unknown;
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return 0;
     const record = payload as Record<string, unknown>;
+    cursorPayload = isCursorHookPayload(record);
     recordClaudeSessionLifecycle(record);
     if (!blockStop || record.hook_event_name !== "Stop" || record.stop_hook_active !== false) {
       reportHookPayload(record);
@@ -1910,7 +1921,9 @@ async function runHookInput(blockStop: boolean): Promise<number> {
     // Codex requires every successful Stop hook to return JSON, including a no-op allow.
     // Claude also accepts the empty object as a no-decision result. Report hooks keep the
     // historical zero-byte stdout contract; only stop-guard reaches this branch.
-    if (blockStop && !emittedStopDecision) emitHookLine("{}");
+    // Cursor (#1123) blocks the tool call on an empty stdout, so a Cursor payload always gets the
+    // no-op object; Claude's report hooks still keep zero-byte stdout.
+    if ((blockStop || cursorPayload) && !emittedStopDecision) emitHookLine("{}");
   }
   return 0;
 }

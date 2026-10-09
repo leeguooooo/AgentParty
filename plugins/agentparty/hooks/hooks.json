@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -53,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -76,7 +76,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -98,7 +98,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -109,7 +109,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -120,7 +120,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -131,7 +131,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook stop-guard",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook stop-guard",
             "timeout": 10
           }
         ]
@@ -142,7 +142,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 10
           }
         ]
@@ -153,7 +153,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\" hook report",
             "timeout": 3
           }
         ]

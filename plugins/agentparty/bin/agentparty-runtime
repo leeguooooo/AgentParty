@@ -24,9 +24,23 @@ fail() {
 # 模型上下文，非零退出会阻断模型的工具调用。Codex 的 Stop hook 是例外：成功时必须返回
 # JSON，所以未武装的 stop-guard 用 shell 内建 printf 返回一个无决策对象。这条早退路径仍然
 # 不碰磁盘、不启动任何进程。
+#
+# #1123：Cursor 的 CLI 会导入已启用的 Claude 插件并跑这些 hook，但它把「exit 0 + 空 stdout」
+# 当成非法 JSON、直接拦下工具调用，必须回 `{}` 才算放行。Cursor 给 hook 设 CURSOR_VERSION，
+# payload 里带 `cursor_version`。只有前者存在时才花一次 `cat` 读 payload 确认（环境变量会被
+# Cursor 里起的其它进程继承，不能单凭它判；而 Claude 会话的 payload 没有这个字段，照旧零输出）。
 case "${1:-}" in
   hook)
     if [ "${AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN:-}" != "1" ] && [ -z "${AP_ACTIVITY_FILE:-}" ]; then
+      if [ -n "${CURSOR_VERSION:-}" ]; then
+        cursor_payload="$(cat 2>/dev/null || true)"
+        case "$cursor_payload" in
+          *'"cursor_version"'*)
+            printf '%s\n' '{}'
+            exit 0
+            ;;
+        esac
+      fi
       if [ "${2:-}" = "stop-guard" ]; then
         printf '%s\n' '{}'
       fi

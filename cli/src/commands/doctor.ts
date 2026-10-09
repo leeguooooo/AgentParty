@@ -442,10 +442,13 @@ export function inspectClaudePluginBundle(
     if (!record(hooks) || !record(hooks.hooks)) return fail("hooks/hooks.json 不是一个带 hooks 的对象");
     for (const event of REQUIRED_HOOK_EVENTS) {
       const entries = hooks.hooks[event];
-      const hookCommand = `"${CLAUDE_RUNTIME_COMMAND}" hook ${event === "Stop" ? "stop-guard" : "report"}`;
+      const hookCommand = `sh "${CLAUDE_RUNTIME_COMMAND}" hook ${event === "Stop" ? "stop-guard" : "report"}`;
+      // #1123 起 hook 命令带 `sh` 前缀（Cursor/PowerShell 不会再把无扩展名 launcher 交给「打开方式」）。
+      // 之前的包没有前缀：新 CLI 碰上旧插件不能判它坏掉——同 #1096，那会给出一条修不好的 remedy。
+      const accepted = [hookCommand, hookCommand.slice("sh ".length)];
       if (!Array.isArray(entries) || entries.length !== 1 || !record(entries[0]) ||
           !Array.isArray(entries[0].hooks) || entries[0].hooks.length !== 1 ||
-          !record(entries[0].hooks[0]) || entries[0].hooks[0].command !== hookCommand ||
+          !record(entries[0].hooks[0]) || !accepted.includes(entries[0].hooks[0].command as string) ||
           entries[0].hooks[0].args !== undefined) {
         return fail(`hooks/hooks.json 的 ${event} 没接到 ${hookCommand}`);
       }

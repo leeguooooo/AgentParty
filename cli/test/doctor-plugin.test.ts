@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { PresenceEntry } from "@agentparty/shared";
@@ -162,6 +162,24 @@ describe("party doctor claude-plugin", () => {
       // 「普通文件」这一半在 Windows 上照样要守：launcher 没了就不是可执行文件。
       rmSync(join(copy, "bin/agentparty-runtime"));
       expect(inspectClaudePluginBundle(entry, "win32").valid).toBe(false);
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
+  });
+
+  // #1123：hook 命令加了 `sh` 前缀；新 CLI 碰上前缀之前的插件包不能判它坏掉（同 #1096）。
+  test("accepts both the sh-prefixed hook command and the pre-#1123 form, nothing else", () => {
+    const copy = mkdtempSync(join(tmpdir(), "agentparty-doctor-hooks-"));
+    try {
+      cpSync(pluginRoot, copy, { recursive: true });
+      const hooksPath = join(copy, "hooks/hooks.json");
+      const shipped = readFileSync(hooksPath, "utf8");
+      expect(shipped).toContain('"sh \\"${CLAUDE_PLUGIN_ROOT}/bin/agentparty-runtime\\" hook');
+      const entry = { ...pluginEntry, installPath: copy };
+      writeFileSync(hooksPath, shipped.replaceAll('"sh \\"', '"\\"'));
+      expect(inspectClaudePluginBundle(entry)).toEqual({ valid: true, launcherExecutable: true });
+      writeFileSync(hooksPath, shipped.replaceAll('"sh \\"', '"bash -c \\"'));
+      expect(inspectClaudePluginBundle(entry).valid).toBe(false);
     } finally {
       rmSync(copy, { recursive: true, force: true });
     }
