@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { chmodSync, cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import type { PresenceEntry } from "@agentparty/shared";
 import type { Identity } from "../src/rest";
 import {
@@ -145,6 +146,25 @@ describe("party doctor claude-plugin", () => {
         agentparty: { ...shippedMcpServers.agentparty, command: "/usr/local/bin/evil" },
       },
     }).valid).toBe(false);
+  });
+
+  // #1127：Windows 的 lstat 永远不报执行位。用一份 0644 的 launcher 模拟那里看到的 mode。
+  test("does not demand Unix execute bits on Windows, but still does elsewhere", () => {
+    const copy = mkdtempSync(join(tmpdir(), "agentparty-doctor-win-"));
+    try {
+      cpSync(pluginRoot, copy, { recursive: true });
+      chmodSync(join(copy, "bin/agentparty-runtime"), 0o644);
+      const entry = { ...pluginEntry, installPath: copy };
+      expect(inspectClaudePluginBundle(entry, "win32")).toEqual({ valid: true, launcherExecutable: true });
+      const posix = inspectClaudePluginBundle(entry, "linux");
+      expect(posix.valid).toBe(false);
+      expect(posix.launcherExecutable).toBe(false);
+      // 「普通文件」这一半在 Windows 上照样要守：launcher 没了就不是可执行文件。
+      rmSync(join(copy, "bin/agentparty-runtime"));
+      expect(inspectClaudePluginBundle(entry, "win32").valid).toBe(false);
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
   });
 
   // #1096：插件与 CLI 同版时 `claude plugin update` 只会回 already latest——它不能是修法。

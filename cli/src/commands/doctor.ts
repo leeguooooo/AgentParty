@@ -404,13 +404,20 @@ function expectedMcpServers(root: string, manifest: Record<string, unknown>): Re
  *
  * 不过就带上 `reason` 说清是哪一项——「插件坏了」这四个字对修它的人毫无用处（#1096）。
  */
-export function inspectClaudePluginBundle(plugin: InstalledClaudePlugin): ClaudePluginBundleInspection {
+export function inspectClaudePluginBundle(
+  plugin: InstalledClaudePlugin,
+  platform: NodeJS.Platform = process.platform,
+): ClaudePluginBundleInspection {
   let launcherExecutable = false;
   try {
     const root = realpathSync(plugin.installPath);
     const launcher = resolve(root, "bin/agentparty-runtime");
     const stat = lstatSync(launcher);
-    launcherExecutable = stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o111) !== 0;
+    // #1127：Windows 的 lstat 从不给普通文件报 Unix 执行位，(mode & 0o111) 恒为 0，于是每台
+    // Windows 都被判 plugin_bundle_invalid、重装也修不好。那里能判的只有「是普通文件、不是链接」；
+    // 真正执行它的是 Git Bash（看 shebang，不看执行位）。同 codex-trust-gate 的处理。
+    launcherExecutable = stat.isFile() && !stat.isSymbolicLink() &&
+      (platform === "win32" || (stat.mode & 0o111) !== 0);
     const fail = (reason: string): ClaudePluginBundleInspection => ({ valid: false, launcherExecutable, reason });
     if (!launcherExecutable) return fail("bin/agentparty-runtime 不是一个可执行的普通文件");
     const manifest = json(resolve(root, ".claude-plugin/plugin.json"));
