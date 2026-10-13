@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@agentparty/shared": "workspace:*",
-    "@anthropic-ai/claude-agent-sdk": "^0.3.287",
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "zod": "^4.6.5"
   },
   "peerDependencies": {
