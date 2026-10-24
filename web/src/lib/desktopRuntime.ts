@@ -31,6 +31,11 @@ interface NotificationListener {
   unregister(): Promise<void>;
 }
 
+interface NotificationActionEvent {
+  extra?: Record<string, unknown>;
+  notification?: { extra?: Record<string, unknown> } | null;
+}
+
 interface NotificationModule {
   isPermissionGranted(): Promise<boolean>;
   requestPermission(): Promise<Exclude<DesktopNotificationPermission, "unsupported">>;
@@ -40,7 +45,7 @@ interface NotificationModule {
     body: string;
     extra?: Record<string, unknown>;
   }): void;
-  onAction(handler: (notification: { extra?: Record<string, unknown> }) => void): Promise<NotificationListener>;
+  onAction(handler: (event: NotificationActionEvent) => void): Promise<NotificationListener>;
   // 枚举已投递的通知 / 按 id 精确删除（issue #399）。旧壳可能没有这两条命令，标可选、调用侧兜底。
   active?(): Promise<Array<{ id: number; extra?: Record<string, unknown> }>>;
   removeActive?(notifications: Array<{ id: number }>): Promise<void>;
@@ -234,7 +239,9 @@ export async function listenForDesktopNotificationActions(
   if (!isDesktopRuntime()) return () => {};
   try {
     const notification = await dependencies.loadNotification();
-    const listener = await notification.onAction(({ extra }) => {
+    const listener = await notification.onAction((event) => {
+      // New notification plugins wrap the payload; older desktop shells send it directly.
+      const extra = event.notification?.extra ?? event.extra;
       const slug = extra?.slug;
       const seq = extra?.seq;
       if (

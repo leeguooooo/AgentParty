@@ -307,7 +307,7 @@ describe("desktop notifications", () => {
   });
 
   test("delivers validated notification actions and unregisters the native listener", async () => {
-    let actionHandler: ((notification: { extra?: Record<string, unknown> }) => void) | null = null;
+    let actionHandler: Parameters<NotificationModule["onAction"]>[0] | null = null;
     let unregistered = false;
     const actions: Array<{ slug: string; seq: number }> = [];
     __setDesktopRuntimeDependenciesForTests({
@@ -322,6 +322,10 @@ describe("desktop notifications", () => {
 
     const stop = await listenForDesktopNotificationActions((action) => actions.push(action));
     actionHandler?.({ extra: { slug: "general", seq: 42 } });
+    actionHandler?.({ notification: { extra: { slug: "general", seq: 43 } } });
+    actionHandler?.({ notification: null });
+    actionHandler?.({ notification: {} });
+    actionHandler?.({ notification: { extra: { slug: "../admin", seq: 44 } } });
     actionHandler?.({ extra: { slug: "../admin", seq: 43 } });
     actionHandler?.({ extra: { slug: "general", seq: 0 } });
     actionHandler?.({ extra: { slug: "general", seq: 1.5 } });
@@ -330,7 +334,7 @@ describe("desktop notifications", () => {
     stop();
     await Promise.resolve();
 
-    expect(actions).toEqual([{ slug: "general", seq: 42 }]);
+    expect(actions).toEqual([{ slug: "general", seq: 42 }, { slug: "general", seq: 43 }]);
     expect(unregistered).toBe(true);
   });
 });
